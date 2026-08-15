@@ -4,6 +4,8 @@ Handles RTC token issuance and Agora Conversational AI (Gemini Live MLLM) lifecy
 """
 
 import base64
+import copy
+import json
 import logging
 import os
 import re
@@ -82,6 +84,11 @@ class StartAgentRequest(BaseModel):
     description="Gemini Live voice personality (Puck, Charon, Aoede, Fenrir, Kore)",
     examples=["Puck"],
   )
+  model: str = Field(
+    default="gemini-2.0-flash-exp",
+    description="Gemini Live model version",
+    examples=["gemini-2.0-flash-exp", "gemini-3.1-flash-live-preview"],
+  )
   system_prompt: str | None = Field(
     default=None,
     description="Custom system instructions for the conversational agent",
@@ -99,6 +106,25 @@ class StopAgentRequest(BaseModel):
     default=None,
     description="Agent session ID (if known; otherwise resolved from active channel registry)",
   )
+
+
+def sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
+  """Create a safe-to-log copy of the request payload with secrets redacted."""
+  sanitized = copy.deepcopy(payload)
+  if "properties" in sanitized and isinstance(sanitized["properties"], dict):
+    if "token" in sanitized["properties"]:
+      sanitized["properties"]["token"] = "[REDACTED_RTC_TOKEN]"
+    if "mllm" in sanitized["properties"] and isinstance(
+      sanitized["properties"]["mllm"], dict
+    ):
+      if "api_key" in sanitized["properties"]["mllm"]:
+        sanitized["properties"]["mllm"]["api_key"] = "[REDACTED_GEMINI_KEY]"
+    if "llm" in sanitized["properties"] and isinstance(
+      sanitized["properties"]["llm"], dict
+    ):
+      if "api_key" in sanitized["properties"]["llm"]:
+        sanitized["properties"]["llm"]["api_key"] = "[REDACTED_GEMINI_KEY]"
+  return sanitized
 
 
 @router.post(
@@ -244,6 +270,7 @@ async def start_conversational_agent(
 
   prompt = (request.system_prompt or DEFAULT_EMERGENCY_PROMPT).strip()
 
+  # Official Agora ConvoAI REST v2 Join Schema (properties-nested mllm)
   payload = {
     "name": f"tocsin_agent_{channel_name}",
     "properties": {
@@ -253,21 +280,12 @@ async def start_conversational_agent(
       "remote_rtc_uids": ["*"],
       "enable_string_uid": False,
       "idle_timeout": 120,
-    },
-    "mllm": {
-      "vendor": "gemini_live",
-      "params": {
+      "mllm": {
+        "vendor": "gemini_live",
+        "model": request.model,
         "api_key": gemini_key,
-        "model": "gemini-2.0-flash-exp",
         "instructions": prompt,
         "voice": request.voice,
-      },
-      "turn_detection": {
-        "mode": "agora_vad",
-        "agora_vad_config": {
-          "prefix_pad_ms": 300,
-          "silence_duration_ms": 800,
-        },
       },
     },
   }
@@ -276,14 +294,20 @@ async def start_conversational_agent(
     f"https://api.agora.io/api/conversational-ai-agent/v2/projects/{app_id}/join"
   )
 
+  # Redacted logging of outbound request for inspection
+  sanitized = sanitize_payload(payload)
   logger.info(
-    f"Dispatching start-agent to Agora REST API for channel '{channel_name}',"
-    f" agent_uid {request.agent_uid}"
+    f"Outgoing start-agent request to Agora URL: {agora_url}\nPayload:"
+    f" {json.dumps(sanitized, indent=2)}"
   )
 
   try:
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=12.0) as client:
       resp = await client.post(agora_url, json=payload, headers=headers)
+      logger.info(
+        f"Agora ConvoAI join response HTTP {resp.status_code}: {resp.text}"
+      )
+
       if resp.status_code not in (200, 201):
         err_msg = resp.text
         logger.error(
