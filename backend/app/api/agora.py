@@ -1,8 +1,9 @@
 """
 Agora Voice & Conversational AI Agent Endpoints
-Handles RTC token issuance and agent session lifecycle.
+Handles RTC token issuance and Agora Conversational AI (Gemini Live MLLM) lifecycle.
 """
 
+import base64
 import logging
 import os
 import re
@@ -11,6 +12,7 @@ from typing import Any, Literal
 
 from agora_token_builder import RtcTokenBuilder
 from fastapi import APIRouter, HTTPException, status
+import httpx
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger("tocsin.api.agora")
@@ -20,152 +22,384 @@ router = APIRouter(prefix="/api/agora", tags=["Agora Voice"])
 # Regex for safe Agora channel name (alphanumeric, underscore, dash)
 CHANNEL_NAME_REGEX = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
 
+# In-memory registry of active agent IDs per channel
+ACTIVE_AGENTS: dict[str, str] = {}
+
+DEFAULT_EMERGENCY_PROMPT = (
+  "You are Tocsin, a real-time voice AI emergency disaster coordinator. "
+  "You are speaking to responders and citizens in an active crisis situation. "
+  "Be calm, concise, professional, and direct. Keep your spoken responses short (1-3 sentences), "
+  "prioritize safety and triage, verify details before giving recommendations, and communicate clearly."
+)
+
 
 class GenerateTokenRequest(BaseModel):
-    channel_name: str = Field(
-        min_length=1,
-        max_length=64,
-        description="Target Agora voice channel identifier (alphanumeric, -, _)",
-        examples=["emergency-room-01"],
-    )
-    uid: int | str = Field(
-        default=0,
-        description="Numeric user ID (0 for auto-assign) or account string",
-        examples=[1001],
-    )
-    role: Literal["publisher", "subscriber"] = Field(
-        default="publisher",
-        description="RTC role in the voice channel",
-    )
-    expire_seconds: int = Field(
-        default=3600,
-        ge=60,
-        le=86400,
-        description="Token expiration duration in seconds",
-    )
+  channel_name: str = Field(
+    min_length=1,
+    max_length=64,
+    description="Target Agora voice channel identifier (alphanumeric, -, _)",
+    examples=["tocsin-emergency-room"],
+  )
+  uid: int | str = Field(
+    default=0,
+    description="Numeric user ID (0 for auto-assign) or account string",
+    examples=[1001],
+  )
+  role: Literal["publisher", "subscriber"] = Field(
+    default="publisher",
+    description="RTC role in the voice channel",
+  )
+  expire_seconds: int = Field(
+    default=3600,
+    ge=60,
+    le=86400,
+    description="Token expiration duration in seconds",
+  )
 
 
 class TokenResponse(BaseModel):
-    token: str
-    app_id: str
-    channel_name: str
-    uid: int | str
-    expires_in_seconds: int
+  token: str
+  app_id: str
+  channel_name: str
+  uid: int | str
+  expires_in_seconds: int
 
 
 class StartAgentRequest(BaseModel):
-    channel_name: str = Field(min_length=1, max_length=64)
-    agent_uid: int | str = Field(default=9999)
-    language: str = Field(default="en-US")
-    system_prompt: str | None = None
-    mcp_server_url: str | None = None
+  channel_name: str = Field(
+    min_length=1,
+    max_length=64,
+    description="Target Agora voice channel to join the agent into",
+    examples=["tocsin-emergency-room"],
+  )
+  agent_uid: int = Field(
+    default=9999,
+    description="Numeric RTC UID for the agent participant in the channel",
+    examples=[9999],
+  )
+  voice: str = Field(
+    default="Puck",
+    description="Gemini Live voice personality (Puck, Charon, Aoede, Fenrir, Kore)",
+    examples=["Puck"],
+  )
+  system_prompt: str | None = Field(
+    default=None,
+    description="Custom system instructions for the conversational agent",
+  )
+
+
+class StopAgentRequest(BaseModel):
+  channel_name: str = Field(
+    min_length=1,
+    max_length=64,
+    description="Target Agora voice channel",
+    examples=["tocsin-emergency-room"],
+  )
+  agent_id: str | None = Field(
+    default=None,
+    description="Agent session ID (if known; otherwise resolved from active channel registry)",
+  )
 
 
 @router.post(
-    "/token",
-    response_model=TokenResponse,
-    summary="Generate Agora RTC Token",
-    description="Generates a short-lived RTC authentication token for client voice channel connection.",
+  "/token",
+  response_model=TokenResponse,
+  summary="Generate Agora RTC Token",
+  description="Generates a short-lived RTC authentication token for client voice channel connection.",
 )
 async def generate_rtc_token(request: GenerateTokenRequest) -> TokenResponse:
-    """Generate short-lived Agora RTC token."""
-    channel_name = request.channel_name.strip()
-    if not CHANNEL_NAME_REGEX.match(channel_name):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid channel_name format. Must be 1-64 characters matching [a-zA-Z0-9_-].",
-        )
+  """Generate short-lived Agora RTC token."""
+  channel_name = request.channel_name.strip()
+  if not CHANNEL_NAME_REGEX.match(channel_name):
+    raise HTTPException(
+      status_code=status.HTTP_400_BAD_REQUEST,
+      detail=(
+        "Invalid channel_name format. Must be 1-64 characters matching"
+        " [a-zA-Z0-9_-]."
+      ),
+    )
 
-    app_id = os.getenv("AGORA_APP_ID", "").strip()
-    app_certificate = os.getenv("AGORA_APP_CERTIFICATE", "").strip()
+  app_id = os.getenv("AGORA_APP_ID", "").strip()
+  app_certificate = os.getenv("AGORA_APP_CERTIFICATE", "").strip()
 
-    if not app_id or not app_certificate:
-        logger.error("Agora App ID or Certificate is missing from server configuration.")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Agora credentials not configured on backend server.",
-        )
+  if not app_id or not app_certificate:
+    logger.error(
+      "Agora App ID or Certificate is missing from server configuration."
+    )
+    raise HTTPException(
+      status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+      detail="Agora credentials not configured on backend server.",
+    )
 
-    current_timestamp = int(time.time())
-    privilege_expired_ts = current_timestamp + request.expire_seconds
-    role_constant = 1 if request.role == "publisher" else 2  # 1: Role_Publisher, 2: Role_Subscriber
+  current_timestamp = int(time.time())
+  privilege_expired_ts = current_timestamp + request.expire_seconds
+  role_constant = (
+    1 if request.role == "publisher" else 2
+  )  # 1: Role_Publisher, 2: Role_Subscriber
 
-    try:
-        if isinstance(request.uid, int):
-            token = RtcTokenBuilder.buildTokenWithUid(
-                appId=app_id,
-                appCertificate=app_certificate,
-                channelName=channel_name,
-                uid=request.uid,
-                role=role_constant,
-                privilegeExpiredTs=privilege_expired_ts,
-            )
-        else:
-            token = RtcTokenBuilder.buildTokenWithAccount(
-                appId=app_id,
-                appCertificate=app_certificate,
-                channelName=channel_name,
-                account=str(request.uid),
-                role=role_constant,
-                privilegeExpiredTs=privilege_expired_ts,
-            )
+  try:
+    if isinstance(request.uid, int):
+      token = RtcTokenBuilder.buildTokenWithUid(
+        appId=app_id,
+        appCertificate=app_certificate,
+        channelName=channel_name,
+        uid=request.uid,
+        role=role_constant,
+        privilegeExpiredTs=privilege_expired_ts,
+      )
+    else:
+      token = RtcTokenBuilder.buildTokenWithAccount(
+        appId=app_id,
+        appCertificate=app_certificate,
+        channelName=channel_name,
+        account=str(request.uid),
+        role=role_constant,
+        privilegeExpiredTs=privilege_expired_ts,
+      )
 
-        logger.info(
-            f"Generated RTC token for channel '{channel_name}', uid '{request.uid}', role '{request.role}'"
-        )
-        return TokenResponse(
-            token=token,
-            app_id=app_id,
-            channel_name=channel_name,
-            uid=request.uid,
-            expires_in_seconds=request.expire_seconds,
-        )
-    except (ValueError, TypeError, KeyError, RuntimeError) as exc:
-        logger.error(f"Failed to generate RTC token: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to generate RTC token.",
-        )
+    logger.info(
+      f"Generated RTC token for channel '{channel_name}', uid '{request.uid}',"
+      f" role '{request.role}'"
+    )
+    return TokenResponse(
+      token=token,
+      app_id=app_id,
+      channel_name=channel_name,
+      uid=request.uid,
+      expires_in_seconds=request.expire_seconds,
+    )
+  except (ValueError, TypeError, KeyError, RuntimeError) as exc:
+    logger.error(f"Failed to generate RTC token: {exc}")
+    raise HTTPException(
+      status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+      detail="Failed to generate RTC token.",
+    )
 
 
 @router.post(
-    "/start-agent",
-    summary="Start Agora Conversational AI Agent (Sub-step 3 Stub)",
-    description="Launches Agora Gemini Live AI Voice Agent into the specified channel. Blocked pending Agora REST Customer ID/Secret.",
+  "/start-agent",
+  summary="Start Agora Conversational AI Agent (Gemini Live MLLM)",
+  description="Launches a Google Gemini Live AI Voice Agent into the specified Agora RTC voice channel via Agora REST API v2.",
 )
-async def start_conversational_agent(request: StartAgentRequest) -> dict[str, Any]:
-    """
-    Sub-step 3 Stub:
-    Calls Agora Voice Agent Builder / Conversational AI Engine REST API:
-    - mllm.provider = "gemini"
-    - mllm.api_key = GEMINI_API_KEY
-    - mcp_servers = [mcp_server_url]
-    - turn_detection = agora_vad
-    """
-    customer_id = os.getenv("AGORA_CUSTOMER_ID", "").strip()
-    customer_secret = os.getenv("AGORA_CUSTOMER_SECRET", "").strip()
-    gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+async def start_conversational_agent(
+  request: StartAgentRequest,
+) -> dict[str, Any]:
+  """Calls Agora Conversational AI Engine REST API to join Gemini Live MLLM into the channel."""
+  channel_name = request.channel_name.strip()
+  if not CHANNEL_NAME_REGEX.match(channel_name):
+    raise HTTPException(
+      status_code=status.HTTP_400_BAD_REQUEST,
+      detail=(
+        "Invalid channel_name format. Must be 1-64 characters matching"
+        " [a-zA-Z0-9_-]."
+      ),
+    )
 
-    if not customer_id or not customer_secret:
-        logger.warning("Sub-step 3 invoked without AGORA_CUSTOMER_ID/SECRET.")
+  app_id = os.getenv("AGORA_APP_ID", "").strip()
+  app_certificate = os.getenv("AGORA_APP_CERTIFICATE", "").strip()
+  customer_id = os.getenv("AGORA_CUSTOMER_ID", "").strip()
+  customer_secret = os.getenv("AGORA_CUSTOMER_SECRET", "").strip()
+  gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+
+  if not app_id or not app_certificate:
+    raise HTTPException(
+      status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+      detail="AGORA_APP_ID and AGORA_APP_CERTIFICATE are not configured.",
+    )
+
+  if not customer_id or not customer_secret:
+    raise HTTPException(
+      status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+      detail=(
+        "AGORA_CUSTOMER_ID and AGORA_CUSTOMER_SECRET are not configured on the"
+        " backend server."
+      ),
+    )
+
+  if not gemini_key:
+    raise HTTPException(
+      status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+      detail="GEMINI_API_KEY is not configured on the backend server.",
+    )
+
+  # Generate short-lived RTC token specifically for the agent participant
+  expire_seconds = 3600
+  current_timestamp = int(time.time())
+  agent_token = RtcTokenBuilder.buildTokenWithUid(
+    appId=app_id,
+    appCertificate=app_certificate,
+    channelName=channel_name,
+    uid=request.agent_uid,
+    role=1,  # Role_Publisher
+    privilegeExpiredTs=current_timestamp + expire_seconds,
+  )
+
+  # Construct Basic Auth header
+  auth_str = f"{customer_id}:{customer_secret}"
+  b64_auth = base64.b64encode(auth_str.encode("utf-8")).decode("utf-8")
+  headers = {
+    "Authorization": f"Basic {b64_auth}",
+    "Content-Type": "application/json",
+  }
+
+  prompt = (request.system_prompt or DEFAULT_EMERGENCY_PROMPT).strip()
+
+  payload = {
+    "name": f"tocsin_agent_{channel_name}",
+    "properties": {
+      "channel": channel_name,
+      "token": agent_token,
+      "agent_rtc_uid": str(request.agent_uid),
+      "remote_rtc_uids": ["*"],
+      "enable_string_uid": False,
+      "idle_timeout": 120,
+    },
+    "mllm": {
+      "vendor": "gemini_live",
+      "params": {
+        "api_key": gemini_key,
+        "model": "gemini-2.0-flash-exp",
+        "instructions": prompt,
+        "voice": request.voice,
+      },
+      "turn_detection": {
+        "mode": "agora_vad",
+        "agora_vad_config": {
+          "prefix_pad_ms": 300,
+          "silence_duration_ms": 800,
+        },
+      },
+    },
+  }
+
+  agora_url = (
+    f"https://api.agora.io/api/conversational-ai-agent/v2/projects/{app_id}/join"
+  )
+
+  logger.info(
+    f"Dispatching start-agent to Agora REST API for channel '{channel_name}',"
+    f" agent_uid {request.agent_uid}"
+  )
+
+  try:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+      resp = await client.post(agora_url, json=payload, headers=headers)
+      if resp.status_code not in (200, 201):
+        err_msg = resp.text
+        logger.error(
+          f"Agora ConvoAI join failed (HTTP {resp.status_code}): {err_msg}"
+        )
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "Agora Conversational AI Agent REST credentials (AGORA_CUSTOMER_ID and AGORA_CUSTOMER_SECRET) "
-                "are not configured. Sub-step 3 is waiting on Agora Console credentials."
-            ),
+          status_code=status.HTTP_502_BAD_GATEWAY,
+          detail=(
+            f"Agora Conversational AI service error (HTTP {resp.status_code}):"
+            f" {err_msg}"
+          ),
         )
 
-    if not gemini_key:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="GEMINI_API_KEY is not configured.",
-        )
+      data = resp.json()
+      agent_id = (
+        data.get("agent_id")
+        or data.get("id")
+        or f"agent_{channel_name}_{request.agent_uid}"
+      )
+      ACTIVE_AGENTS[channel_name] = agent_id
 
-    # Note on MCP URL: Agora cloud service requires a publicly reachable URL (e.g. ngrok or deployed host)
-    # rather than internal Docker hostname (http://mock-services:8001).
+      logger.info(
+        f"Agora Conversational AI agent started successfully (agent_id:"
+        f" {agent_id}) for channel '{channel_name}'"
+      )
+      return {
+        "status": "started",
+        "agent_id": agent_id,
+        "channel_name": channel_name,
+        "agent_uid": request.agent_uid,
+        "mllm_provider": "gemini_live",
+        "voice": request.voice,
+      }
+  except httpx.HTTPError as exc:
+    logger.error(f"Network error connecting to Agora ConvoAI REST API: {exc}")
+    raise HTTPException(
+      status_code=status.HTTP_502_BAD_GATEWAY,
+      detail=f"Network error communicating with Agora REST API: {exc}",
+    )
+
+
+@router.post(
+  "/stop-agent",
+  summary="Stop Agora Conversational AI Agent",
+  description="Stops an active Agora Gemini Live AI Voice Agent session in the specified channel.",
+)
+async def stop_conversational_agent(request: StopAgentRequest) -> dict[str, Any]:
+  """Calls Agora Conversational AI Engine REST API to remove the agent from the channel."""
+  channel_name = request.channel_name.strip()
+  agent_id = request.agent_id or ACTIVE_AGENTS.get(channel_name)
+
+  app_id = os.getenv("AGORA_APP_ID", "").strip()
+  customer_id = os.getenv("AGORA_CUSTOMER_ID", "").strip()
+  customer_secret = os.getenv("AGORA_CUSTOMER_SECRET", "").strip()
+
+  if not agent_id:
     return {
-        "status": "ready_for_substep_3",
-        "channel_name": request.channel_name,
-        "mllm_provider": "gemini",
+      "status": "not_running",
+      "message": f"No active agent registered for channel '{channel_name}'.",
+      "channel_name": channel_name,
     }
+
+  auth_str = f"{customer_id}:{customer_secret}"
+  b64_auth = base64.b64encode(auth_str.encode("utf-8")).decode("utf-8")
+  headers = {
+    "Authorization": f"Basic {b64_auth}",
+    "Content-Type": "application/json",
+  }
+
+  agora_url = f"https://api.agora.io/api/conversational-ai-agent/v2/projects/{app_id}/agents/{agent_id}/leave"
+
+  logger.info(
+    f"Dispatching stop-agent to Agora REST API for agent '{agent_id}' in channel"
+    f" '{channel_name}'"
+  )
+
+  try:
+    async with httpx.AsyncClient(timeout=8.0) as client:
+      resp = await client.post(agora_url, headers=headers)
+      if resp.status_code in (200, 204):
+        ACTIVE_AGENTS.pop(channel_name, None)
+        logger.info(f"Agent '{agent_id}' stopped successfully.")
+        return {
+          "status": "stopped",
+          "agent_id": agent_id,
+          "channel_name": channel_name,
+        }
+      else:
+        logger.warning(
+          f"Agora leave returned HTTP {resp.status_code}: {resp.text}"
+        )
+        ACTIVE_AGENTS.pop(channel_name, None)
+        return {
+          "status": "stopped_with_warning",
+          "agent_id": agent_id,
+          "detail": resp.text,
+        }
+  except httpx.HTTPError as exc:
+    logger.error(f"Failed to communicate with Agora stop-agent endpoint: {exc}")
+    ACTIVE_AGENTS.pop(channel_name, None)
+    return {
+      "status": "stopped_locally",
+      "agent_id": agent_id,
+      "warning": str(exc),
+    }
+
+
+@router.get(
+  "/agent-status/{channel_name}",
+  summary="Get Active Agent Status",
+  description="Checks whether an active Conversational AI agent is registered for the specified channel.",
+)
+async def get_agent_status(channel_name: str) -> dict[str, Any]:
+  agent_id = ACTIVE_AGENTS.get(channel_name)
+  return {
+    "channel_name": channel_name,
+    "has_active_agent": bool(agent_id),
+    "agent_id": agent_id,
+  }

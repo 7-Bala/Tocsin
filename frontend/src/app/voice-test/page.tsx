@@ -15,6 +15,8 @@ type ConnectionState =
 
 type VadModelStatus = 'UNLOADED' | 'LOADING' | 'READY' | 'ERROR';
 
+type AgentStatus = 'STOPPED' | 'STARTING' | 'RUNNING' | 'STOPPING' | 'ERROR';
+
 export default function VoiceTestPage() {
   const [channelName, setChannelName] = useState('tocsin-emergency-room');
   const [connectionState, setConnectionState] =
@@ -24,6 +26,10 @@ export default function VoiceTestPage() {
   const [speechProbability, setSpeechProbability] = useState(0);
   const [rawAmplitude, setRawAmplitude] = useState(0);
   const [vadStatus, setVadStatus] = useState<VadModelStatus>('UNLOADED');
+  const [agentStatus, setAgentStatus] = useState<AgentStatus>('STOPPED');
+  const [agentId, setAgentId] = useState<string | null>(null);
+  const [selectedVoice, setSelectedVoice] = useState('Puck');
+  const [remoteAgentPresent, setRemoteAgentPresent] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [tokenDetails, setTokenDetails] = useState<{
     uid?: number | string;
@@ -86,6 +92,7 @@ export default function VoiceTestPage() {
     setTokenDetails(null);
     setIsMuted(false);
     isMutedRef.current = false;
+    setRemoteAgentPresent(false);
   }, [addLog]);
 
   useEffect(() => {
@@ -144,6 +151,10 @@ export default function VoiceTestPage() {
       // Handle remote audio subscriptions
       client.on('user-published', async (user, mediaType) => {
         addLog(`Remote participant joined: UID ${user.uid} (${mediaType})`);
+        if (Number(user.uid) === 9999) {
+          setRemoteAgentPresent(true);
+          addLog('✨ [Agora ConvoAI] Gemini Live Agent (UID 9999) joined and is publishing audio!');
+        }
         await client.subscribe(user, mediaType);
         if (mediaType === 'audio' && user.audioTrack) {
           user.audioTrack.play();
@@ -157,6 +168,11 @@ export default function VoiceTestPage() {
 
       client.on('user-left', (user, reason) => {
         addLog(`Remote participant left: UID ${user.uid} (${reason})`);
+        if (Number(user.uid) === 9999) {
+          setRemoteAgentPresent(false);
+          setAgentStatus('STOPPED');
+          addLog('ℹ️ Gemini Live Agent (UID 9999) left the channel.');
+        }
       });
 
       // Join channel with token
@@ -190,11 +206,11 @@ export default function VoiceTestPage() {
         baseAssetPath: '/vad/',
         onnxWASMBasePath: '/vad/',
         model: 'v5',
-        positiveSpeechThreshold: 0.5, // Standard Silero neural speech confidence threshold
+        positiveSpeechThreshold: 0.5,
         negativeSpeechThreshold: 0.35,
-        minSpeechMs: 100, // Low latency speech start detection
+        minSpeechMs: 100,
         preSpeechPadMs: 300,
-        redemptionMs: 400, // Smooth transition back to idle
+        redemptionMs: 400,
         onSpeechStart: () => {
           if (!isMutedRef.current) {
             setIsSpeaking(true);
@@ -261,6 +277,65 @@ export default function VoiceTestPage() {
     addLog(`Microphone ${nextState ? 'Muted' : 'Unmuted'}`);
   };
 
+  const handleStartAgent = async () => {
+    try {
+      setAgentStatus('STARTING');
+      addLog(`Calling POST /api/agora/start-agent for channel '${channelName}' (voice: ${selectedVoice})...`);
+
+      const res = await fetch(`${API_BASE_URL}/api/agora/start-agent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel_name: channelName.trim(),
+          agent_uid: 9999,
+          voice: selectedVoice,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `Agent start failed with HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      setAgentId(data.agent_id);
+      setAgentStatus('RUNNING');
+      addLog(`✅ Gemini Live Agent dispatched! Session ID: ${data.agent_id}. Waiting for agent to join voice channel...`);
+    } catch (err: any) {
+      setAgentStatus('ERROR');
+      addLog(`Agent start failed: ${err.message}`);
+    }
+  };
+
+  const handleStopAgent = async () => {
+    try {
+      setAgentStatus('STOPPING');
+      addLog(`Stopping Gemini Live agent in channel '${channelName}'...`);
+
+      const res = await fetch(`${API_BASE_URL}/api/agora/stop-agent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel_name: channelName.trim(),
+          agent_id: agentId,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `Agent stop failed with HTTP ${res.status}`);
+      }
+
+      setAgentStatus('STOPPED');
+      setAgentId(null);
+      setRemoteAgentPresent(false);
+      addLog('Agent stopped successfully.');
+    } catch (err: any) {
+      setAgentStatus('ERROR');
+      addLog(`Agent stop failed: ${err.message}`);
+    }
+  };
+
   return (
     <main
       style={{
@@ -300,7 +375,7 @@ export default function VoiceTestPage() {
             textTransform: 'uppercase',
           }}
         >
-          Milestone 4 • Silero Neural VAD
+          Milestone 4 • Agora + Gemini Live Proof of Concept
         </span>
       </header>
 
@@ -334,10 +409,10 @@ export default function VoiceTestPage() {
                 marginBottom: '0.25rem',
               }}
             >
-              Agora RTC + Neural Voice Activity Detection
+              Voice Room & Gemini Live Agent
             </h1>
             <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-              Silero VAD neural network running in WASM worker — classifies acoustic speech vs ambient noise.
+              Real-time Agora WebRTC channel with Silero Neural VAD and Gemini Live AI Voice Agent.
             </p>
           </div>
 
@@ -456,6 +531,138 @@ export default function VoiceTestPage() {
             )}
           </div>
         </div>
+
+        {/* Gemini Live Agent Control Card */}
+        {connectionState === 'CONNECTED' && (
+          <div
+            style={{
+              padding: '1.5rem',
+              borderRadius: '12px',
+              border: '1px solid rgba(88, 166, 255, 0.3)',
+              backgroundColor: 'rgba(88, 166, 255, 0.05)',
+              marginBottom: '1.5rem',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '1rem',
+              }}
+            >
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <span style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                    🤖 Gemini Live Conversational AI Agent
+                  </span>
+                  <span
+                    style={{
+                      padding: '0.2rem 0.5rem',
+                      borderRadius: '4px',
+                      fontSize: '0.75rem',
+                      fontWeight: 700,
+                      backgroundColor: remoteAgentPresent
+                        ? 'rgba(63, 185, 80, 0.2)'
+                        : agentStatus === 'STARTING'
+                        ? 'rgba(210, 153, 34, 0.2)'
+                        : 'rgba(255, 255, 255, 0.1)',
+                      color: remoteAgentPresent
+                        ? 'var(--accent-green)'
+                        : agentStatus === 'STARTING'
+                        ? '#d29922'
+                        : 'var(--text-secondary)',
+                    }}
+                  >
+                    {remoteAgentPresent
+                      ? '● AGENT IN ROOM (UID 9999)'
+                      : agentStatus === 'STARTING'
+                      ? '● JOINING...'
+                      : '● IDLE / NOT JOINED'}
+                  </span>
+                </div>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+                  Uses Google Gemini Live MLLM with Agora ConvoAI Engine (multimodal bi-directional voice).
+                </p>
+              </div>
+
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                <select
+                  value={selectedVoice}
+                  onChange={(e) => setSelectedVoice(e.target.value)}
+                  disabled={agentStatus === 'RUNNING' || agentStatus === 'STARTING'}
+                  style={{
+                    padding: '0.5rem 0.75rem',
+                    borderRadius: '6px',
+                    border: '1px solid var(--border)',
+                    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+                    color: 'var(--text-primary)',
+                    fontSize: '0.85rem',
+                  }}
+                >
+                  <option value="Puck">Voice: Puck (Energetic)</option>
+                  <option value="Charon">Voice: Charon (Authoritative)</option>
+                  <option value="Aoede">Voice: Aoede (Calm)</option>
+                  <option value="Fenrir">Voice: Fenrir (Direct)</option>
+                  <option value="Kore">Voice: Kore (Clear)</option>
+                </select>
+
+                {agentStatus === 'RUNNING' || remoteAgentPresent ? (
+                  <button
+                    type="button"
+                    onClick={handleStopAgent}
+                    disabled={agentStatus === 'STOPPING'}
+                    style={{
+                      padding: '0.5rem 1.25rem',
+                      borderRadius: '6px',
+                      border: 'none',
+                      backgroundColor: 'var(--accent-red)',
+                      color: '#fff',
+                      fontWeight: 600,
+                      fontSize: '0.85rem',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {agentStatus === 'STOPPING' ? 'Stopping...' : 'Stop Agent'}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleStartAgent}
+                    disabled={agentStatus === 'STARTING'}
+                    style={{
+                      padding: '0.5rem 1.25rem',
+                      borderRadius: '6px',
+                      border: 'none',
+                      backgroundColor: 'var(--accent-green)',
+                      color: '#000',
+                      fontWeight: 700,
+                      fontSize: '0.85rem',
+                      cursor: agentStatus === 'STARTING' ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    {agentStatus === 'STARTING' ? 'Launching Agent...' : '▶ Start Gemini Agent'}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {remoteAgentPresent && (
+              <div
+                style={{
+                  padding: '0.75rem 1rem',
+                  borderRadius: '8px',
+                  backgroundColor: 'rgba(63, 185, 80, 0.12)',
+                  border: '1px solid rgba(63, 185, 80, 0.3)',
+                  fontSize: '0.82rem',
+                  color: 'var(--text-primary)',
+                }}
+              >
+                🎙️ <strong>Agent is live in the room!</strong> Speak into your microphone (e.g., <em>&quot;Hello Tocsin, what is the situation report?&quot;</em>) and listen for Gemini Live&apos;s synthesized voice response.
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Silero Neural VAD Speech Activity Display */}
         {connectionState === 'CONNECTED' && (
@@ -587,7 +794,6 @@ export default function VoiceTestPage() {
                   position: 'relative',
                 }}
               >
-                {/* 50% threshold marker */}
                 <div
                   style={{
                     position: 'absolute',
@@ -707,9 +913,9 @@ export default function VoiceTestPage() {
                 style={{
                   marginBottom: '0.35rem',
                   lineHeight: '1.4',
-                  color: log.includes('Error')
+                  color: log.includes('Error') || log.includes('failed')
                     ? 'var(--accent-red)'
-                    : log.includes('speech detected') || log.includes('initialized') || log.includes('Joined')
+                    : log.includes('speech detected') || log.includes('initialized') || log.includes('Joined') || log.includes('dispatched') || log.includes('✨')
                     ? 'var(--accent-green)'
                     : 'var(--text-secondary)',
                 }}
