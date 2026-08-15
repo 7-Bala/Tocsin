@@ -348,7 +348,7 @@ async def start_conversational_agent(
     )
     mcp_config = [
       {
-        "name": "tocsin_emergency_tools",
+        "name": "tocsin-emergency-tools",
         "endpoint": sse_endpoint,
         "transport": "sse",
       }
