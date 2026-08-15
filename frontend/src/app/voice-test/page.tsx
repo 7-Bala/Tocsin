@@ -15,7 +15,7 @@ type ConnectionState =
 
 const MIN_DB = -60.0; // Audio floor in decibels
 const MAX_DB = 0.0; // Peak clipping ceiling in decibels
-const NOISE_GATE_MARGIN_DB = 8.0; // Margin in dB above ambient noise floor to open gate
+const NOISE_GATE_MARGIN_DB = 7.0; // Margin in dB above ambient noise floor to open gate
 
 export default function VoiceTestPage() {
   const [channelName, setChannelName] = useState('tocsin-emergency-room');
@@ -25,8 +25,8 @@ export default function VoiceTestPage() {
   const [isCalibrating, setIsCalibrating] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
   const [currentDb, setCurrentDb] = useState(MIN_DB);
-  const [noiseFloorDb, setNoiseFloorDb] = useState(-52.0);
-  const [gateThresholdDb, setGateThresholdDb] = useState(-44.0);
+  const [noiseFloorDb, setNoiseFloorDb] = useState(-50.0);
+  const [gateThresholdDb, setGateThresholdDb] = useState(-43.0);
   const [logs, setLogs] = useState<string[]>([]);
   const [tokenDetails, setTokenDetails] = useState<{
     uid?: number | string;
@@ -39,8 +39,8 @@ export default function VoiceTestPage() {
   const audioIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const isMutedRef = useRef<boolean>(false);
   const smoothedLevelRef = useRef<number>(0);
-  const noiseFloorDbRef = useRef<number>(-52.0);
-  const gateThresholdDbRef = useRef<number>(-44.0);
+  const noiseFloorDbRef = useRef<number>(-50.0);
+  const gateThresholdDbRef = useRef<number>(-43.0);
 
   const addLog = useCallback((msg: string) => {
     const timestamp = new Date().toLocaleTimeString();
@@ -60,7 +60,7 @@ export default function VoiceTestPage() {
     if (!localAudioTrackRef.current) return;
 
     setIsCalibrating(true);
-    addLog('Calibrating microphone noise floor (measuring 1.5s ambient baseline)...');
+    addLog('Calibrating microphone noise floor (measuring 1.5s ambient baseline with AGC disabled)...');
     setAudioLevel(0);
     smoothedLevelRef.current = 0;
 
@@ -91,7 +91,7 @@ export default function VoiceTestPage() {
       setGateThresholdDb(newGate);
 
       addLog(
-        `Microphone calibrated: Noise floor = ${clampedFloor} dB, Noise gate threshold = ${newGate} dB`
+        `Microphone calibrated: Noise floor = ${clampedFloor} dB, Gate threshold = ${newGate} dB`
       );
     }
 
@@ -142,7 +142,7 @@ export default function VoiceTestPage() {
       clearInterval(audioIntervalRef.current);
     }
 
-    const dt = 0.035; // 35ms loop (~28 FPS)
+    const dt = 0.035; // 35ms loop (~28.5 FPS)
     const attackAlpha = 1 - Math.exp(-dt / 0.05); // ~50ms attack time
     const releaseAlpha = 1 - Math.exp(-dt / 0.25); // ~250ms release time
 
@@ -259,18 +259,18 @@ export default function VoiceTestPage() {
       await client.join(app_id, channel_name, token, uid);
       addLog(`Joined Agora RTC channel '${channel_name}' as UID ${uid}`);
 
-      // Create and publish local microphone audio track
-      addLog('Capturing local microphone stream...');
+      // Create and publish local microphone audio track with AGC DISABLED to prevent gain hunting
+      addLog('Capturing local microphone stream (AEC: enabled, ANS: enabled, AGC: disabled)...');
       const localAudioTrack = await AgoraRTC.createMicrophoneAudioTrack({
         encoderConfig: 'speech_standard',
         AEC: true,
         ANS: true,
-        AGC: true,
+        AGC: false, // Critical: Disable AGC to prevent continuous gain pumping on ambient noise
       });
       localAudioTrackRef.current = localAudioTrack;
 
       await client.publish([localAudioTrack]);
-      addLog('Local microphone published to channel successfully.');
+      addLog('Local microphone published to channel successfully (AGC: off).');
 
       setConnectionState('CONNECTED');
       setIsMuted(false);
@@ -526,7 +526,7 @@ export default function VoiceTestPage() {
                       color: 'var(--text-secondary)',
                     }}
                   >
-                    DECIBEL VU METER
+                    DECIBEL VU METER (AGC: OFF)
                   </span>
                   <span
                     style={{
@@ -556,7 +556,7 @@ export default function VoiceTestPage() {
                     fontFamily: 'monospace',
                   }}
                 >
-                  Raw Level: <strong>{currentDb.toFixed(1)} dB</strong> • Gate:{' '}
+                  Raw: <strong>{currentDb.toFixed(1)} dB</strong> • Gate:{' '}
                   <strong>{gateThresholdDb.toFixed(1)} dB</strong> • Floor:{' '}
                   <strong>{noiseFloorDb.toFixed(1)} dB</strong>
                 </div>
