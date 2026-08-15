@@ -1,0 +1,91 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: tocsin-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: tocsin-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql://tocsin:tocsin_password@postgres:5432/tocsin}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - AGORA_APP_ID=${AGORA_APP_ID:-}
+      - AGORA_APP_CERTIFICATE=${AGORA_APP_CERTIFICATE:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mock-services:
+    build:
+      context: ./mock-services
+      dockerfile: Dockerfile
+    container_name: tocsin-mock-services
+    ports:
+      - "8001:8001"
+    environment:
+      - PORT=8001
+      - HOST=0.0.0.0
+      - BACKEND_URL=http://backend:8000
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: tocsin-postgres
+    environment:
+      POSTGRES_USER: tocsin
+      POSTGRES_PASSWORD: tocsin_password
+      POSTGRES_DB: tocsin
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tocsin -d tocsin"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: tocsin-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:

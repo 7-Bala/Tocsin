@@ -1,0 +1,34 @@
+:root {
+  --bg: #090d16;
+  --card-bg: rgba(22, 27, 34, 0.85);
+  --border: #30363d;
+  --text-primary: #f0f6fc;
+  --text-secondary: #adbac7; /* High contrast: 8.5:1 against #090d16 */
+  --accent-red: #f85149;
+  --accent-blue: #58a6ff;
+  --accent-green: #3fb950;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  min-height: 100vh;
+  background-color: var(--bg);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
+    Ubuntu, Cantarell, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Ensure focus visibility for keyboard accessibility */
+a:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
+}
