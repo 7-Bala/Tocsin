@@ -81,13 +81,13 @@ class StartAgentRequest(BaseModel):
   )
   voice: str = Field(
     default="Puck",
-    description="Gemini Live voice personality (Puck, Charon, Aoede, Fenrir, Kore)",
+    description="Gemini Live voice personality (Puck, Charon, Aoede, Fenrir, Kore, Leda, Orus, Zephyr)",
     examples=["Puck"],
   )
   model: str = Field(
     default="gemini-3.1-flash-live-preview",
-    description="Gemini Live model version",
-    examples=["gemini-3.1-flash-live-preview", "gemini-2.0-flash-exp"],
+    description="Gemini Live model version (official Agora default: gemini-3.1-flash-live-preview)",
+    examples=["gemini-3.1-flash-live-preview"],
   )
   system_prompt: str | None = Field(
     default=None,
@@ -119,11 +119,6 @@ def sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     ):
       if "api_key" in sanitized["properties"]["mllm"]:
         sanitized["properties"]["mllm"]["api_key"] = "[REDACTED_GEMINI_KEY]"
-    if "llm" in sanitized["properties"] and isinstance(
-      sanitized["properties"]["llm"], dict
-    ):
-      if "api_key" in sanitized["properties"]["llm"]:
-        sanitized["properties"]["llm"]["api_key"] = "[REDACTED_GEMINI_KEY]"
   return sanitized
 
 
@@ -270,7 +265,7 @@ async def start_conversational_agent(
 
   prompt = (request.system_prompt or DEFAULT_EMERGENCY_PROMPT).strip()
 
-  # Official Agora ConvoAI REST v2 Join Schema (properties-nested mllm)
+  # Official Agora ConvoAI REST v2 Join Schema (docs.agora.io/en/conversational-ai/models/mllm/gemini)
   payload = {
     "name": f"tocsin_agent_{channel_name}",
     "properties": {
@@ -281,11 +276,32 @@ async def start_conversational_agent(
       "enable_string_uid": False,
       "idle_timeout": 120,
       "mllm": {
-        "vendor": "gemini_live",
-        "model": request.model,
+        "enable": True,
+        "vendor": "gemini",
         "api_key": gemini_key,
-        "instructions": prompt,
-        "voice": request.voice,
+        "params": {
+          "model": request.model,
+          "instructions": prompt,
+          "voice": request.voice,
+          "affective_dialog": False,
+          "proactive_audio": False,
+          "transcribe_agent": True,
+          "transcribe_user": True,
+          "http_options": {"api_version": "v1beta"},
+        },
+        "turn_detection": {
+          "mode": "agora_vad",
+          "agora_vad_config": {
+            "interrupt_duration_ms": 160,
+            "prefix_padding_ms": 800,
+            "silence_duration_ms": 640,
+            "threshold": 0.5,
+          },
+        },
+        "input_modalities": ["audio"],
+        "output_modalities": ["audio"],
+        "greeting_message": "Tocsin emergency coordinator active. How can I assist?",
+        "failure_message": "Sorry, I encountered an issue. Please try again.",
       },
     },
   }
@@ -338,7 +354,7 @@ async def start_conversational_agent(
         "agent_id": agent_id,
         "channel_name": channel_name,
         "agent_uid": request.agent_uid,
-        "mllm_provider": "gemini_live",
+        "mllm_provider": "gemini",
         "voice": request.voice,
       }
   except httpx.HTTPError as exc:

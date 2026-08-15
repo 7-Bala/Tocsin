@@ -135,7 +135,7 @@ async def test_start_agent_success_mocked(monkeypatch):
             assert data["agent_id"] == "agent_session_abc123"
             assert data["channel_name"] == "emergency_test_room"
             assert data["agent_uid"] == 9999
-            assert data["mllm_provider"] == "gemini_live"
+            assert data["mllm_provider"] == "gemini"
 
             # Strict security assertion: zero secrets returned in response
             assert "mock_cert" not in str(data)
