@@ -13,20 +13,17 @@ type ConnectionState =
   | 'CONNECTED'
   | 'ERROR';
 
-const MIN_DBFS = -60.0; // Audio floor in dBFS (Decibels relative to Full Scale)
-const MAX_DBFS = 0.0; // Peak digital full scale in dBFS
-const NOISE_GATE_MARGIN_DB = 6.5; // Adaptive margin in dBFS above ambient floor to open gate
+type VadModelStatus = 'UNLOADED' | 'LOADING' | 'READY' | 'ERROR';
 
 export default function VoiceTestPage() {
   const [channelName, setChannelName] = useState('tocsin-emergency-room');
   const [connectionState, setConnectionState] =
     useState<ConnectionState>('DISCONNECTED');
   const [isMuted, setIsMuted] = useState(false);
-  const [isCalibrating, setIsCalibrating] = useState(false);
-  const [audioLevel, setAudioLevel] = useState(0);
-  const [currentDbFs, setCurrentDbFs] = useState(MIN_DBFS);
-  const [noiseFloorDbFs, setNoiseFloorDbFs] = useState(-52.0);
-  const [gateThresholdDbFs, setGateThresholdDbFs] = useState(-45.5);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [speechProbability, setSpeechProbability] = useState(0);
+  const [rawAmplitude, setRawAmplitude] = useState(0);
+  const [vadStatus, setVadStatus] = useState<VadModelStatus>('UNLOADED');
   const [logs, setLogs] = useState<string[]>([]);
   const [tokenDetails, setTokenDetails] = useState<{
     uid?: number | string;
@@ -36,94 +33,34 @@ export default function VoiceTestPage() {
 
   const rtcClientRef = useRef<any>(null);
   const localAudioTrackRef = useRef<any>(null);
-  const audioIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const vadInstanceRef = useRef<any>(null);
   const isMutedRef = useRef<boolean>(false);
-  const smoothedLevelRef = useRef<number>(0);
-  const noiseFloorDbRef = useRef<number>(-52.0);
-  const gateThresholdDbRef = useRef<number>(-45.5);
-  const rollingHistoryRef = useRef<number[]>([]);
-  const latestRawLinearRef = useRef<number>(0);
+  const ampIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const addLog = useCallback((msg: string) => {
     const timestamp = new Date().toLocaleTimeString();
     setLogs((prev) => [`[${timestamp}] ${msg}`, ...prev.slice(0, 49)]);
   }, []);
 
-  // Convert linear volume [0.0, 1.0] to decibels relative to Full Scale [-60.0, 0.0] dBFS
-  const linearToDbFs = (linearLevel: number): number => {
-    if (linearLevel <= 0.00001) return MIN_DBFS;
-    const db = 20 * Math.log10(linearLevel);
-    return Math.max(MIN_DBFS, Math.min(MAX_DBFS, Math.round(db * 10) / 10));
-  };
-
-  // Perform 3.0s Outlier-Trimmed Median noise floor calibration
-  const runNoiseFloorCalibration = useCallback(async () => {
-    if (!localAudioTrackRef.current) return;
-
-    setIsCalibrating(true);
-    addLog('Calibrating noise floor: sampling 3.0s ambient room audio (trimmed median)...');
-    setAudioLevel(0);
-    smoothedLevelRef.current = 0;
-    rollingHistoryRef.current = [];
-
-    const samples: number[] = [];
-    const sampleInterval = 50; // 50ms interval
-    const totalDuration = 3000; // 3.0 seconds calibration window
-    const sampleCount = Math.floor(totalDuration / sampleInterval);
-
-    for (let i = 0; i < sampleCount; i++) {
-      await new Promise((resolve) => setTimeout(resolve, sampleInterval));
-      if (!localAudioTrackRef.current || isMutedRef.current) break;
-      const raw = latestRawLinearRef.current || localAudioTrackRef.current.getVolumeLevel() || 0.0;
-      const db = linearToDbFs(raw);
-      samples.push(db);
-    }
-
-    if (samples.length >= 10) {
-      // 1. Sort ascending
-      samples.sort((a, b) => a - b);
-
-      // 2. Discard top 10% and bottom 10% as outlier transients
-      const trimCount = Math.max(1, Math.floor(samples.length * 0.1));
-      const trimmed = samples.slice(trimCount, samples.length - trimCount);
-
-      // 3. Compute Median of the remaining 80%
-      const mid = Math.floor(trimmed.length / 2);
-      const medianNoiseFloor =
-        trimmed.length % 2 !== 0
-          ? trimmed[mid]
-          : (trimmed[mid - 1] + trimmed[mid]) / 2;
-
-      // Clamp baseline to realistic room acoustics [-58, -30] dBFS
-      const clampedFloor = Math.max(
-        -58.0,
-        Math.min(-30.0, Math.round(medianNoiseFloor * 10) / 10)
-      );
-      const newGate = Math.min(-15.0, clampedFloor + NOISE_GATE_MARGIN_DB);
-
-      noiseFloorDbRef.current = clampedFloor;
-      gateThresholdDbRef.current = newGate;
-      setNoiseFloorDbFs(clampedFloor);
-      setGateThresholdDbFs(newGate);
-
-      addLog(
-        `Calibrated baseline: Floor = ${clampedFloor} dBFS, Noise Gate = ${newGate} dBFS (from ${trimmed.length} trimmed samples)`
-      );
-    }
-
-    setIsCalibrating(false);
-  }, [addLog]);
-
   const handleLeave = useCallback(async () => {
-    if (audioIntervalRef.current) {
-      clearInterval(audioIntervalRef.current);
-      audioIntervalRef.current = null;
+    if (ampIntervalRef.current) {
+      clearInterval(ampIntervalRef.current);
+      ampIntervalRef.current = null;
     }
-    setAudioLevel(0);
-    setCurrentDbFs(MIN_DBFS);
-    smoothedLevelRef.current = 0;
-    rollingHistoryRef.current = [];
-    latestRawLinearRef.current = 0;
+
+    if (vadInstanceRef.current) {
+      try {
+        if (typeof vadInstanceRef.current.pause === 'function') {
+          await vadInstanceRef.current.pause();
+        }
+        if (typeof vadInstanceRef.current.destroy === 'function') {
+          await vadInstanceRef.current.destroy();
+        }
+      } catch (e: any) {
+        addLog(`VAD teardown warning: ${e.message}`);
+      }
+      vadInstanceRef.current = null;
+    }
 
     if (localAudioTrackRef.current) {
       localAudioTrackRef.current.stop();
@@ -142,10 +79,13 @@ export default function VoiceTestPage() {
     }
 
     setConnectionState('DISCONNECTED');
+    setVadStatus('UNLOADED');
+    setIsSpeaking(false);
+    setSpeechProbability(0);
+    setRawAmplitude(0);
     setTokenDetails(null);
     setIsMuted(false);
     isMutedRef.current = false;
-    setIsCalibrating(false);
   }, [addLog]);
 
   useEffect(() => {
@@ -154,81 +94,6 @@ export default function VoiceTestPage() {
       handleLeave();
     };
   }, [addLog, handleLeave]);
-
-  const startAudioProcessingLoop = useCallback(() => {
-    if (audioIntervalRef.current) {
-      clearInterval(audioIntervalRef.current);
-    }
-
-    const dt = 0.035; // 35ms loop (~28.5 FPS)
-    const attackAlpha = 1 - Math.exp(-dt / 0.05); // ~50ms fast attack
-    const releaseAlpha = 1 - Math.exp(-dt / 0.25); // ~250ms smooth release
-
-    audioIntervalRef.current = setInterval(() => {
-      if (!localAudioTrackRef.current || isMutedRef.current) {
-        setAudioLevel(0);
-        setCurrentDbFs(MIN_DBFS);
-        smoothedLevelRef.current = 0;
-        return;
-      }
-
-      // Read current linear level and convert to dBFS
-      const rawLinear = latestRawLinearRef.current || localAudioTrackRef.current.getVolumeLevel() || 0.0;
-      const db = linearToDbFs(rawLinear);
-      setCurrentDbFs(db);
-
-      // Continuous rolling background noise tracking (last 100 samples ~3.5s)
-      const history = rollingHistoryRef.current;
-      history.push(db);
-      if (history.length > 100) {
-        history.shift();
-      }
-
-      // Asymmetric rolling floor adaptation (slowly adapts to quietest sustained baseline)
-      if (history.length >= 30) {
-        const sorted = [...history].sort((a, b) => a - b);
-        const lowPercentileDb = sorted[Math.floor(sorted.length * 0.15)];
-        // Slow adaptation leak
-        const adaptAlpha = lowPercentileDb < noiseFloorDbRef.current ? 0.015 : 0.003;
-        const adaptedFloor =
-          noiseFloorDbRef.current +
-          adaptAlpha * (lowPercentileDb - noiseFloorDbRef.current);
-        const clampedAdapted = Math.max(-58.0, Math.min(-30.0, Math.round(adaptedFloor * 10) / 10));
-
-        noiseFloorDbRef.current = clampedAdapted;
-        gateThresholdDbRef.current = Math.min(-15.0, clampedAdapted + NOISE_GATE_MARGIN_DB);
-        setNoiseFloorDbFs(clampedAdapted);
-        setGateThresholdDbFs(gateThresholdDbRef.current);
-      }
-
-      let targetPercent = 0;
-      const currentGate = gateThresholdDbRef.current;
-
-      // Noise gate: strictly suppress anything below the gate threshold
-      if (db > currentGate) {
-        // Map dBFS range [gateThreshold, MAX_DBFS (0.0)] to [0, 100]%
-        const normalized = (db - currentGate) / (MAX_DBFS - currentGate);
-        // Apply human perceptual curve (log-linear expansion)
-        targetPercent = Math.min(100, Math.max(0, normalized * 100));
-      }
-
-      // Attack / Release exponential smoothing
-      let currentSmoothed = smoothedLevelRef.current;
-      if (targetPercent > currentSmoothed) {
-        currentSmoothed += attackAlpha * (targetPercent - currentSmoothed);
-      } else {
-        currentSmoothed += releaseAlpha * (targetPercent - currentSmoothed);
-      }
-
-      // Hard floor cutoff for near-zero values to eliminate residual drift
-      if (currentSmoothed < 1.0) {
-        currentSmoothed = 0;
-      }
-
-      smoothedLevelRef.current = currentSmoothed;
-      setAudioLevel(Math.round(currentSmoothed));
-    }, Math.round(dt * 1000));
-  }, []);
 
   const handleJoin = async () => {
     if (!channelName.trim()) {
@@ -265,29 +130,16 @@ export default function VoiceTestPage() {
         channel: channel_name,
         expiresIn: expires_in_seconds,
       });
-      addLog(`Token issued successfully for App ID '${app_id.slice(0, 8)}...'. Initializing Agora client...`);
+      addLog(`Token issued successfully for App ID '${app_id.slice(0, 8)}...'. Joining Agora RTC...`);
 
       setConnectionState('JOINING');
 
-      // Dynamically import AgoraRTC to support SSR safety
+      // 1. Initialize Agora RTC Client
       const AgoraRTC = (await import('agora-rtc-sdk-ng')).default;
-      AgoraRTC.setLogLevel(1); // 1 = WARNING
+      AgoraRTC.setLogLevel(1); // WARNING only
 
       const client = AgoraRTC.createClient({ mode: 'rtc', codec: 'vp8' });
       rtcClientRef.current = client;
-
-      // Enable Agora's official volume indicator event pipeline
-      client.enableAudioVolumeIndicator();
-      client.on('volume-indicator', (volumes) => {
-        // Find local participant volume level
-        for (const v of volumes) {
-          if (v.uid === 0 || v.uid === uid) {
-            // Convert Agora 0-100 level to linear fraction [0.0, 1.0]
-            latestRawLinearRef.current = v.level / 100.0;
-            break;
-          }
-        }
-      });
 
       // Handle remote audio subscriptions
       client.on('user-published', async (user, mediaType) => {
@@ -311,31 +163,79 @@ export default function VoiceTestPage() {
       await client.join(app_id, channel_name, token, uid);
       addLog(`Joined Agora RTC channel '${channel_name}' as UID ${uid}`);
 
-      // Create and publish local microphone audio track with AGC DISABLED to prevent gain hunting
-      addLog('Capturing microphone stream (AEC: on, ANS: on, AGC: off)...');
+      // Create and publish local microphone audio track (AGC disabled for Voice AI fidelity)
+      addLog('Capturing local microphone stream (AEC: on, ANS: on, AGC: off)...');
       const localAudioTrack = await AgoraRTC.createMicrophoneAudioTrack({
         encoderConfig: 'speech_standard',
         AEC: true,
         ANS: true,
-        AGC: false, // Critical: Disable AGC to prevent gain pumping on ambient noise
+        AGC: false,
       });
       localAudioTrackRef.current = localAudioTrack;
 
       await client.publish([localAudioTrack]);
-      addLog('Local microphone published to channel successfully.');
+      addLog('Microphone track published to Agora channel successfully.');
 
       setConnectionState('CONNECTED');
       setIsMuted(false);
       isMutedRef.current = false;
 
-      // Start continuous audio processing loop
-      startAudioProcessingLoop();
+      // 2. Initialize Silero Neural VAD via @ricky0123/vad-web (WASM Worker)
+      setVadStatus('LOADING');
+      addLog('Loading Silero Neural VAD model v5 into WASM worker...');
 
-      // Run automatic initial 3.0s outlier-trimmed median calibration
-      await runNoiseFloorCalibration();
+      const { MicVAD } = await import('@ricky0123/vad-web');
+
+      const myVad = await MicVAD.new({
+        baseAssetPath: '/vad/',
+        onnxWASMBasePath: '/vad/',
+        model: 'v5',
+        positiveSpeechThreshold: 0.5, // Standard Silero neural speech confidence threshold
+        negativeSpeechThreshold: 0.35,
+        minSpeechMs: 100, // Low latency speech start detection
+        preSpeechPadMs: 300,
+        redemptionMs: 400, // Smooth transition back to idle
+        onSpeechStart: () => {
+          if (!isMutedRef.current) {
+            setIsSpeaking(true);
+            addLog('🎙️ [Silero VAD] Human speech detected (neural activation)');
+          }
+        },
+        onSpeechEnd: () => {
+          setIsSpeaking(false);
+          addLog('🔇 [Silero VAD] Speech ended (idle / silence resumed)');
+        },
+        onVADMisfire: () => {
+          setIsSpeaking(false);
+          addLog('⚡ [Silero VAD] Non-speech acoustic transient rejected');
+        },
+        onFrameProcessed: (probabilities) => {
+          if (!isMutedRef.current && probabilities) {
+            const prob = Math.round((probabilities.isSpeech || 0) * 100);
+            setSpeechProbability(prob);
+          } else {
+            setSpeechProbability(0);
+          }
+        },
+      });
+
+      vadInstanceRef.current = myVad;
+      setVadStatus('READY');
+      addLog('✅ [Silero VAD] Neural VAD model initialized and running in off-main-thread WASM worker.');
+
+      // 3. Simple cosmetic amplitude tracker from Agora track for visual liveliness
+      ampIntervalRef.current = setInterval(() => {
+        if (localAudioTrackRef.current && !isMutedRef.current) {
+          const raw = localAudioTrackRef.current.getVolumeLevel() || 0.0;
+          setRawAmplitude(Math.min(100, Math.round(raw * 100)));
+        } else {
+          setRawAmplitude(0);
+        }
+      }, 50);
     } catch (err: any) {
-      addLog(`Join Error: ${err.message || err}`);
+      addLog(`Join/VAD Error: ${err.message || err}`);
       setConnectionState('ERROR');
+      setVadStatus('ERROR');
       handleLeave();
     }
   };
@@ -347,9 +247,16 @@ export default function VoiceTestPage() {
     setIsMuted(nextState);
     isMutedRef.current = nextState;
     if (nextState) {
-      setAudioLevel(0);
-      setCurrentDbFs(MIN_DBFS);
-      smoothedLevelRef.current = 0;
+      setIsSpeaking(false);
+      setSpeechProbability(0);
+      setRawAmplitude(0);
+      if (vadInstanceRef.current && typeof vadInstanceRef.current.pause === 'function') {
+        vadInstanceRef.current.pause();
+      }
+    } else {
+      if (vadInstanceRef.current && typeof vadInstanceRef.current.start === 'function') {
+        vadInstanceRef.current.start();
+      }
     }
     addLog(`Microphone ${nextState ? 'Muted' : 'Unmuted'}`);
   };
@@ -393,7 +300,7 @@ export default function VoiceTestPage() {
             textTransform: 'uppercase',
           }}
         >
-          Milestone 4 • Sub-step 2
+          Milestone 4 • Silero Neural VAD
         </span>
       </header>
 
@@ -427,10 +334,10 @@ export default function VoiceTestPage() {
                 marginBottom: '0.25rem',
               }}
             >
-              Agora RTC Voice Channel Test
+              Agora RTC + Neural Voice Activity Detection
             </h1>
             <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-              Verifies human browser audio connection and token authorization.
+              Silero VAD neural network running in WASM worker — classifies acoustic speech vs ambient noise.
             </p>
           </div>
 
@@ -550,15 +457,22 @@ export default function VoiceTestPage() {
           </div>
         </div>
 
-        {/* Live Audio Controls & Calibrated Activity Meter */}
+        {/* Silero Neural VAD Speech Activity Display */}
         {connectionState === 'CONNECTED' && (
           <div
             style={{
-              padding: '1.25rem',
-              borderRadius: '10px',
-              border: '1px solid var(--border)',
-              backgroundColor: 'rgba(0, 0, 0, 0.25)',
+              padding: '1.5rem',
+              borderRadius: '12px',
+              border: `1px solid ${
+                isSpeaking
+                  ? 'rgba(63, 185, 80, 0.5)'
+                  : 'var(--border)'
+              }`,
+              backgroundColor: isSpeaking
+                ? 'rgba(63, 185, 80, 0.08)'
+                : 'rgba(0, 0, 0, 0.25)',
               marginBottom: '1.5rem',
+              transition: 'all 0.15s ease-out',
             }}
           >
             <div
@@ -566,39 +480,53 @@ export default function VoiceTestPage() {
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center',
-                marginBottom: '0.75rem',
+                marginBottom: '1rem',
               }}
             >
               <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                  {/* Binary Neural Speech Indicator */}
                   <span
                     style={{
-                      fontSize: '0.85rem',
-                      fontWeight: 700,
-                      color: 'var(--text-primary)',
-                      letterSpacing: '0.02em',
-                    }}
-                  >
-                    MIC ACTIVITY
-                  </span>
-                  <span
-                    style={{
+                      padding: '0.35rem 0.85rem',
+                      borderRadius: '6px',
                       fontSize: '0.85rem',
                       fontWeight: 800,
-                      fontFamily: 'monospace',
-                      padding: '0.15rem 0.55rem',
-                      borderRadius: '4px',
+                      letterSpacing: '0.04em',
                       backgroundColor:
-                        audioLevel > 0
-                          ? 'rgba(63, 185, 80, 0.25)'
+                        vadStatus === 'LOADING'
+                          ? 'rgba(210, 153, 34, 0.2)'
+                          : isSpeaking
+                          ? 'var(--accent-green)'
                           : 'rgba(255, 255, 255, 0.08)',
                       color:
-                        audioLevel > 0
-                          ? 'var(--accent-green)'
+                        vadStatus === 'LOADING'
+                          ? '#d29922'
+                          : isSpeaking
+                          ? '#000'
                           : 'var(--text-secondary)',
+                      boxShadow: isSpeaking
+                        ? '0 0 16px rgba(63, 185, 80, 0.4)'
+                        : 'none',
+                      transition: 'all 0.1s ease',
                     }}
                   >
-                    {isCalibrating ? 'CALIBRATING...' : `${audioLevel}%`}
+                    {vadStatus === 'LOADING'
+                      ? '⏳ VAD MODEL LOADING...'
+                      : isSpeaking
+                      ? '🎙️ SPEECH DETECTED'
+                      : '🎧 LISTENING (IDLE)'}
+                  </span>
+
+                  <span
+                    style={{
+                      fontSize: '0.8rem',
+                      fontWeight: 700,
+                      fontFamily: 'monospace',
+                      color: isSpeaking ? 'var(--accent-green)' : 'var(--text-secondary)',
+                    }}
+                  >
+                    Neural Confidence: {speechProbability}%
                   </span>
                 </div>
 
@@ -610,92 +538,115 @@ export default function VoiceTestPage() {
                     fontFamily: 'monospace',
                   }}
                 >
-                  Raw: <strong>{currentDbFs.toFixed(1)} dBFS</strong> • Gate:{' '}
-                  <strong>{gateThresholdDbFs.toFixed(1)} dBFS</strong> • Floor:{' '}
-                  <strong>{noiseFloorDbFs.toFixed(1)} dBFS</strong>
+                  Model: Silero VAD v5 (ONNX/WASM) • Assigned UID: {tokenDetails?.uid}
                 </div>
               </div>
 
-              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                <button
-                  type="button"
-                  onClick={runNoiseFloorCalibration}
-                  disabled={isCalibrating || isMuted}
-                  title="Re-run 3-second noise floor calibration"
-                  style={{
-                    padding: '0.5rem 0.85rem',
-                    borderRadius: '6px',
-                    border: '1px solid var(--border)',
-                    backgroundColor: 'rgba(88, 166, 255, 0.15)',
-                    color: 'var(--accent-blue)',
-                    fontSize: '0.8rem',
-                    fontWeight: 600,
-                    cursor: isCalibrating || isMuted ? 'not-allowed' : 'pointer',
-                  }}
-                >
-                  {isCalibrating ? 'Calibrating...' : '⚡ Recalibrate'}
-                </button>
+              <button
+                type="button"
+                onClick={handleToggleMute}
+                style={{
+                  padding: '0.5rem 1rem',
+                  borderRadius: '6px',
+                  border: '1px solid var(--border)',
+                  backgroundColor: isMuted
+                    ? 'rgba(248, 81, 73, 0.2)'
+                    : 'rgba(63, 185, 80, 0.2)',
+                  color: isMuted ? 'var(--accent-red)' : 'var(--accent-green)',
+                  fontSize: '0.85rem',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                {isMuted ? '🔇 Unmute Mic' : '🎙 Mic Active'}
+              </button>
+            </div>
 
-                <button
-                  type="button"
-                  onClick={handleToggleMute}
+            {/* Neural Probability Meter Bar */}
+            <div style={{ marginBottom: '0.75rem' }}>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  fontSize: '0.7rem',
+                  color: 'var(--text-secondary)',
+                  marginBottom: '0.25rem',
+                  fontWeight: 600,
+                }}
+              >
+                <span>SILERO VAD PROBABILITY</span>
+                <span>Threshold: 50%</span>
+              </div>
+              <div
+                style={{
+                  width: '100%',
+                  height: '10px',
+                  backgroundColor: 'rgba(255, 255, 255, 0.08)',
+                  borderRadius: '5px',
+                  overflow: 'hidden',
+                  position: 'relative',
+                }}
+              >
+                {/* 50% threshold marker */}
+                <div
                   style={{
-                    padding: '0.5rem 0.85rem',
-                    borderRadius: '6px',
-                    border: '1px solid var(--border)',
-                    backgroundColor: isMuted
-                      ? 'rgba(248, 81, 73, 0.2)'
-                      : 'rgba(63, 185, 80, 0.2)',
-                    color: isMuted ? 'var(--accent-red)' : 'var(--accent-green)',
-                    fontSize: '0.8rem',
-                    fontWeight: 600,
-                    cursor: 'pointer',
+                    position: 'absolute',
+                    left: '50%',
+                    top: 0,
+                    bottom: 0,
+                    width: '2px',
+                    backgroundColor: 'rgba(255, 255, 255, 0.25)',
+                    zIndex: 2,
                   }}
-                >
-                  {isMuted ? '🔇 Unmute' : '🎙 Active'}
-                </button>
+                />
+                <div
+                  style={{
+                    width: `${speechProbability}%`,
+                    height: '100%',
+                    backgroundColor:
+                      speechProbability >= 50
+                        ? 'var(--accent-green)'
+                        : 'rgba(88, 166, 255, 0.5)',
+                    transition: 'width 0.04s ease-out',
+                  }}
+                />
               </div>
             </div>
 
-            {/* Audio level meter bar with logarithmic dBFS gating */}
-            <div
-              style={{
-                width: '100%',
-                height: '12px',
-                backgroundColor: 'rgba(255, 255, 255, 0.08)',
-                borderRadius: '6px',
-                overflow: 'hidden',
-                position: 'relative',
-                marginBottom: '0.65rem',
-              }}
-            >
+            {/* Raw Amplitude (Cosmetic activity liveliness) */}
+            <div>
               <div
                 style={{
-                  width: `${isCalibrating ? 0 : audioLevel}%`,
-                  height: '100%',
-                  backgroundColor:
-                    audioLevel > 75
-                      ? 'var(--accent-red)'
-                      : audioLevel > 40
-                      ? 'var(--accent-blue)'
-                      : 'var(--accent-green)',
-                  transition: 'width 0.04s ease-out, background-color 0.15s ease',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  fontSize: '0.7rem',
+                  color: 'var(--text-secondary)',
+                  marginBottom: '0.25rem',
+                  fontWeight: 600,
                 }}
-              />
+              >
+                <span>RAW MICROPHONE AMPLITUDE (COSMETIC)</span>
+                <span>{rawAmplitude}%</span>
+              </div>
+              <div
+                style={{
+                  width: '100%',
+                  height: '6px',
+                  backgroundColor: 'rgba(255, 255, 255, 0.05)',
+                  borderRadius: '3px',
+                  overflow: 'hidden',
+                }}
+              >
+                <div
+                  style={{
+                    width: `${rawAmplitude}%`,
+                    height: '100%',
+                    backgroundColor: 'rgba(173, 186, 199, 0.4)',
+                    transition: 'width 0.05s ease-out',
+                  }}
+                />
+              </div>
             </div>
-
-            {/* Explanatory Unit Subtext */}
-            <p
-              style={{
-                fontSize: '0.72rem',
-                color: 'var(--text-secondary)',
-                margin: 0,
-                lineHeight: '1.4',
-                opacity: 0.85,
-              }}
-            >
-              ℹ️ Measures relative microphone signal level (dBFS), not real-world sound pressure (dB SPL) — used exclusively to detect speech activity, not absolute room loudness.
-            </p>
           </div>
         )}
 
@@ -758,7 +709,7 @@ export default function VoiceTestPage() {
                   lineHeight: '1.4',
                   color: log.includes('Error')
                     ? 'var(--accent-red)'
-                    : log.includes('successfully') || log.includes('Calibrated') || log.includes('Joined')
+                    : log.includes('speech detected') || log.includes('initialized') || log.includes('Joined')
                     ? 'var(--accent-green)'
                     : 'var(--text-secondary)',
                 }}
