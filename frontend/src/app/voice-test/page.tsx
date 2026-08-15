@@ -13,9 +13,9 @@ type ConnectionState =
   | 'CONNECTED'
   | 'ERROR';
 
-const MIN_DB = -60.0; // Audio floor in decibels
-const MAX_DB = 0.0; // Peak clipping ceiling in decibels
-const NOISE_GATE_MARGIN_DB = 7.0; // Margin in dB above ambient noise floor to open gate
+const MIN_DBFS = -60.0; // Audio floor in dBFS (Decibels relative to Full Scale)
+const MAX_DBFS = 0.0; // Peak digital full scale in dBFS
+const NOISE_GATE_MARGIN_DB = 6.5; // Adaptive margin in dBFS above ambient floor to open gate
 
 export default function VoiceTestPage() {
   const [channelName, setChannelName] = useState('tocsin-emergency-room');
@@ -24,9 +24,9 @@ export default function VoiceTestPage() {
   const [isMuted, setIsMuted] = useState(false);
   const [isCalibrating, setIsCalibrating] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
-  const [currentDb, setCurrentDb] = useState(MIN_DB);
-  const [noiseFloorDb, setNoiseFloorDb] = useState(-50.0);
-  const [gateThresholdDb, setGateThresholdDb] = useState(-43.0);
+  const [currentDbFs, setCurrentDbFs] = useState(MIN_DBFS);
+  const [noiseFloorDbFs, setNoiseFloorDbFs] = useState(-52.0);
+  const [gateThresholdDbFs, setGateThresholdDbFs] = useState(-45.5);
   const [logs, setLogs] = useState<string[]>([]);
   const [tokenDetails, setTokenDetails] = useState<{
     uid?: number | string;
@@ -39,59 +39,75 @@ export default function VoiceTestPage() {
   const audioIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const isMutedRef = useRef<boolean>(false);
   const smoothedLevelRef = useRef<number>(0);
-  const noiseFloorDbRef = useRef<number>(-50.0);
-  const gateThresholdDbRef = useRef<number>(-43.0);
+  const noiseFloorDbRef = useRef<number>(-52.0);
+  const gateThresholdDbRef = useRef<number>(-45.5);
+  const rollingHistoryRef = useRef<number[]>([]);
+  const latestRawLinearRef = useRef<number>(0);
 
   const addLog = useCallback((msg: string) => {
     const timestamp = new Date().toLocaleTimeString();
     setLogs((prev) => [`[${timestamp}] ${msg}`, ...prev.slice(0, 49)]);
   }, []);
 
-  // Convert linear volume [0.0, 1.0] to decibels [-60.0, 0.0]
-  const linearToDb = (linearLevel: number): number => {
-    if (linearLevel <= 0.00001) return MIN_DB;
-    // 20 * log10(level)
+  // Convert linear volume [0.0, 1.0] to decibels relative to Full Scale [-60.0, 0.0] dBFS
+  const linearToDbFs = (linearLevel: number): number => {
+    if (linearLevel <= 0.00001) return MIN_DBFS;
     const db = 20 * Math.log10(linearLevel);
-    return Math.max(MIN_DB, Math.min(MAX_DB, Math.round(db * 10) / 10));
+    return Math.max(MIN_DBFS, Math.min(MAX_DBFS, Math.round(db * 10) / 10));
   };
 
-  // Perform 1.5s silence calibration to compute ambient room baseline noise floor
+  // Perform 3.0s Outlier-Trimmed Median noise floor calibration
   const runNoiseFloorCalibration = useCallback(async () => {
     if (!localAudioTrackRef.current) return;
 
     setIsCalibrating(true);
-    addLog('Calibrating microphone noise floor (measuring 1.5s ambient baseline with AGC disabled)...');
+    addLog('Calibrating noise floor: sampling 3.0s ambient room audio (trimmed median)...');
     setAudioLevel(0);
     smoothedLevelRef.current = 0;
+    rollingHistoryRef.current = [];
 
     const samples: number[] = [];
-    const sampleInterval = 50; // 50ms sample rate
-    const totalDuration = 1500; // 1.5s total duration
+    const sampleInterval = 50; // 50ms interval
+    const totalDuration = 3000; // 3.0 seconds calibration window
     const sampleCount = Math.floor(totalDuration / sampleInterval);
 
     for (let i = 0; i < sampleCount; i++) {
       await new Promise((resolve) => setTimeout(resolve, sampleInterval));
       if (!localAudioTrackRef.current || isMutedRef.current) break;
-      const raw = localAudioTrackRef.current.getVolumeLevel() || 0.0;
-      const db = linearToDb(raw);
+      const raw = latestRawLinearRef.current || localAudioTrackRef.current.getVolumeLevel() || 0.0;
+      const db = linearToDbFs(raw);
       samples.push(db);
     }
 
-    if (samples.length > 0) {
-      // Calculate average ambient noise floor in dB
-      const avgNoiseFloor =
-        samples.reduce((acc, val) => acc + val, 0) / samples.length;
-      // Clamp noise floor within realistic ambient range [-58, -25] dB
-      const clampedFloor = Math.max(-58.0, Math.min(-25.0, Math.round(avgNoiseFloor * 10) / 10));
+    if (samples.length >= 10) {
+      // 1. Sort ascending
+      samples.sort((a, b) => a - b);
+
+      // 2. Discard top 10% and bottom 10% as outlier transients
+      const trimCount = Math.max(1, Math.floor(samples.length * 0.1));
+      const trimmed = samples.slice(trimCount, samples.length - trimCount);
+
+      // 3. Compute Median of the remaining 80%
+      const mid = Math.floor(trimmed.length / 2);
+      const medianNoiseFloor =
+        trimmed.length % 2 !== 0
+          ? trimmed[mid]
+          : (trimmed[mid - 1] + trimmed[mid]) / 2;
+
+      // Clamp baseline to realistic room acoustics [-58, -30] dBFS
+      const clampedFloor = Math.max(
+        -58.0,
+        Math.min(-30.0, Math.round(medianNoiseFloor * 10) / 10)
+      );
       const newGate = Math.min(-15.0, clampedFloor + NOISE_GATE_MARGIN_DB);
 
       noiseFloorDbRef.current = clampedFloor;
       gateThresholdDbRef.current = newGate;
-      setNoiseFloorDb(clampedFloor);
-      setGateThresholdDb(newGate);
+      setNoiseFloorDbFs(clampedFloor);
+      setGateThresholdDbFs(newGate);
 
       addLog(
-        `Microphone calibrated: Noise floor = ${clampedFloor} dB, Gate threshold = ${newGate} dB`
+        `Calibrated baseline: Floor = ${clampedFloor} dBFS, Noise Gate = ${newGate} dBFS (from ${trimmed.length} trimmed samples)`
       );
     }
 
@@ -104,8 +120,10 @@ export default function VoiceTestPage() {
       audioIntervalRef.current = null;
     }
     setAudioLevel(0);
-    setCurrentDb(MIN_DB);
+    setCurrentDbFs(MIN_DBFS);
     smoothedLevelRef.current = 0;
+    rollingHistoryRef.current = [];
+    latestRawLinearRef.current = 0;
 
     if (localAudioTrackRef.current) {
       localAudioTrackRef.current.stop();
@@ -143,32 +161,53 @@ export default function VoiceTestPage() {
     }
 
     const dt = 0.035; // 35ms loop (~28.5 FPS)
-    const attackAlpha = 1 - Math.exp(-dt / 0.05); // ~50ms attack time
-    const releaseAlpha = 1 - Math.exp(-dt / 0.25); // ~250ms release time
+    const attackAlpha = 1 - Math.exp(-dt / 0.05); // ~50ms fast attack
+    const releaseAlpha = 1 - Math.exp(-dt / 0.25); // ~250ms smooth release
 
     audioIntervalRef.current = setInterval(() => {
-      if (
-        !localAudioTrackRef.current ||
-        isMutedRef.current
-      ) {
+      if (!localAudioTrackRef.current || isMutedRef.current) {
         setAudioLevel(0);
-        setCurrentDb(MIN_DB);
+        setCurrentDbFs(MIN_DBFS);
         smoothedLevelRef.current = 0;
         return;
       }
 
-      // Read raw linear level [0.0, 1.0] and convert to dB
-      const rawLinear = localAudioTrackRef.current.getVolumeLevel() || 0.0;
-      const db = linearToDb(rawLinear);
-      setCurrentDb(db);
+      // Read current linear level and convert to dBFS
+      const rawLinear = latestRawLinearRef.current || localAudioTrackRef.current.getVolumeLevel() || 0.0;
+      const db = linearToDbFs(rawLinear);
+      setCurrentDbFs(db);
+
+      // Continuous rolling background noise tracking (last 100 samples ~3.5s)
+      const history = rollingHistoryRef.current;
+      history.push(db);
+      if (history.length > 100) {
+        history.shift();
+      }
+
+      // Asymmetric rolling floor adaptation (slowly adapts to quietest sustained baseline)
+      if (history.length >= 30) {
+        const sorted = [...history].sort((a, b) => a - b);
+        const lowPercentileDb = sorted[Math.floor(sorted.length * 0.15)];
+        // Slow adaptation leak
+        const adaptAlpha = lowPercentileDb < noiseFloorDbRef.current ? 0.015 : 0.003;
+        const adaptedFloor =
+          noiseFloorDbRef.current +
+          adaptAlpha * (lowPercentileDb - noiseFloorDbRef.current);
+        const clampedAdapted = Math.max(-58.0, Math.min(-30.0, Math.round(adaptedFloor * 10) / 10));
+
+        noiseFloorDbRef.current = clampedAdapted;
+        gateThresholdDbRef.current = Math.min(-15.0, clampedAdapted + NOISE_GATE_MARGIN_DB);
+        setNoiseFloorDbFs(clampedAdapted);
+        setGateThresholdDbFs(gateThresholdDbRef.current);
+      }
 
       let targetPercent = 0;
       const currentGate = gateThresholdDbRef.current;
 
       // Noise gate: strictly suppress anything below the gate threshold
       if (db > currentGate) {
-        // Map dB range [gateThreshold, MAX_DB (0.0)] to [0, 100]%
-        const normalized = (db - currentGate) / (MAX_DB - currentGate);
+        // Map dBFS range [gateThreshold, MAX_DBFS (0.0)] to [0, 100]%
+        const normalized = (db - currentGate) / (MAX_DBFS - currentGate);
         // Apply human perceptual curve (log-linear expansion)
         targetPercent = Math.min(100, Math.max(0, normalized * 100));
       }
@@ -181,7 +220,7 @@ export default function VoiceTestPage() {
         currentSmoothed += releaseAlpha * (targetPercent - currentSmoothed);
       }
 
-      // Hard floor cutoff for near-zero values to avoid residual visual drift
+      // Hard floor cutoff for near-zero values to eliminate residual drift
       if (currentSmoothed < 1.0) {
         currentSmoothed = 0;
       }
@@ -237,6 +276,19 @@ export default function VoiceTestPage() {
       const client = AgoraRTC.createClient({ mode: 'rtc', codec: 'vp8' });
       rtcClientRef.current = client;
 
+      // Enable Agora's official volume indicator event pipeline
+      client.enableAudioVolumeIndicator();
+      client.on('volume-indicator', (volumes) => {
+        // Find local participant volume level
+        for (const v of volumes) {
+          if (v.uid === 0 || v.uid === uid) {
+            // Convert Agora 0-100 level to linear fraction [0.0, 1.0]
+            latestRawLinearRef.current = v.level / 100.0;
+            break;
+          }
+        }
+      });
+
       // Handle remote audio subscriptions
       client.on('user-published', async (user, mediaType) => {
         addLog(`Remote participant joined: UID ${user.uid} (${mediaType})`);
@@ -260,17 +312,17 @@ export default function VoiceTestPage() {
       addLog(`Joined Agora RTC channel '${channel_name}' as UID ${uid}`);
 
       // Create and publish local microphone audio track with AGC DISABLED to prevent gain hunting
-      addLog('Capturing local microphone stream (AEC: enabled, ANS: enabled, AGC: disabled)...');
+      addLog('Capturing microphone stream (AEC: on, ANS: on, AGC: off)...');
       const localAudioTrack = await AgoraRTC.createMicrophoneAudioTrack({
         encoderConfig: 'speech_standard',
         AEC: true,
         ANS: true,
-        AGC: false, // Critical: Disable AGC to prevent continuous gain pumping on ambient noise
+        AGC: false, // Critical: Disable AGC to prevent gain pumping on ambient noise
       });
       localAudioTrackRef.current = localAudioTrack;
 
       await client.publish([localAudioTrack]);
-      addLog('Local microphone published to channel successfully (AGC: off).');
+      addLog('Local microphone published to channel successfully.');
 
       setConnectionState('CONNECTED');
       setIsMuted(false);
@@ -279,7 +331,7 @@ export default function VoiceTestPage() {
       // Start continuous audio processing loop
       startAudioProcessingLoop();
 
-      // Run automatic initial 1.5s noise floor calibration
+      // Run automatic initial 3.0s outlier-trimmed median calibration
       await runNoiseFloorCalibration();
     } catch (err: any) {
       addLog(`Join Error: ${err.message || err}`);
@@ -296,7 +348,7 @@ export default function VoiceTestPage() {
     isMutedRef.current = nextState;
     if (nextState) {
       setAudioLevel(0);
-      setCurrentDb(MIN_DB);
+      setCurrentDbFs(MIN_DBFS);
       smoothedLevelRef.current = 0;
     }
     addLog(`Microphone ${nextState ? 'Muted' : 'Unmuted'}`);
@@ -498,7 +550,7 @@ export default function VoiceTestPage() {
           </div>
         </div>
 
-        {/* Live Audio Controls & Calibrated Decibel VU Meter */}
+        {/* Live Audio Controls & Calibrated Activity Meter */}
         {connectionState === 'CONNECTED' && (
           <div
             style={{
@@ -514,7 +566,7 @@ export default function VoiceTestPage() {
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center',
-                marginBottom: '1rem',
+                marginBottom: '0.75rem',
               }}
             >
               <div>
@@ -522,22 +574,23 @@ export default function VoiceTestPage() {
                   <span
                     style={{
                       fontSize: '0.85rem',
-                      fontWeight: 600,
-                      color: 'var(--text-secondary)',
+                      fontWeight: 700,
+                      color: 'var(--text-primary)',
+                      letterSpacing: '0.02em',
                     }}
                   >
-                    DECIBEL VU METER (AGC: OFF)
+                    MIC ACTIVITY
                   </span>
                   <span
                     style={{
-                      fontSize: '0.75rem',
-                      fontWeight: 700,
+                      fontSize: '0.85rem',
+                      fontWeight: 800,
                       fontFamily: 'monospace',
-                      padding: '0.15rem 0.45rem',
+                      padding: '0.15rem 0.55rem',
                       borderRadius: '4px',
                       backgroundColor:
                         audioLevel > 0
-                          ? 'rgba(63, 185, 80, 0.2)'
+                          ? 'rgba(63, 185, 80, 0.25)'
                           : 'rgba(255, 255, 255, 0.08)',
                       color:
                         audioLevel > 0
@@ -548,17 +601,18 @@ export default function VoiceTestPage() {
                     {isCalibrating ? 'CALIBRATING...' : `${audioLevel}%`}
                   </span>
                 </div>
+
                 <div
                   style={{
-                    fontSize: '0.8rem',
+                    fontSize: '0.78rem',
                     color: 'var(--text-secondary)',
-                    marginTop: '0.3rem',
+                    marginTop: '0.35rem',
                     fontFamily: 'monospace',
                   }}
                 >
-                  Raw: <strong>{currentDb.toFixed(1)} dB</strong> • Gate:{' '}
-                  <strong>{gateThresholdDb.toFixed(1)} dB</strong> • Floor:{' '}
-                  <strong>{noiseFloorDb.toFixed(1)} dB</strong>
+                  Raw: <strong>{currentDbFs.toFixed(1)} dBFS</strong> • Gate:{' '}
+                  <strong>{gateThresholdDbFs.toFixed(1)} dBFS</strong> • Floor:{' '}
+                  <strong>{noiseFloorDbFs.toFixed(1)} dBFS</strong>
                 </div>
               </div>
 
@@ -567,6 +621,7 @@ export default function VoiceTestPage() {
                   type="button"
                   onClick={runNoiseFloorCalibration}
                   disabled={isCalibrating || isMuted}
+                  title="Re-run 3-second noise floor calibration"
                   style={{
                     padding: '0.5rem 0.85rem',
                     borderRadius: '6px',
@@ -602,15 +657,16 @@ export default function VoiceTestPage() {
               </div>
             </div>
 
-            {/* Audio level meter bar with logarithmic dB gating */}
+            {/* Audio level meter bar with logarithmic dBFS gating */}
             <div
               style={{
                 width: '100%',
-                height: '10px',
+                height: '12px',
                 backgroundColor: 'rgba(255, 255, 255, 0.08)',
-                borderRadius: '5px',
+                borderRadius: '6px',
                 overflow: 'hidden',
                 position: 'relative',
+                marginBottom: '0.65rem',
               }}
             >
               <div
@@ -627,6 +683,19 @@ export default function VoiceTestPage() {
                 }}
               />
             </div>
+
+            {/* Explanatory Unit Subtext */}
+            <p
+              style={{
+                fontSize: '0.72rem',
+                color: 'var(--text-secondary)',
+                margin: 0,
+                lineHeight: '1.4',
+                opacity: 0.85,
+              }}
+            >
+              ℹ️ Measures relative microphone signal level (dBFS), not real-world sound pressure (dB SPL) — used exclusively to detect speech activity, not absolute room loudness.
+            </p>
           </div>
         )}
 
@@ -689,7 +758,7 @@ export default function VoiceTestPage() {
                   lineHeight: '1.4',
                   color: log.includes('Error')
                     ? 'var(--accent-red)'
-                    : log.includes('successfully') || log.includes('calibrated') || log.includes('Joined')
+                    : log.includes('successfully') || log.includes('Calibrated') || log.includes('Joined')
                     ? 'var(--accent-green)'
                     : 'var(--text-secondary)',
                 }}
