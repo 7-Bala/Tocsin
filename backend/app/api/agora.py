@@ -85,9 +85,9 @@ class StartAgentRequest(BaseModel):
     examples=["Puck"],
   )
   model: str = Field(
-    default="gemini-2.0-flash-exp",
+    default="gemini-3.1-flash-live-preview",
     description="Gemini Live model version",
-    examples=["gemini-2.0-flash-exp", "gemini-3.1-flash-live-preview"],
+    examples=["gemini-3.1-flash-live-preview", "gemini-2.0-flash-exp"],
   )
   system_prompt: str | None = Field(
     default=None,
