@@ -86,7 +86,7 @@ class StartAgentRequest(BaseModel):
   )
   model: str = Field(
     default="gemini-3.1-flash-live-preview",
-    description="Gemini Live model version (official Agora default: gemini-3.1-flash-live-preview)",
+    description="Gemini Live model version",
     examples=["gemini-3.1-flash-live-preview"],
   )
   system_prompt: str | None = Field(
@@ -119,6 +119,21 @@ def sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     ):
       if "api_key" in sanitized["properties"]["mllm"]:
         sanitized["properties"]["mllm"]["api_key"] = "[REDACTED_GEMINI_KEY]"
+      if "url" in sanitized["properties"]["mllm"]:
+        raw_url = str(sanitized["properties"]["mllm"]["url"])
+        sanitized["properties"]["mllm"]["url"] = re.sub(
+          r"key=[^&]+", "key=[REDACTED_GEMINI_KEY]", raw_url
+        )
+    if "llm" in sanitized["properties"] and isinstance(
+      sanitized["properties"]["llm"], dict
+    ):
+      if "api_key" in sanitized["properties"]["llm"]:
+        sanitized["properties"]["llm"]["api_key"] = "[REDACTED_GEMINI_KEY]"
+      if "url" in sanitized["properties"]["llm"]:
+        raw_url = str(sanitized["properties"]["llm"]["url"])
+        sanitized["properties"]["llm"]["url"] = re.sub(
+          r"key=[^&]+", "key=[REDACTED_GEMINI_KEY]", raw_url
+        )
   return sanitized
 
 
@@ -264,8 +279,9 @@ async def start_conversational_agent(
   }
 
   prompt = (request.system_prompt or DEFAULT_EMERGENCY_PROMPT).strip()
+  gemini_ws_url = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={gemini_key}"
 
-  # Official Agora ConvoAI REST v2 Join Schema (docs.agora.io/en/conversational-ai/models/mllm/gemini)
+  # Official Agora ConvoAI REST v2 Join Schema (Gemini Live MLLM)
   payload = {
     "name": f"tocsin_agent_{channel_name}",
     "properties": {
@@ -278,6 +294,7 @@ async def start_conversational_agent(
       "mllm": {
         "enable": True,
         "vendor": "gemini",
+        "url": gemini_ws_url,
         "api_key": gemini_key,
         "params": {
           "model": request.model,
