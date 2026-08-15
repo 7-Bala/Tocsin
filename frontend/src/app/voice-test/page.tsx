@@ -13,6 +13,9 @@ type ConnectionState =
   | 'CONNECTED'
   | 'ERROR';
 
+// Ambient noise floor gate: ignore raw volume levels below 5%
+const SILENCE_THRESHOLD = 0.05;
+
 export default function VoiceTestPage() {
   const [channelName, setChannelName] = useState('tocsin-emergency-room');
   const [connectionState, setConnectionState] =
@@ -29,6 +32,7 @@ export default function VoiceTestPage() {
   const rtcClientRef = useRef<any>(null);
   const localAudioTrackRef = useRef<any>(null);
   const audioIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const isMutedRef = useRef<boolean>(false);
 
   const addLog = useCallback((msg: string) => {
     const timestamp = new Date().toLocaleTimeString();
@@ -60,6 +64,8 @@ export default function VoiceTestPage() {
 
     setConnectionState('DISCONNECTED');
     setTokenDetails(null);
+    setIsMuted(false);
+    isMutedRef.current = false;
   }, [addLog]);
 
   useEffect(() => {
@@ -152,16 +158,28 @@ export default function VoiceTestPage() {
 
       setConnectionState('CONNECTED');
       setIsMuted(false);
+      isMutedRef.current = false;
 
-      // Audio volume level monitor
+      // Calibrated Audio Level Meter with Noise Gate & Dynamic Normalization
       audioIntervalRef.current = setInterval(() => {
-        if (localAudioTrackRef.current && !localAudioTrackRef.current.isMuted) {
-          const level = Math.round(localAudioTrackRef.current.getVolumeLevel() * 100);
-          setAudioLevel(level);
+        if (localAudioTrackRef.current && !isMutedRef.current) {
+          // getVolumeLevel() returns normalized float in range [0.0, 1.0]
+          const rawLevel = localAudioTrackRef.current.getVolumeLevel() || 0.0;
+          
+          if (rawLevel <= SILENCE_THRESHOLD) {
+            // Below ambient noise floor: pin strictly to 0
+            setAudioLevel(0);
+          } else {
+            // Normalize above noise floor to [0.0, 1.0]
+            const dynamicRange = (rawLevel - SILENCE_THRESHOLD) / (1.0 - SILENCE_THRESHOLD);
+            // Apply perceptual scaling (human hearing is logarithmic)
+            const scaledPercent = Math.min(100, Math.round(Math.pow(dynamicRange, 0.85) * 100));
+            setAudioLevel(scaledPercent);
+          }
         } else {
           setAudioLevel(0);
         }
-      }, 100);
+      }, 60);
     } catch (err: any) {
       addLog(`Join Error: ${err.message || err}`);
       setConnectionState('ERROR');
@@ -174,6 +192,10 @@ export default function VoiceTestPage() {
     const nextState = !isMuted;
     localAudioTrackRef.current.setEnabled(!nextState);
     setIsMuted(nextState);
+    isMutedRef.current = nextState;
+    if (nextState) {
+      setAudioLevel(0);
+    }
     addLog(`Microphone ${nextState ? 'Muted' : 'Unmuted'}`);
   };
 
@@ -373,7 +395,7 @@ export default function VoiceTestPage() {
           </div>
         </div>
 
-        {/* Live Audio Controls & VU Meter */}
+        {/* Live Audio Controls & Calibrated VU Meter */}
         {connectionState === 'CONNECTED' && (
           <div
             style={{
@@ -393,16 +415,31 @@ export default function VoiceTestPage() {
               }}
             >
               <div>
-                <span
-                  style={{
-                    fontSize: '0.85rem',
-                    fontWeight: 600,
-                    color: 'var(--text-secondary)',
-                  }}
-                >
-                  MICROPHONE VU METER
-                </span>
-                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <span
+                    style={{
+                      fontSize: '0.85rem',
+                      fontWeight: 600,
+                      color: 'var(--text-secondary)',
+                    }}
+                  >
+                    MICROPHONE VU METER
+                  </span>
+                  <span
+                    style={{
+                      fontSize: '0.75rem',
+                      fontWeight: 700,
+                      fontFamily: 'monospace',
+                      padding: '0.15rem 0.45rem',
+                      borderRadius: '4px',
+                      backgroundColor: audioLevel > 0 ? 'rgba(63, 185, 80, 0.2)' : 'rgba(255, 255, 255, 0.08)',
+                      color: audioLevel > 0 ? 'var(--accent-green)' : 'var(--text-secondary)',
+                    }}
+                  >
+                    {audioLevel}%
+                  </span>
+                </div>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.2rem' }}>
                   Assigned UID: {tokenDetails?.uid} • Token TTL: {tokenDetails?.expiresIn}s
                 </div>
               </div>
@@ -426,23 +463,28 @@ export default function VoiceTestPage() {
               </button>
             </div>
 
-            {/* Audio level meter bar */}
+            {/* Audio level meter bar with noise gate calibration */}
             <div
               style={{
                 width: '100%',
                 height: '10px',
-                backgroundColor: 'rgba(255, 255, 255, 0.1)',
+                backgroundColor: 'rgba(255, 255, 255, 0.08)',
                 borderRadius: '5px',
                 overflow: 'hidden',
+                position: 'relative',
               }}
             >
               <div
                 style={{
-                  width: `${Math.min(100, audioLevel * 2)}%`,
+                  width: `${audioLevel}%`,
                   height: '100%',
                   backgroundColor:
-                    audioLevel > 50 ? 'var(--accent-red)' : 'var(--accent-green)',
-                  transition: 'width 0.08s ease-out',
+                    audioLevel > 75
+                      ? 'var(--accent-red)'
+                      : audioLevel > 40
+                      ? 'var(--accent-blue)'
+                      : 'var(--accent-green)',
+                  transition: 'width 0.06s ease-out, background-color 0.15s ease',
                 }}
               />
             </div>
