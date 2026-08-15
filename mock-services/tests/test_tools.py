@@ -45,6 +45,21 @@ async def test_tool_2_find_nearby_resource_real_api():
 
 
 @pytest.mark.asyncio
+async def test_tool_2_find_nearby_resource_mumbai_coordinates_accuracy():
+    """Test find_nearby_resource at (19.07, 72.87) to verify nearest hospital is geographically plausible (<5 km)."""
+    res = await find_nearby_resource(
+        latitude=19.07, longitude=72.87, resource_type="hospital", radius_km=15.0
+    )
+    assert res.get("found") is True
+    assert "nearest" in res
+    nearest = res["nearest"]
+    assert nearest["distance_km"] < 5.0  # Must be close local hospital (<5km), not distant outlier
+    assert "name" in nearest
+    assert "summary" in res
+    assert str(nearest["distance_km"]) in res["summary"]
+
+
+@pytest.mark.asyncio
 async def test_tool_3_calculate_eta_real_api():
     """Test calculate_eta with real OSRM routing / Haversine fallback."""
     # Route from Times Square to Central Park
@@ -112,5 +127,7 @@ async def test_tool_6_notify_stakeholders_mock_fallback():
     )
     assert res["sent"] is False
     assert res["mode"] == "MOCK_FALLBACK"
-    assert "would_have_sent" in res
-    assert "Sector 4" in res["would_have_sent"]
+    assert "status_for_agent" in res
+    assert "NOT ACTUALLY SENT" in res["status_for_agent"]
+    assert "simulated_message" in res
+    assert "Sector 4" in res["simulated_message"]

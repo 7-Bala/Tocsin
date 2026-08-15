@@ -32,8 +32,8 @@ mcp = FastMCP(
 
 
 def haversine_distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Calculate great-circle distance between two points in kilometers."""
-    r = 6371.0  # Earth's radius in km
+    """Calculate the great-circle distance between two points on the Earth in kilometers."""
+    R = 6371.0  # Earth's radius in km
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
     a = (
@@ -43,7 +43,7 @@ def haversine_distance_km(lat1: float, lon1: float, lat2: float, lon2: float) ->
         * math.sin(dlon / 2.0) ** 2
     )
     c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
-    return round(r * c, 2)
+    return round(R * c, 2)
 
 
 # ==============================================================================
@@ -54,30 +54,24 @@ async def get_weather_risk(
     latitude: float, longitude: float, hours_ahead: int = 6
 ) -> dict[str, Any]:
     """
-    Get weather risk forecast for coordinates from Open-Meteo.
-    Returns rainfall intensity, precipitation probability over the window, and a derived risk_label (LOW/MODERATE/SEVERE).
+    Query precipitation and flood risk using the real Open-Meteo API.
 
-    :param latitude: Latitude (-90.0 to 90.0)
-    :param longitude: Longitude (-180.0 to 180.0)
-    :param hours_ahead: Forecast window in hours (1 to 72, default 6)
+    :param latitude: Target latitude (-90.0 to 90.0)
+    :param longitude: Target longitude (-180.0 to 180.0)
+    :param hours_ahead: Forecast window in hours (1 to 24, default 6)
     """
-    if not (-90.0 <= latitude <= 90.0) or not (-180.0 <= longitude <= 180.0):
-        return {
-            "error": "Invalid coordinates. Latitude must be in [-90, 90] and longitude in [-180, 180].",
-            "risk_label": "UNKNOWN",
-        }
-
-    hours_ahead = max(1, min(72, hours_ahead))
+    hours_ahead = max(1, min(24, hours_ahead))
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": latitude,
         "longitude": longitude,
         "hourly": "precipitation,precipitation_probability,rain",
-        "forecast_hours": hours_ahead,
+        "forecast_days": 1,
+        "timezone": "auto",
     }
 
     try:
-        async with httpx.AsyncClient(timeout=3.5, headers={"User-Agent": USER_AGENT}) as client:
+        async with httpx.AsyncClient(timeout=3.0, headers={"User-Agent": USER_AGENT}) as client:
             resp = await client.get(url, params=params)
             resp.raise_for_status()
             data = resp.json()
@@ -127,7 +121,7 @@ async def find_nearby_resource(
     radius_km: float = 15.0,
 ) -> dict[str, Any]:
     """
-    Find the nearest emergency resource using OpenStreetMap Nominatim.
+    Find the nearest emergency resource using OpenStreetMap Nominatim with strict Haversine distance sorting.
 
     :param latitude: Current origin latitude (-90.0 to 90.0)
     :param longitude: Current origin longitude (-180.0 to 180.0)
@@ -144,46 +138,61 @@ async def find_nearby_resource(
     type_query_map = {
         "shelter": "emergency shelter",
         "hospital": "hospital",
-        "water_supplier": "water supply",
+        "water_supplier": "drinking water supply",
         "pumping_station": "pumping station",
     }
     query = type_query_map.get(resource_type, resource_type)
 
-    # Bounding box calculation for radius_km
-    delta_deg = radius_km / 111.0  # Approx 111 km per degree latitude
-    viewbox = f"{longitude - delta_deg},{latitude + delta_deg},{longitude + delta_deg},{latitude - delta_deg}"
+    # Cosine-corrected Bounding box calculation for accurate geographic radius
+    radius_km = max(1.0, min(100.0, radius_km))
+    delta_lat = radius_km / 111.0  # Approx 111 km per degree latitude
+    cos_lat = max(0.01, math.cos(math.radians(latitude)))
+    delta_lon = radius_km / (111.0 * cos_lat)
+    viewbox = f"{longitude - delta_lon},{latitude + delta_lat},{longitude + delta_lon},{latitude - delta_lat}"
 
     url = "https://nominatim.openstreetmap.org/search"
+    
+    # 1. First query with bounded=1 (strict bounding box) and high limit (25) to find all local candidates
     params = {
         "q": query,
         "format": "jsonv2",
-        "limit": 5,
+        "limit": 25,
         "viewbox": viewbox,
-        "bounded": 0,
+        "bounded": 1,
     }
 
     try:
-        async with httpx.AsyncClient(timeout=3.5, headers={"User-Agent": USER_AGENT}) as client:
+        async with httpx.AsyncClient(timeout=4.0, headers={"User-Agent": USER_AGENT}) as client:
             resp = await client.get(url, params=params)
             resp.raise_for_status()
             results = resp.json()
+
+            # If strict bounding box yielded no results, fallback to soft bounded=0
+            if not results:
+                logger.info(f"No results with bounded=1 for {resource_type}. Falling back to bounded=0...")
+                params["bounded"] = 0
+                params["limit"] = 10
+                resp_fallback = await client.get(url, params=params)
+                resp_fallback.raise_for_status()
+                results = resp_fallback.json()
 
         if not results:
             return {
                 "found": False,
                 "resource_type": resource_type,
-                "message": f"No {resource_type} found within search parameters.",
+                "message": f"No {resource_type} found within {radius_km} km radius of ({latitude}, {longitude}).",
             }
 
-        # Calculate distances and sort by nearest
+        # Calculate exact Haversine distance for every candidate and sort strictly ascending
         matches = []
         for r in results:
             r_lat = float(r["lat"])
             r_lon = float(r["lon"])
             dist = haversine_distance_km(latitude, longitude, r_lat, r_lon)
+            raw_name = r.get("name") or r.get("display_name", "").split(",")[0].strip()
             matches.append(
                 {
-                    "name": r.get("name") or r.get("display_name", "").split(",")[0],
+                    "name": raw_name or f"Unnamed {resource_type.title()}",
                     "display_name": r.get("display_name"),
                     "latitude": r_lat,
                     "longitude": r_lon,
@@ -193,6 +202,7 @@ async def find_nearby_resource(
                 }
             )
 
+        # Sort strictly by geographical distance
         matches.sort(key=lambda x: x["distance_km"])
         nearest = matches[0]
 
@@ -201,6 +211,7 @@ async def find_nearby_resource(
             "resource_type": resource_type,
             "nearest": nearest,
             "candidate_count": len(matches),
+            "summary": f"Nearest {resource_type} is {nearest['name']} located {nearest['distance_km']} km away at ({nearest['latitude']}, {nearest['longitude']}).",
         }
     except (httpx.HTTPError, OSError, ValueError, KeyError) as exc:
         logger.error(f"Nominatim API error: {exc}")
@@ -259,26 +270,22 @@ async def calculate_eta(
                 "estimated": False,
                 "source": "OSRM Router",
             }
+        else:
+            raise ValueError("No routes returned by OSRM")
     except (httpx.HTTPError, OSError, ValueError, KeyError) as exc:
-        logger.warning(f"OSRM router failed or timed out ({exc}), engaging Haversine fallback...")
+        logger.warning(f"OSRM Routing failed ({exc}), falling back to Haversine speed estimation.")
+        dist_km = haversine_distance_km(origin_lat, origin_lng, dest_lat, dest_lng)
+        # Assumed speeds: 35 km/h driving (city emergency traffic), 4.5 km/h walking
+        speed_kmh = 35.0 if mode == "driving" else 4.5
+        est_duration_min = round((dist_km / speed_kmh) * 60.0, 1)
 
-    # Robust Haversine fallback
-    straight_dist_km = haversine_distance_km(origin_lat, origin_lng, dest_lat, dest_lng)
-    # Estimated road winding factor (~1.3x)
-    road_dist_km = round(straight_dist_km * 1.3, 2)
-
-    # Average emergency response speeds: driving ~45 km/h, walking ~4.5 km/h
-    speed_kmh = 45.0 if mode == "driving" else 4.5
-    est_duration_min = round((road_dist_km / speed_kmh) * 60.0, 1)
-
-    return {
-        "distance_km": road_dist_km,
-        "straight_line_km": straight_dist_km,
-        "duration_minutes": est_duration_min,
-        "mode": mode,
-        "estimated": True,
-        "source": "Haversine Kinematic Fallback",
-    }
+        return {
+            "distance_km": dist_km,
+            "duration_minutes": est_duration_min,
+            "mode": mode,
+            "estimated": True,
+            "source": "Haversine Estimation Fallback",
+        }
 
 
 # ==============================================================================
@@ -287,9 +294,9 @@ async def calculate_eta(
 @mcp.tool()
 async def get_incident_status(incident_id: str) -> dict[str, Any]:
     """
-    Query the backend for the complete real-time status snapshot of a disaster incident.
+    Retrieve live state, metrics, and symptoms for an active incident from Tocsin's engine.
 
-    :param incident_id: Unique incident identifier (e.g. 'inc-metro-01')
+    :param incident_id: Identifier of the incident (e.g. 'inc-flood-01')
     """
     if not incident_id or not incident_id.strip():
         return {"error": "incident_id must not be empty."}
@@ -304,7 +311,17 @@ async def get_incident_status(incident_id: str) -> dict[str, Any]:
                     "status_code": 404,
                 }
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            return {
+                "incident_id": data.get("incident_id"),
+                "title": data.get("title"),
+                "status": data.get("status"),
+                "severity": data.get("severity"),
+                "metrics": data.get("metrics"),
+                "symptoms": data.get("symptoms"),
+                "actions_taken": data.get("actions_taken"),
+                "updated_at": data.get("updated_at"),
+            }
     except (httpx.HTTPError, OSError, ValueError) as exc:
         logger.error(f"Backend GET /api/incidents/{incident_id} failed: {exc}")
         return {
@@ -393,16 +410,20 @@ async def notify_stakeholders(
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     formatted_text = f"🚨 [TOCSIN EMERGENCY ALERT - {incident_id}]\n{message.strip()}"
 
-    # Graceful fallback when token is not configured in dev
+    # Explicit, LLM-readable mock response when token is not configured in dev
     if not token or not token.strip():
-        logger.info("TELEGRAM_BOT_TOKEN not configured. Returning safe mock broadcast.")
+        logger.info("TELEGRAM_BOT_TOKEN not configured. Returning explicit mock fallback.")
         return {
             "sent": False,
-            "reason": "no token configured",
             "mode": "MOCK_FALLBACK",
+            "status_for_agent": (
+                "NOT ACTUALLY SENT - this is a simulated/mock response because no live Telegram bot token is configured. "
+                "You MUST explicitly tell the user that this message was NOT actually sent or transmitted to real stakeholders in the real world."
+            ),
             "incident_id": incident_id,
             "chat_id": chat_id,
-            "would_have_sent": formatted_text,
+            "simulated_message": formatted_text,
+            "notice": "Simulated broadcast only. Real Telegram bot credentials are not configured.",
         }
 
     url = f"https://api.telegram.org/bot{token.strip()}/sendMessage"
@@ -422,14 +443,16 @@ async def notify_stakeholders(
                 "incident_id": incident_id,
                 "chat_id": chat_id,
                 "message_id": data.get("result", {}).get("message_id"),
+                "status_for_agent": "Successfully transmitted to live Telegram channel.",
             }
-    except (httpx.HTTPError, OSError, ValueError):
+    except (httpx.HTTPError, OSError, ValueError) as exc:
         # Never log or leak the bot token in logs or response
-        logger.error("Failed to transmit Telegram notification (redacted token)")
+        logger.error(f"Failed to transmit Telegram notification (redacted token): {exc}")
         return {
             "sent": False,
             "error": "Telegram transmission failed. Check network or chat ID.",
             "incident_id": incident_id,
+            "status_for_agent": "FAILED to send Telegram alert due to network or gateway error.",
         }
 
 

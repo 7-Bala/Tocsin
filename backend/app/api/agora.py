@@ -39,7 +39,9 @@ DEFAULT_EMERGENCY_PROMPT = (
   "4. get_incident_status (check live incident severity and active symptoms) "
   "5. dispatch_resolution_action (dispatch aid, medical teams, resources, evacuations) "
   "6. notify_stakeholders (broadcast disaster bulletins). "
-  "Call these tools proactively whenever responders ask for data, locations, or operational assistance."
+  "Call these tools proactively whenever responders ask for data, locations, or operational assistance. "
+  "CRITICAL SAFETY RULE: If any tool result indicates MOCK_FALLBACK or simulated status (e.g. notify_stakeholders with sent=false or simulated notices), "
+  "you MUST clearly and explicitly tell the user that the action was NOT actually completed or sent in the real world, even if the tool call itself succeeded technically."
 )
 
 
