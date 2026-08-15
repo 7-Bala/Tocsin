@@ -1,6 +1,6 @@
 """
 Agora Voice & Conversational AI Agent Endpoints
-Handles RTC token issuance and Agora Conversational AI (Gemini Live MLLM) lifecycle.
+Handles RTC token issuance and Agora Conversational AI (Gemini Live MLLM + MCP Tools) lifecycle.
 """
 
 import base64
@@ -31,7 +31,15 @@ DEFAULT_EMERGENCY_PROMPT = (
   "You are Tocsin, a real-time voice AI emergency disaster coordinator. "
   "You are speaking to responders and citizens in an active crisis situation. "
   "Be calm, concise, professional, and direct. Keep your spoken responses short (1-3 sentences), "
-  "prioritize safety and triage, verify details before giving recommendations, and communicate clearly."
+  "prioritize safety and triage, verify details before giving recommendations, and communicate clearly. "
+  "You have access to 6 real-time emergency disaster coordination tools via Model Context Protocol (MCP): "
+  "1. get_weather_risk (check rainfall & weather hazard alerts) "
+  "2. find_nearby_resource (locate shelters, hospitals, water supplies, pumping stations) "
+  "3. calculate_eta (compute driving distance and route ETA) "
+  "4. get_incident_status (check live incident severity and active symptoms) "
+  "5. dispatch_resolution_action (dispatch aid, medical teams, resources, evacuations) "
+  "6. notify_stakeholders (broadcast disaster bulletins). "
+  "Call these tools proactively whenever responders ask for data, locations, or operational assistance."
 )
 
 
@@ -92,6 +100,10 @@ class StartAgentRequest(BaseModel):
   system_prompt: str | None = Field(
     default=None,
     description="Custom system instructions for the conversational agent",
+  )
+  mcp_server_url: str | None = Field(
+    default=None,
+    description="Public HTTPS MCP server URL (defaults to MCP_SERVER_PUBLIC_URL env var if set)",
   )
 
 
@@ -214,8 +226,8 @@ async def generate_rtc_token(request: GenerateTokenRequest) -> TokenResponse:
 
 @router.post(
   "/start-agent",
-  summary="Start Agora Conversational AI Agent (Gemini Live MLLM)",
-  description="Launches a Google Gemini Live AI Voice Agent into the specified Agora RTC voice channel via Agora REST API v2.",
+  summary="Start Agora Conversational AI Agent (Gemini Live MLLM + MCP Tools)",
+  description="Launches a Google Gemini Live AI Voice Agent with MCP disaster tools into the specified Agora RTC voice channel.",
 )
 async def start_conversational_agent(
   request: StartAgentRequest,
@@ -282,7 +294,7 @@ async def start_conversational_agent(
   gemini_ws_url = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={gemini_key}"
 
   # Official Agora ConvoAI REST v2 Join Schema (Gemini Live MLLM)
-  payload = {
+  payload: dict[str, Any] = {
     "name": f"tocsin_agent_{channel_name}",
     "properties": {
       "channel": channel_name,
@@ -317,11 +329,35 @@ async def start_conversational_agent(
         },
         "input_modalities": ["audio"],
         "output_modalities": ["audio"],
-        "greeting_message": "Tocsin emergency coordinator active. How can I assist?",
+        "greeting_message": (
+          "Tocsin emergency coordinator active with live tools. How can I"
+          " assist?"
+        ),
         "failure_message": "Sorry, I encountered an issue. Please try again.",
       },
     },
   }
+
+  # Wire MCP Servers if public URL is configured
+  mcp_url = (
+    request.mcp_server_url or os.getenv("MCP_SERVER_PUBLIC_URL", "")
+  ).strip()
+  if mcp_url:
+    sse_endpoint = (
+      mcp_url if mcp_url.endswith("/sse") else f"{mcp_url.rstrip('/')}/sse"
+    )
+    mcp_config = [
+      {
+        "name": "tocsin_emergency_tools",
+        "endpoint": sse_endpoint,
+        "transport": "sse",
+      }
+    ]
+    payload["properties"]["mllm"]["mcp_servers"] = mcp_config
+    payload["properties"]["advanced_features"] = {"enable_tools": True}
+    logger.info(
+      f"Configured MCP server for agent: {sse_endpoint} (transport: sse)"
+    )
 
   agora_url = (
     f"https://api.agora.io/api/conversational-ai-agent/v2/projects/{app_id}/join"
@@ -373,6 +409,8 @@ async def start_conversational_agent(
         "agent_uid": request.agent_uid,
         "mllm_provider": "gemini",
         "voice": request.voice,
+        "mcp_enabled": bool(mcp_url),
+        "mcp_server_url": sse_endpoint if mcp_url else None,
       }
   except httpx.HTTPError as exc:
     logger.error(f"Network error connecting to Agora ConvoAI REST API: {exc}")
