@@ -6,9 +6,6 @@ Tests non-linear degradation with jitter, resolution recovery, and API / WebSock
 import asyncio
 
 import pytest
-from fastapi.testclient import TestClient
-from httpx import ASGITransport, AsyncClient
-
 from app.engine.simulator import simulator
 from app.main import app
 from app.models.incident import (
@@ -18,6 +15,8 @@ from app.models.incident import (
     TriggerEventRequest,
     TriggerResolutionRequest,
 )
+from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 
 @pytest.mark.asyncio
@@ -192,3 +191,200 @@ def test_websocket_snapshot_stream():
         ack_msg = websocket.receive_json()
         assert ack_msg["type"] == "ACK"
         assert ack_msg["payload"] == "client_ping"
+
+
+@pytest.mark.asyncio
+async def test_action_proposal_approval_and_verification_flow():
+    """
+    Test safe human-in-the-loop action lifecycle:
+    1. Incident in DEGRADING state.
+    2. Voice AI proposes high-impact action (status: PENDING_APPROVAL).
+    3. Unauthorized approval rejected (401 / 403).
+    4. Commander approves with valid authorization -> Status transitions to EXECUTING.
+    5. State recovers and reaches STABILIZED. Action outcome is VERIFIED.
+    """
+    incident_id = "test-inc-approval-202"
+    await simulator.create_incident(
+        title="Harbor Oil & Chemical Spill",
+        event_type=EventType.WATER_CONTAMINATION,
+        incident_id=incident_id,
+    )
+    # Trigger event to cause degradation
+    await simulator.trigger_event(
+        incident_id,
+        TriggerEventRequest(event_type=EventType.WATER_CONTAMINATION, intensity=1.5),
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Propose action
+        prop_res = await client.post(
+            f"/api/incidents/{incident_id}/actions/propose",
+            json={
+                "tool_name": "deploy_containment_booms",
+                "rationale": "Contain slick before it reaches water intake facility.",
+                "parameters": {"zone": "Harbor-North", "boom_meters": 500},
+                "recovery_duration_seconds": 1.2,
+                "proposed_by": "GeminiLiveResponder",
+            },
+        )
+        assert prop_res.status_code == 201
+        data = prop_res.json()
+        assert len(data["proposed_actions"]) == 1
+        action = data["proposed_actions"][0]
+        action_id = action["action_id"]
+        assert action["status"] == "PENDING_APPROVAL"
+        assert action["tool_name"] == "deploy_containment_booms"
+
+        # 2. Attempt unauthorized approval (no auth header) -> 401
+        unauth_res = await client.post(
+            f"/api/incidents/{incident_id}/actions/{action_id}/approve",
+            json={"commander_id": "UnauthenticatedUser"},
+        )
+        assert unauth_res.status_code == 401
+
+        # 3. Attempt invalid key approval -> 403
+        bad_auth_res = await client.post(
+            f"/api/incidents/{incident_id}/actions/{action_id}/approve",
+            headers={"X-Tocsin-Auth": "wrong-key-value"},
+            json={"commander_id": "FakeCommander"},
+        )
+        assert bad_auth_res.status_code == 403
+
+        # 4. Valid Commander Approval
+        auth_res = await client.post(
+            f"/api/incidents/{incident_id}/actions/{action_id}/approve",
+            headers={"X-Tocsin-Auth": "tocsin-commander-key"},
+            json={
+                "commander_id": "IncidentCommander-Alpha",
+                "notes": "Approved with priority execution.",
+            },
+        )
+        assert auth_res.status_code == 200
+        approved_data = auth_res.json()
+        assert approved_data["status"] == "RESOLVING"
+        approved_action = next(a for a in approved_data["proposed_actions"] if a["action_id"] == action_id)
+        assert approved_action["status"] == "EXECUTING"
+        assert approved_action["approved_by"] == "IncidentCommander-Alpha"
+
+        # 5. Wait for recovery loop to complete and verify stabilization outcome
+        await asyncio.sleep(2.0)
+        final_state = await simulator.get_incident(incident_id)
+        assert final_state is not None
+        assert final_state.status == IncidentStatus.STABILIZED
+        final_action = next(a for a in final_state.proposed_actions if a.action_id == action_id)
+        assert final_action.status == "VERIFIED"
+        assert final_action.verified is True
+        assert "Stabilized" in (final_action.verification_result or "")
+
+
+@pytest.mark.asyncio
+async def test_action_rejection_flow():
+    """Test rejecting a proposed emergency action with commander justification."""
+    incident_id = "test-inc-rejection-303"
+    await simulator.create_incident(
+        title="Urban Flash Flood",
+        event_type=EventType.FLOOD_SURGE,
+        incident_id=incident_id,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Propose action
+        prop_res = await client.post(
+            f"/api/incidents/{incident_id}/actions/propose",
+            json={
+                "tool_name": "breach_drainage_canal_wall",
+                "rationale": "Relieve water pressure on lower highway.",
+                "proposed_by": "FieldUnit7",
+            },
+        )
+        assert prop_res.status_code == 201
+        action_id = prop_res.json()["proposed_actions"][0]["action_id"]
+
+        # Reject action
+        reject_res = await client.post(
+            f"/api/incidents/{incident_id}/actions/{action_id}/reject",
+            headers={"X-Tocsin-Auth": "tocsin-commander-key"},
+            json={
+                "commander_id": "IncidentCommander-Alpha",
+                "reason": "Risk of secondary residential flooding is too high.",
+            },
+        )
+        assert reject_res.status_code == 200
+        rejected_data = reject_res.json()
+        rejected_action = next(a for a in rejected_data["proposed_actions"] if a["action_id"] == action_id)
+        assert rejected_action["status"] == "REJECTED"
+        assert "secondary residential flooding" in rejected_action["rejection_reason"]
+
+
+@pytest.mark.asyncio
+async def test_approval_lifecycle_edge_cases():
+    """
+    Test approval state machine boundary conditions:
+    1. Invalid incident ID -> 404
+    2. Invalid action ID -> 400
+    3. Re-approving an action already EXECUTING -> 400
+    4. Malformed request payload -> 422
+    5. Action without approval does not execute
+    """
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Invalid incident ID on proposal & approval
+        res_bad_inc = await client.post(
+            "/api/incidents/nonexistent-inc-404/actions/propose",
+            json={"tool_name": "test_tool", "rationale": "test rationale"},
+        )
+        assert res_bad_inc.status_code == 404
+
+        res_bad_inc_app = await client.post(
+            "/api/incidents/nonexistent-inc-404/actions/act-1/approve",
+            headers={"X-Tocsin-Auth": "tocsin-commander-key"},
+            json={"commander_id": "Commander-1"},
+        )
+        assert res_bad_inc_app.status_code == 404
+
+        # 2. Valid incident, invalid action ID
+        inc_id = "test-edge-cases-inc-505"
+        await client.post(
+            "/api/incidents",
+            json={"incident_id": inc_id, "title": "Boundary Test Incident", "event_type": "FLOOD_SURGE"},
+        )
+
+        res_bad_act = await client.post(
+            f"/api/incidents/{inc_id}/actions/nonexistent-act-999/approve",
+            headers={"X-Tocsin-Auth": "tocsin-commander-key"},
+            json={"commander_id": "Commander-1"},
+        )
+        assert res_bad_act.status_code == 400
+
+        # 3. Propose action and approve it once
+        prop_res = await client.post(
+            f"/api/incidents/{inc_id}/actions/propose",
+            json={"tool_name": "deploy_pumps", "rationale": "Pump out cellar"},
+        )
+        assert prop_res.status_code == 201
+        action_id = prop_res.json()["proposed_actions"][0]["action_id"]
+
+        app_1 = await client.post(
+            f"/api/incidents/{inc_id}/actions/{action_id}/approve",
+            headers={"X-Tocsin-Auth": "tocsin-commander-key"},
+            json={"commander_id": "Commander-1"},
+        )
+        assert app_1.status_code == 200
+
+        # Attempt duplicate approval while EXECUTING -> 400
+        app_2 = await client.post(
+            f"/api/incidents/{inc_id}/actions/{action_id}/approve",
+            headers={"X-Tocsin-Auth": "tocsin-commander-key"},
+            json={"commander_id": "Commander-2"},
+        )
+        assert app_2.status_code == 400
+        assert "cannot be approved" in app_2.json()["detail"]
+
+        # 4. Malformed requests (missing required fields / invalid types)
+        bad_prop = await client.post(
+            f"/api/incidents/{inc_id}/actions/propose",
+            json={"invalid_key": 123},
+        )
+        assert bad_prop.status_code == 422

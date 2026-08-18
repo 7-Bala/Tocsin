@@ -7,7 +7,18 @@ import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
+
+from dotenv import load_dotenv
+
+# Authoritatively load environment variables from backend/.env or project root .env
+_backend_env = Path(__file__).resolve().parent.parent / ".env"
+_root_env = Path(__file__).resolve().parent.parent.parent / ".env"
+if _backend_env.exists():
+    load_dotenv(dotenv_path=_backend_env)
+elif _root_env.exists():
+    load_dotenv(dotenv_path=_root_env)
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware

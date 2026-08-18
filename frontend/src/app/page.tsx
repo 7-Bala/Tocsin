@@ -1,214 +1,212 @@
-import React from 'react';
-import Link from 'next/link';
+'use client';
 
-export default function Home() {
+import React, { useCallback, useEffect, useState } from 'react';
+import { IncidentState } from '@/types/incident';
+import { createIncident, fetchIncidents } from '@/hooks/useIncidentApi';
+import { useIncidentWebSocket } from '@/hooks/useIncidentWebSocket';
+import { IncidentHeader } from '@/components/IncidentHeader';
+import { MetricsOverview } from '@/components/MetricsOverview';
+import { ActionApprovalQueue } from '@/components/ActionApprovalQueue';
+import { HypothesesPanel } from '@/components/HypothesesPanel';
+import { TimelineFeed } from '@/components/TimelineFeed';
+import { VoiceHUD } from '@/components/VoiceHUD';
+
+export default function IncidentCommandDashboard() {
+  const [incidentsList, setIncidentsList] = useState<IncidentState[]>([]);
+  const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  // WebSocket real-time subscription
+  const { incidentState: wsIncident, status: wsStatus, setIncidentState } =
+    useIncidentWebSocket(selectedIncidentId);
+
+  // Initialize incidents on mount
+  useEffect(() => {
+    async function initIncidents() {
+      try {
+        setIsLoading(true);
+        let list = await fetchIncidents();
+        if (list.length === 0) {
+          // Initialize default crisis incident for immediate demo readiness
+          const defaultInc = await createIncident({
+            title: 'Downtown Coastal Flash Flood Surge',
+            event_type: 'FLOOD_SURGE',
+            incident_id: 'inc-demo-flood-01',
+            initial_symptoms: [
+              'Rapid overflow detected at River Embankment Sector 4',
+              'Multiple vehicles stranded near Low-lying Viaduct',
+            ],
+          });
+          list = [defaultInc];
+        }
+        setIncidentsList(list);
+        setSelectedIncidentId(list[0].incident_id);
+        setIncidentState(() => list[0]);
+      } catch {
+        // Fallback demo state if backend connection fails on initial render
+        const fallback: IncidentState = {
+          incident_id: 'inc-demo-flood-01',
+          title: 'Downtown Coastal Flash Flood Surge',
+          event_type: 'FLOOD_SURGE',
+          status: 'IDLE',
+          severity: 'LOW',
+          metrics: {
+            severity_score: 10,
+            water_safety_index: 95,
+            flood_depth_meters: 0,
+            affected_population: 0,
+            infrastructure_integrity_pct: 100,
+          },
+          symptoms: [
+            {
+              id: 'sym-1',
+              description: 'Initial sensor alert: rapid water runoff',
+              severity: 'LOW',
+              reported_at: new Date().toISOString(),
+            },
+          ],
+          timeline: [
+            {
+              timestamp: new Date().toISOString(),
+              event_type: 'INCIDENT_INITIALIZED',
+              description: 'Incident initialized in standby mode.',
+              actor: 'SYSTEM',
+            },
+          ],
+          hypotheses: [
+            {
+              id: 'hypo-1',
+              title: 'Flash Flood & Culvert Breach Hazard',
+              description: 'Sensor data indicates runoff accumulation pending voice confirmation.',
+              confidence: 0.4,
+              status: 'PROPOSED',
+              updated_at: new Date().toISOString(),
+            },
+          ],
+          proposed_actions: [],
+          actions_taken: [],
+          participants: [],
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        setIncidentsList([fallback]);
+        setSelectedIncidentId(fallback.incident_id);
+        setIncidentState(() => fallback);
+      } finally {
+        setIsLoading(false);
+      }
+    }
+
+    initIncidents();
+  }, [setIncidentState]);
+
+  const activeIncident = wsIncident || incidentsList.find((i) => i.incident_id === selectedIncidentId) || null;
+
+  const handleIncidentUpdated = useCallback(
+    (updated: IncidentState) => {
+      setIncidentState(() => updated);
+      setIncidentsList((prev) => {
+        const idx = prev.findIndex((i) => i.incident_id === updated.incident_id);
+        if (idx >= 0) {
+          const next = [...prev];
+          next[idx] = updated;
+          return next;
+        }
+        return [updated, ...prev];
+      });
+    },
+    [setIncidentState]
+  );
+
+  const handleSelectIncident = (id: string) => {
+    setSelectedIncidentId(id);
+    const target = incidentsList.find((i) => i.incident_id === id);
+    if (target) {
+      setIncidentState(() => target);
+    }
+  };
+
   return (
     <main
       style={{
         display: 'flex',
         flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
         minHeight: '100vh',
-        padding: '1.5rem',
+        backgroundColor: 'var(--bg)',
+        padding: '1.25rem 1.5rem 2.5rem 1.5rem',
+        maxWidth: '1500px',
+        margin: '0 auto',
+        gap: '1.25rem',
       }}
     >
-      <header
+      {/* Top Banner Navigation & Status */}
+      <IncidentHeader
+        currentIncident={activeIncident}
+        allIncidents={incidentsList}
+        wsStatus={wsStatus}
+        onSelectIncident={handleSelectIncident}
+        onIncidentUpdated={handleIncidentUpdated}
+      />
+
+      {/* Live Telemetry Gauges */}
+      <MetricsOverview
+        metrics={activeIncident?.metrics}
+        status={activeIncident?.status}
+      />
+
+      {/* 2-Column Responsive Operation Grid */}
+      <div
         style={{
-          width: '100%',
-          maxWidth: '840px',
-          margin: '0 auto',
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))',
+          gap: '1.25rem',
+          alignItems: 'start',
         }}
       >
-        <section
-          style={{
-            padding: '2.5rem 2rem',
-            borderRadius: '16px',
-            border: '1px solid var(--border)',
-            backgroundColor: 'var(--card-bg)',
-            boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.45)',
-            textAlign: 'center',
-          }}
-        >
-          <div
-            style={{
-              display: 'inline-block',
-              padding: '0.35rem 0.85rem',
-              borderRadius: '9999px',
-              backgroundColor: 'rgba(248, 81, 73, 0.15)',
-              color: 'var(--accent-red)',
-              fontSize: '0.875rem',
-              fontWeight: 600,
-              marginBottom: '1.25rem',
-              border: '1px solid rgba(248, 81, 73, 0.35)',
-            }}
-          >
-            EchoSphere Hackathon • Team KNOTiC
-          </div>
+        {/* Left Column: Approvals & AI Understanding */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+          <ActionApprovalQueue
+            incident={activeIncident}
+            onActionProcessed={handleIncidentUpdated}
+          />
+          <HypothesesPanel
+            hypotheses={activeIncident?.hypotheses}
+            symptoms={activeIncident?.symptoms}
+          />
+        </div>
 
-          <h1
-            style={{
-              fontSize: 'clamp(2.25rem, 6vw, 3.5rem)',
-              fontWeight: 800,
-              letterSpacing: '-0.03em',
-              marginBottom: '1rem',
-              color: 'var(--text-primary)',
-            }}
-          >
-            TOCSIN
-          </h1>
+        {/* Right Column: Voice AI Radio HUD & Operational Timeline */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+          <VoiceHUD
+            channelName={activeIncident?.incident_id || 'tocsin-emergency-room'}
+          />
+          <TimelineFeed
+            timeline={activeIncident?.timeline}
+          />
+        </div>
+      </div>
 
-          <p
-            style={{
-              fontSize: 'clamp(1rem, 2.5vw, 1.25rem)',
-              color: 'var(--text-secondary)',
-              lineHeight: '1.6',
-              maxWidth: '680px',
-              margin: '0 auto 2rem auto',
-            }}
-          >
-            Real-time voice AI disaster-coordination platform. Listens to
-            fragmented multilingual voice streams, maintains live incident state,
-            calls verified tools, and coordinates emergency response.
-          </p>
-
-          <div
-            style={{
-              marginBottom: '2.5rem',
-              display: 'flex',
-              justifyContent: 'center',
-              gap: '1rem',
-            }}
-          >
-            <Link
-              href="/voice-test"
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '0.5rem',
-                padding: '0.85rem 1.75rem',
-                borderRadius: '10px',
-                backgroundColor: 'var(--accent-blue)',
-                color: '#fff',
-                fontWeight: 600,
-                textDecoration: 'none',
-                boxShadow: '0 4px 14px 0 rgba(88, 166, 255, 0.35)',
-              }}
-            >
-              🎙 Launch Agora Voice Test
-            </Link>
-          </div>
-
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-              gap: '1rem',
-              textAlign: 'left',
-            }}
-          >
-            <article
-              style={{
-                padding: '1.25rem',
-                borderRadius: '10px',
-                border: '1px solid var(--border)',
-                background: 'rgba(0, 0, 0, 0.25)',
-              }}
-            >
-              <h2
-                style={{
-                  fontSize: '0.75rem',
-                  fontWeight: 700,
-                  letterSpacing: '0.05em',
-                  color: 'var(--text-secondary)',
-                  marginBottom: '0.5rem',
-                }}
-              >
-                FRONTEND
-              </h2>
-              <p
-                style={{
-                  fontWeight: 600,
-                  color: 'var(--accent-green)',
-                  fontSize: '0.95rem',
-                }}
-              >
-                Next.js 14 + Agora Web SDK
-              </p>
-            </article>
-
-            <article
-              style={{
-                padding: '1.25rem',
-                borderRadius: '10px',
-                border: '1px solid var(--border)',
-                background: 'rgba(0, 0, 0, 0.25)',
-              }}
-            >
-              <h2
-                style={{
-                  fontSize: '0.75rem',
-                  fontWeight: 700,
-                  letterSpacing: '0.05em',
-                  color: 'var(--text-secondary)',
-                  marginBottom: '0.5rem',
-                }}
-              >
-                BACKEND
-              </h2>
-              <p
-                style={{
-                  fontWeight: 600,
-                  color: 'var(--accent-blue)',
-                  fontSize: '0.95rem',
-                }}
-              >
-                FastAPI + Agora Token Engine
-              </p>
-            </article>
-
-            <article
-              style={{
-                padding: '1.25rem',
-                borderRadius: '10px',
-                border: '1px solid var(--border)',
-                background: 'rgba(0, 0, 0, 0.25)',
-              }}
-            >
-              <h2
-                style={{
-                  fontSize: '0.75rem',
-                  fontWeight: 700,
-                  letterSpacing: '0.05em',
-                  color: 'var(--text-secondary)',
-                  marginBottom: '0.5rem',
-                }}
-              >
-                MOCK SERVICES
-              </h2>
-              <p
-                style={{
-                  fontWeight: 600,
-                  color: 'var(--accent-red)',
-                  fontSize: '0.95rem',
-                }}
-              >
-                FastMCP Server (6 Tools)
-              </p>
-            </article>
-          </div>
-        </section>
-      </header>
-
+      {/* Footer System Info */}
       <footer
         style={{
-          marginTop: '2rem',
-          fontSize: '0.85rem',
+          marginTop: 'auto',
+          paddingTop: '1.5rem',
+          borderTop: '1px solid var(--border)',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: '0.5rem',
+          fontSize: '0.8rem',
           color: 'var(--text-secondary)',
-          textAlign: 'center',
         }}
       >
-        Tocsin Crisis Coordination Engine • Milestone 4 Voice POC Ready
+        <span>
+          🚨 <b>TOCSIN Crisis Coordination Engine</b> • Multi-Party Voice AI & Emergency MCP
+        </span>
+        <span>
+          Active Incident: <code>{activeIncident?.incident_id || '---'}</code> • Status: <b>{activeIncident?.status || 'IDLE'}</b>
+        </span>
       </footer>
     </main>
   );

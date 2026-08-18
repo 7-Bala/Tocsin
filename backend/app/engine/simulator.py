@@ -10,7 +10,9 @@ import uuid
 
 from app.engine.connection_manager import ws_manager
 from app.models.incident import (
+    ActionApprovalStatus,
     ActionTaken,
+    ApproveActionRequest,
     EventType,
     Hypothesis,
     HypothesisStatus,
@@ -18,6 +20,9 @@ from app.models.incident import (
     IncidentState,
     IncidentStatus,
     Participant,
+    ProposeActionRequest,
+    ProposedAction,
+    RejectActionRequest,
     SeverityLevel,
     Symptom,
     TimelineEntry,
@@ -271,6 +276,165 @@ class IncidentSimulator:
         except (RuntimeError, ValueError, OSError) as exc:
             logger.error(f"Error in degradation loop for {incident_id}: {exc}")
 
+    async def propose_action(
+        self, incident_id: str, request: ProposeActionRequest
+    ) -> IncidentState:
+        """
+        Propose a high-impact emergency action for commander approval.
+        """
+        lock = await self._get_lock(incident_id)
+        async with lock:
+            if incident_id not in self._incidents:
+                raise ValueError(f"Incident '{incident_id}' does not exist.")
+
+            state = self._incidents[incident_id]
+            now = get_utc_now()
+            action_id = f"act-prop-{len(state.proposed_actions) + 1}"
+
+            action = ProposedAction(
+                action_id=action_id,
+                tool_name=request.tool_name,
+                parameters=request.parameters,
+                rationale=request.rationale,
+                proposed_by=request.proposed_by,
+                status=ActionApprovalStatus.PENDING_APPROVAL,
+                created_at=now,
+                recovery_duration_seconds=request.recovery_duration_seconds,
+            )
+            state.proposed_actions.append(action)
+            state.updated_at = now
+
+            state.timeline.append(
+                TimelineEntry(
+                    timestamp=now,
+                    event_type="ACTION_PROPOSED",
+                    description=f"Action '{request.tool_name}' proposed by {request.proposed_by}: {request.rationale}",
+                    actor=request.proposed_by,
+                    metadata={
+                        "action_id": action_id,
+                        "parameters": request.parameters,
+                    },
+                )
+            )
+            dump = state.model_dump()
+
+        await ws_manager.broadcast_state(incident_id, dump)
+        return state
+
+    async def approve_action(
+        self, incident_id: str, action_id: str, request: ApproveActionRequest
+    ) -> IncidentState:
+        """
+        Approve an emergency action, transitioning it to EXECUTING and starting the recovery simulation loop.
+        """
+        lock = await self._get_lock(incident_id)
+        async with lock:
+            if incident_id not in self._incidents:
+                raise ValueError(f"Incident '{incident_id}' does not exist.")
+
+            state = self._incidents[incident_id]
+            target_action = next(
+                (a for a in state.proposed_actions if a.action_id == action_id),
+                None,
+            )
+            if not target_action:
+                raise ValueError(f"Proposed action '{action_id}' not found.")
+
+            if target_action.status not in (ActionApprovalStatus.PENDING_APPROVAL, ActionApprovalStatus.REJECTED):
+                raise ValueError(f"Action '{action_id}' cannot be approved from status '{target_action.status.value}'.")
+
+            # Cancel existing degradation loop
+            if incident_id in self._tasks and not self._tasks[incident_id].done():
+                self._tasks[incident_id].cancel()
+
+            now = get_utc_now()
+            target_action.status = ActionApprovalStatus.EXECUTING
+            target_action.approved_by = request.commander_id
+            target_action.approved_at = now
+            target_action.executed_at = now
+            if request.override_parameters:
+                target_action.parameters.update(request.override_parameters)
+
+            # Record in backward-compatible actions_taken list
+            taken_action = ActionTaken(
+                action_id=target_action.action_id,
+                tool_name=target_action.tool_name,
+                parameters=target_action.parameters,
+                executed_at=now,
+                result_summary=f"Approved and executing: {target_action.rationale}",
+                verified=False,
+            )
+            state.actions_taken.append(taken_action)
+
+            state.status = IncidentStatus.RESOLVING
+            state.updated_at = now
+
+            state.timeline.append(
+                TimelineEntry(
+                    timestamp=now,
+                    event_type="ACTION_APPROVED",
+                    description=f"Action '{target_action.tool_name}' approved by {request.commander_id} and executing.",
+                    actor=request.commander_id,
+                    metadata={
+                        "action_id": action_id,
+                        "notes": request.notes,
+                    },
+                )
+            )
+
+            # Spawn recovery loop
+            task = asyncio.create_task(
+                self._run_recovery_loop(
+                    incident_id,
+                    target_action.recovery_duration_seconds,
+                    target_action.action_id,
+                )
+            )
+            self._tasks[incident_id] = task
+            dump = state.model_dump()
+
+        await ws_manager.broadcast_state(incident_id, dump)
+        return state
+
+    async def reject_action(
+        self, incident_id: str, action_id: str, request: RejectActionRequest
+    ) -> IncidentState:
+        """
+        Reject a proposed emergency action with commander justification.
+        """
+        lock = await self._get_lock(incident_id)
+        async with lock:
+            if incident_id not in self._incidents:
+                raise ValueError(f"Incident '{incident_id}' does not exist.")
+
+            state = self._incidents[incident_id]
+            target_action = next(
+                (a for a in state.proposed_actions if a.action_id == action_id),
+                None,
+            )
+            if not target_action:
+                raise ValueError(f"Proposed action '{action_id}' not found.")
+
+            now = get_utc_now()
+            target_action.status = ActionApprovalStatus.REJECTED
+            target_action.rejection_reason = request.reason
+            target_action.approved_by = request.commander_id
+            state.updated_at = now
+
+            state.timeline.append(
+                TimelineEntry(
+                    timestamp=now,
+                    event_type="ACTION_REJECTED",
+                    description=f"Action '{target_action.tool_name}' rejected by {request.commander_id}: {request.reason}",
+                    actor=request.commander_id,
+                    metadata={"action_id": action_id, "reason": request.reason},
+                )
+            )
+            dump = state.model_dump()
+
+        await ws_manager.broadcast_state(incident_id, dump)
+        return state
+
     async def trigger_resolution(
         self, incident_id: str, request: TriggerResolutionRequest
     ) -> IncidentState:
@@ -302,6 +466,22 @@ class IncidentSimulator:
                 verified=False,
             )
             state.actions_taken.append(action)
+
+            # Keep proposed_actions synchronized
+            prop_action = ProposedAction(
+                action_id=action.action_id,
+                tool_name=request.tool_name,
+                parameters=request.parameters,
+                rationale=request.action_description,
+                proposed_by=request.actor,
+                status=ActionApprovalStatus.EXECUTING,
+                created_at=now,
+                approved_by=request.actor,
+                approved_at=now,
+                executed_at=now,
+                recovery_duration_seconds=request.recovery_duration_seconds,
+            )
+            state.proposed_actions.append(prop_action)
 
             # Record timeline entry
             state.timeline.append(
@@ -389,10 +569,16 @@ class IncidentSimulator:
                     state.metrics.water_safety_index = 95.0
                     state.metrics.infrastructure_integrity_pct = 98.0
 
-                    # Mark action verified
+                    # Mark action verified in both collections
                     for act in state.actions_taken:
                         if act.action_id == action_id:
                             act.verified = True
+
+                    for prop_act in state.proposed_actions:
+                        if prop_act.action_id == action_id:
+                            prop_act.status = ActionApprovalStatus.VERIFIED
+                            prop_act.verified = True
+                            prop_act.verification_result = "Stabilized nominal metrics confirmed."
 
                     now = get_utc_now()
                     state.updated_at = now

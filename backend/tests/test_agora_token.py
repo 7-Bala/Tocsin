@@ -3,10 +3,10 @@ Tests for Agora Token Generation & Agent Endpoint
 """
 
 from unittest.mock import AsyncMock, patch
-from httpx import ASGITransport, AsyncClient, Response
-import pytest
 
+import pytest
 from app.main import app
+from httpx import ASGITransport, AsyncClient, Response
 
 
 @pytest.mark.asyncio
