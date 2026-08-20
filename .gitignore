@@ -30,3 +30,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Repomix
+repomix-output.*
+repomix-output*

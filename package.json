@@ -1,0 +1,28 @@
+{
+  "name": "tocsin",
+  "version": "1.0.0",
+  "description": "> **Real-time voice AI disaster-coordination platform that listens to fragmented multilingual voice streams, maintains live incident state, calls verified tools, and coordinates emergency response.**",
+  "main": "index.js",
+  "scripts": {
+    "pack": "repomix",
+    "pack:md": "repomix --style markdown -o repomix-output.md",
+    "pack:xml": "repomix --style xml -o repomix-output.xml",
+    "pack:compress": "repomix --compress -o repomix-output-compressed.xml",
+    "pack:copy": "repomix --copy"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/7-Bala/Tocsin.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/7-Bala/Tocsin/issues"
+  },
+  "homepage": "https://github.com/7-Bala/Tocsin#readme",
+  "devDependencies": {
+    "repomix": "^1.18.0"
+  }
+}

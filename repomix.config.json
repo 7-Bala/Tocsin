@@ -1,0 +1,76 @@
+{
+  "$schema": "https://raw.githubusercontent.com/yamadashy/repomix/main/repomix.config.schema.json",
+  "output": {
+    "filePath": "repomix-output.xml",
+    "style": "xml",
+    "parsableStyle": true,
+    "fileSummary": true,
+    "directoryStructure": true,
+    "removeComments": false,
+    "removeEmptyLines": false,
+    "showLineNumbers": true,
+    "topFilesLength": 20,
+    "includeEmptyDirectories": false,
+    "headerText": "=== TOCSIN REPOSITORY SNAPSHOT FOR AI AGENTS ===\nTocsin is a real-time voice AI disaster-coordination platform that listens to fragmented multilingual voice streams, maintains live incident state, calls verified emergency tools, and coordinates response teams.\n\nProject Structure:\n- backend/: Python FastAPI application with async WebSockets, Gemini Live / LLM agentic dispatchers, emergency state machine, Redis & Agora RTC audio ingestion.\n- frontend/: Next.js 14 (App Router), React 18, Web VAD (@ricky0123/vad-web), Agora Web SDK, voice-test and incident command center.\n- mock-services/: FastAPI mock services simulating 911 dispatch, hospital bed systems, telemetry, and external emergency APIs.\n- docker-compose.yml, start.sh, stop.sh: Complete local orchestration stack."
+  },
+  "include": [
+    "**/*"
+  ],
+  "ignore": {
+    "useGitignore": true,
+    "useDefaultPatterns": true,
+    "customPatterns": [
+      ".env",
+      ".env.*",
+      "*.env",
+      "*.env.local",
+      "!.env.example",
+      "**/.git/**",
+      "**/.venv/**",
+      "**/venv/**",
+      "**/__pycache__/**",
+      "**/*.py[cod]",
+      "**/.pytest_cache/**",
+      "**/.ruff_cache/**",
+      "**/.mypy_cache/**",
+      "**/.coverage",
+      "**/htmlcov/**",
+      "**/node_modules/**",
+      "**/.next/**",
+      "**/dist/**",
+      "**/build/**",
+      "**/out/**",
+      "**/.DS_Store",
+      "**/Thumbs.db",
+      "**/*.log",
+      "**/*.log*",
+      "**/frontend/public/vad/**",
+      "**/*.min.js",
+      "**/*.min.css",
+      "**/*.map",
+      "**/*.wasm",
+      "**/*.onnx",
+      "**/*.bin",
+      "**/*.png",
+      "**/*.jpg",
+      "**/*.jpeg",
+      "**/*.gif",
+      "**/*.ico",
+      "**/*.svg",
+      "**/*.mp3",
+      "**/*.wav",
+      "**/*.ogg",
+      "package-lock.json",
+      "yarn.lock",
+      "pnpm-lock.yaml",
+      "repomix-output.*",
+      "repomix-output*"
+    ]
+  },
+  "security": {
+    "enableSecurityCheck": false
+  },
+  "tokenCount": {
+    "encoding": "o200k_base"
+  }
+}

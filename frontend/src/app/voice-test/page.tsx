@@ -2,6 +2,13 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { LiveTranscriptPanel } from '@/components/LiveTranscriptPanel';
+import { decodeAgoraStreamMessage } from '@/lib/agoraStreamDecoder';
+import {
+  UtteranceAggregator,
+  FinalizedUtterance,
+  ActivePartialUtterance,
+} from '@/lib/utteranceManager';
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -31,11 +38,15 @@ export default function VoiceTestPage() {
   const [selectedVoice, setSelectedVoice] = useState('Puck');
   const [remoteAgentPresent, setRemoteAgentPresent] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
+  const [finalizedUtterances, setFinalizedUtterances] = useState<FinalizedUtterance[]>([]);
+  const [activePartial, setActivePartial] = useState<ActivePartialUtterance | null>(null);
   const [tokenDetails, setTokenDetails] = useState<{
     uid?: number | string;
     channel?: string;
     expiresIn?: number;
   } | null>(null);
+
+  const utteranceAggregatorRef = useRef<UtteranceAggregator>(new UtteranceAggregator());
 
   const rtcClientRef = useRef<any>(null);
   const localAudioTrackRef = useRef<any>(null);
@@ -84,6 +95,11 @@ export default function VoiceTestPage() {
       rtcClientRef.current = null;
     }
 
+    // Reset ephemeral in-memory transcript state on session end
+    utteranceAggregatorRef.current.reset();
+    setFinalizedUtterances([]);
+    setActivePartial(null);
+
     setConnectionState('DISCONNECTED');
     setVadStatus('UNLOADED');
     setIsSpeaking(false);
@@ -110,9 +126,14 @@ export default function VoiceTestPage() {
 
     try {
       setConnectionState('FETCHING_TOKEN');
-      addLog(`Requesting RTC token from backend for channel '${channelName}'...`);
+      addLog(`Requesting Agora RTC dynamic publisher token for channel '${channelName}'...`);
 
-      const randomUid = Math.floor(1000 + Math.random() * 9000);
+      // Ensure fresh in-memory transcript state on new session join
+      utteranceAggregatorRef.current.reset();
+      setFinalizedUtterances([]);
+      setActivePartial(null);
+
+      const randomUid = Math.floor(100000 + Math.random() * 900000);
       const tokenRes = await fetch(`${API_BASE_URL}/api/agora/token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -172,6 +193,28 @@ export default function VoiceTestPage() {
           setRemoteAgentPresent(false);
           setAgentStatus('STOPPED');
           addLog('ℹ️ Gemini Live Agent (UID 9999) left the channel.');
+        }
+      });
+
+      // Handle real-time speech transcription stream messages from Agora ConvoAI (transcribe_agent & transcribe_user)
+      client.on('stream-message', (msgUid: number | string, payload: Uint8Array) => {
+        try {
+          const decoded = decodeAgoraStreamMessage(msgUid, payload);
+          if (!decoded || !decoded.text) {
+            return;
+          }
+
+          // Ingest event into the ephemeral in-memory aggregator (handles partial streaming vs finalization)
+          const { finalized, partial } = utteranceAggregatorRef.current.ingest(decoded);
+          setFinalizedUtterances(finalized);
+          setActivePartial(partial);
+
+          // Technical metadata ONLY in Live Diagnostic Logs (Zero transcript text, zero base64)
+          if (decoded.isFinal) {
+            addLog(`📡 [Stream Frame] Finalized frame from UID ${msgUid} (bytes: ${payload.byteLength}, id: ${decoded.utteranceId})`);
+          }
+        } catch (err: any) {
+          addLog(`⚠️ [Stream Decoder Error] ${err?.message || 'Frame decoding issue'}`);
         }
       });
 
@@ -855,6 +898,19 @@ export default function VoiceTestPage() {
             </div>
           </div>
         )}
+
+        {/* Live Conversation Transcript Panel */}
+        <div style={{ marginBottom: '1.5rem' }}>
+          <LiveTranscriptPanel
+            items={finalizedUtterances}
+            activePartial={activePartial}
+            onClear={() => {
+              utteranceAggregatorRef.current.reset();
+              setFinalizedUtterances([]);
+              setActivePartial(null);
+            }}
+          />
+        </div>
 
         {/* Live Diagnostics Console */}
         <div>

@@ -1,6 +1,13 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { LiveTranscriptPanel } from '@/components/LiveTranscriptPanel';
+import { decodeAgoraStreamMessage } from '@/lib/agoraStreamDecoder';
+import {
+  UtteranceAggregator,
+  FinalizedUtterance,
+  ActivePartialUtterance,
+} from '@/lib/utteranceManager';
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -36,6 +43,10 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
   const [selectedVoice, setSelectedVoice] = useState('Puck');
   const [remoteAgentPresent, setRemoteAgentPresent] = useState(false);
   const [localLogs, setLocalLogs] = useState<string[]>([]);
+  const [finalizedUtterances, setFinalizedUtterances] = useState<FinalizedUtterance[]>([]);
+  const [activePartial, setActivePartial] = useState<ActivePartialUtterance | null>(null);
+
+  const utteranceAggregatorRef = useRef<UtteranceAggregator>(new UtteranceAggregator());
 
   const rtcClientRef = useRef<any>(null);
   const localAudioTrackRef = useRef<any>(null);
@@ -89,6 +100,11 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
       rtcClientRef.current = null;
     }
 
+    // Reset ephemeral in-memory transcript state on session end
+    utteranceAggregatorRef.current.reset();
+    setFinalizedUtterances([]);
+    setActivePartial(null);
+
     setConnectionState('DISCONNECTED');
     setVadStatus('UNLOADED');
     setIsSpeaking(false);
@@ -109,6 +125,11 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
     try {
       setConnectionState('FETCHING_TOKEN');
       addLog(`Requesting RTC token for channel '${channelName}'...`);
+
+      // Reset ephemeral transcript state on new session join
+      utteranceAggregatorRef.current.reset();
+      setFinalizedUtterances([]);
+      setActivePartial(null);
 
       const randomUid = Math.floor(1000 + Math.random() * 9000);
       const tokenRes = await fetch(`${API_BASE_URL}/api/agora/token`, {
@@ -157,6 +178,28 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
         if (Number(user.uid) === 9999) {
           setRemoteAgentPresent(false);
           setAgentStatus('STOPPED');
+        }
+      });
+
+      // Handle real-time speech transcription stream messages from Agora ConvoAI
+      client.on('stream-message', (msgUid: number | string, payload: Uint8Array) => {
+        try {
+          const decoded = decodeAgoraStreamMessage(msgUid, payload);
+          if (!decoded || !decoded.text) {
+            return;
+          }
+
+          // Ingest event into the ephemeral in-memory aggregator (handles partial streaming vs finalization)
+          const { finalized, partial } = utteranceAggregatorRef.current.ingest(decoded);
+          setFinalizedUtterances(finalized);
+          setActivePartial(partial);
+
+          // Technical metadata ONLY in Live Diagnostic Logs (Zero transcript text, zero base64)
+          if (decoded.isFinal) {
+            addLog(`📡 [Stream Frame] Finalized frame from UID ${msgUid} (bytes: ${payload.byteLength}, id: ${decoded.utteranceId})`);
+          }
+        } catch (err: any) {
+          addLog(`⚠️ [Stream Decoder Error] ${err?.message || 'Frame decoding issue'}`);
         }
       });
 
@@ -531,8 +574,21 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
         </div>
       </div>
 
+      {/* Live Conversation Transcript Panel */}
+      <div style={{ marginTop: '0.75rem' }}>
+        <LiveTranscriptPanel
+          items={finalizedUtterances}
+          activePartial={activePartial}
+          onClear={() => {
+            utteranceAggregatorRef.current.reset();
+            setFinalizedUtterances([]);
+            setActivePartial(null);
+          }}
+        />
+      </div>
+
       {/* Voice Logs */}
-      <div style={{ maxHeight: '100px', overflowY: 'auto', fontSize: '0.725rem', fontFamily: 'monospace', color: 'var(--text-secondary)', backgroundColor: '#0d1117', padding: '0.5rem 0.75rem', borderRadius: '6px' }}>
+      <div style={{ maxHeight: '80px', overflowY: 'auto', fontSize: '0.725rem', fontFamily: 'monospace', color: 'var(--text-secondary)', backgroundColor: '#0d1117', padding: '0.5rem 0.75rem', borderRadius: '6px' }}>
         {localLogs.length === 0 ? 'Voice radio events will appear here...' : localLogs.map((l, i) => <div key={i}>{l}</div>)}
       </div>
     </section>
