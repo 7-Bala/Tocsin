@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
+import Link from 'next/link';
 import { EventType, IncidentState, IncidentStatus, SeverityLevel } from '@/types/incident';
 import { createIncident, triggerIncidentEvent } from '@/hooks/useIncidentApi';
 
@@ -275,6 +276,27 @@ export const IncidentHeader: React.FC<IncidentHeaderProps> = ({
         >
           + New Incident
         </button>
+
+        <Link
+          href="/voice-test"
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '0.4rem',
+            padding: '0.55rem 1rem',
+            borderRadius: '8px',
+            border: '1px solid var(--border)',
+            backgroundColor: 'rgba(255, 255, 255, 0.06)',
+            color: 'var(--text-primary)',
+            fontSize: '0.85rem',
+            fontWeight: 600,
+            textDecoration: 'none',
+            cursor: 'pointer',
+            transition: 'background-color 0.15s ease',
+          }}
+        >
+          🎙️ Voice Test
+        </Link>
       </div>
 
       {/* New Incident Modal */}
