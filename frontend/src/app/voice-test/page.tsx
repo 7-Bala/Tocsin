@@ -135,11 +135,12 @@ export default function VoiceTestPage() {
   const vadCandidateRef    = useRef<boolean>(false);
   const vadProbabilityRef  = useRef<number>(0);
 
-  // ── Visualizer bar levels & spatial color refs (24 Dynamic Island bars) ──
-  const BAR_COUNT = 24;
+  // ── Visualizer bar levels & spatial color refs (20 Dynamic Island segments) ──
+  const BAR_COUNT = 20;
   const barLevelsRef = useRef<Float32Array>(new Float32Array(BAR_COUNT));
+  const smoothedLevelsRef = useRef<Float32Array>(new Float32Array(BAR_COUNT));
   const barColorsRef = useRef<Array<[number, number, number]>>(
-    Array.from({ length: BAR_COUNT }, () => [107, 114, 128])
+    Array.from({ length: BAR_COUNT }, () => [75, 85, 99])
   );
   const lastTimestampRef = useRef<number>(0);
 
@@ -415,6 +416,7 @@ export default function VoiceTestPage() {
     smoothedUserRmsRef.current = 0;
     aiSmoothedRmsRef.current = 0;
     barLevelsRef.current.fill(0);
+    smoothedLevelsRef.current.fill(0);
     barColorsRef.current.forEach(c => { c[0] = 75; c[1] = 85; c[2] = 99; });
     displayedSpeechProbRef.current = 0;
     displayedMicLevelRef.current = 0;
@@ -463,25 +465,25 @@ export default function VoiceTestPage() {
         aiAnalyserRef.current.getByteFrequencyData(aiFreqDataRef.current as any);
       }
 
-      // Agora volume indicators as supporting telemetry
+      // Agora volume indicators as physical fallback telemetry
       const localTrackVol = Number(localAudioTrackRef.current?.getVolumeLevel?.() || 0);
       const effectiveUserRaw = Math.max(
         rawUserRms,
-        localTrackVol * 0.14,
-        (userAmpRef.current / 100) * 0.14
+        localTrackVol * 0.12,
+        (userAmpRef.current / 100) * 0.12
       );
 
       const aiVolLevel = aiAmpRef.current / 100;
       const effectiveAiRaw = Math.max(
         rawAiRms,
-        aiSpeakingRef.current ? Math.max(0.035, aiVolLevel * 0.35) : 0
+        aiSpeakingRef.current ? Math.max(0.02, aiVolLevel * 0.30) : 0
       );
 
       // ── Step 3: Physical Audio RMS Smoothing (Fast Attack, Smooth Decay) ──
       smoothedUserRmsRef.current = approach(
         smoothedUserRmsRef.current,
         effectiveUserRaw,
-        effectiveUserRaw > smoothedUserRmsRef.current ? 38.0 : 8.0,
+        effectiveUserRaw > smoothedUserRmsRef.current ? 42.0 : 8.5,
         dt
       );
       const smoothedUserRms = smoothedUserRmsRef.current;
@@ -489,24 +491,24 @@ export default function VoiceTestPage() {
       aiSmoothedRmsRef.current = approach(
         aiSmoothedRmsRef.current,
         effectiveAiRaw,
-        effectiveAiRaw > aiSmoothedRmsRef.current ? 38.0 : 8.0,
+        effectiveAiRaw > aiSmoothedRmsRef.current ? 42.0 : 8.5,
         dt
       );
       const smoothedAiRms = aiSmoothedRmsRef.current;
 
       // ── Step 4: Calibrated Adaptive Noise Floor ──
-      const isQuiet = smoothedUserRms < noiseFloorRef.current * 1.6;
-      if ((isQuiet || !isSpeakingRef.current) && isConnectedRef.current && !isMutedRef.current) {
+      const isQuiet = smoothedUserRms < noiseFloorRef.current * 1.5;
+      if (isQuiet && isConnectedRef.current && !isMutedRef.current) {
         noiseFloorRef.current += (smoothedUserRms - noiseFloorRef.current) * (1 - Math.exp(-0.8 * dt));
       }
-      noiseFloorRef.current = Math.max(0.002, Math.min(0.035, noiseFloorRef.current));
+      noiseFloorRef.current = Math.max(0.003, Math.min(0.035, noiseFloorRef.current));
       const noiseFloor = noiseFloorRef.current;
 
-      // ── Step 5: Speech Gate with Hysteresis (Prevents False "User Speaking") ──
-      const SPEECH_ON_THRESHOLD  = Math.max(0.018, noiseFloor * 2.8);
-      const SPEECH_OFF_THRESHOLD = Math.max(0.009, noiseFloor * 1.5);
-      const SPEECH_ATTACK_FRAMES  = 3; // ~50ms confirmation
-      const SPEECH_RELEASE_FRAMES = 12; // ~200ms confirmation before releasing
+      // ── Step 5: Speech Gate with Hysteresis (Semantic Speaking State Only) ──
+      const SPEECH_ON_THRESHOLD  = Math.max(0.020, noiseFloor * 2.8);
+      const SPEECH_OFF_THRESHOLD = Math.max(0.010, noiseFloor * 1.6);
+      const SPEECH_ATTACK_FRAMES  = 3;
+      const SPEECH_RELEASE_FRAMES = 12;
 
       if (!isSpeakingRef.current) {
         if (smoothedUserRms > SPEECH_ON_THRESHOLD && !isMutedRef.current && isConnectedRef.current && smoothedAiRms < 0.02) {
@@ -532,130 +534,97 @@ export default function VoiceTestPage() {
         }
       }
 
-      // ── Step 6: Dynamic Normalization & Perceptual Compression ──
-      // Dynamic range calibrated for natural mic input & speech
-      const userDynamicRange = 0.075;
-      const normalizedUser = Math.min(1, Math.max(0, (smoothedUserRms - noiseFloor) / userDynamicRange));
-      const userVisualEnergy = Math.pow(normalizedUser, 0.55);
+      // ── Step 6: Dynamic Normalization & Strict Silence Cutoff ──
+      const userDynamicRange = 0.080;
+      const userEffectiveRms = Math.max(0, smoothedUserRms - noiseFloor);
+      const normalizedUser = Math.min(1, Math.max(0, userEffectiveRms / userDynamicRange));
+      const userVisualEnergy = normalizedUser < 0.012 ? 0 : Math.pow(normalizedUser, 0.60);
 
-      const aiDynamicRange = 0.09;
+      const aiDynamicRange = 0.090;
       const normalizedAi = Math.min(1, Math.max(0, smoothedAiRms / aiDynamicRange));
-      const aiVisualEnergy = Math.pow(normalizedAi, 0.55);
+      const aiVisualEnergy = normalizedAi < 0.012 ? 0 : Math.pow(normalizedAi, 0.60);
 
       // ── Step 7: Independent Simultaneous Audio Energy Calculation ──
       const connected = isConnectedRef.current;
       const muted = isMutedRef.current;
 
-      // Effective energies (zero if channel/mic is inactive)
+      // Effective energies: User audio is 0 if muted/disconnected; AI audio continues if connected
       const userEffectiveEnergy = connected && !muted ? userVisualEnergy : 0;
       const aiEffectiveEnergy = connected ? aiVisualEnergy : 0;
 
       const uFreq = userFreqDataRef.current;
-      const uTime = userTimeDataRef.current;
       const aFreq = aiFreqDataRef.current;
-      const aTime = aiTimeDataRef.current;
 
-      // ── Step 8: Discrete 3-Zone Apple Dynamic Island Physical Engine ──
-      // Zone 1 (Left 8 bars): Neon Green (#30D158) - Tocsin AI
-      // Zone 2 (Mid 8 bars): Bright Yellow (#FFD60A) - Cross-Talk / Mixed
-      // Zone 3 (Right 8 bars): Vibrant Red (#FF3B30 / #FF453A) - Field Operator
+      // ── Step 8: Unified 20-Segment Dual-Energy Waveform Physical Engine ──
       const barLevels = barLevelsRef.current;
       const barColors = barColorsRef.current;
+      const smoothedLevels = smoothedLevelsRef.current;
 
-      const BASELINE = connected && !muted ? 0.085 : connected ? 0.065 : 0.04;
-      const ATTACK_SPEED = 50.0;
-      const RELEASE_SPEED = 9.5;
+      const BASELINE = 0.06; // Fixed ~1.5px baseline on 24px max canvas height
+      const ATTACK_SPEED = 42.0;
+      const RELEASE_SPEED = 9.0;
 
       for (let i = 0; i < BAR_COUNT; i++) {
         const pos = i / (BAR_COUNT - 1); // 0.0 (left: AI) -> 1.0 (right: User)
         const distFromCenter = Math.abs(pos - 0.5) * 2; // 0 at center, 1 at ends
 
-        // Real frequency & time detail for subtle organic texture
+        // Real frequency spectrum harmonics
         const aiFreqVal   = getLogFrequencyEnergy(aFreq, (1.0 - pos) * 0.85 + 0.15);
-        const aiTimeVal   = getTimeDomainBandEnergy(aTime, BAR_COUNT - 1 - i, BAR_COUNT);
-        const aiDetail    = Math.max(aiFreqVal, aiTimeVal * 0.75);
-
         const userFreqVal = getLogFrequencyEnergy(uFreq, pos * 0.85 + 0.15);
-        const userTimeVal = getTimeDomainBandEnergy(uTime, i, BAR_COUNT);
-        const userDetail  = Math.max(userFreqVal, userTimeVal * 0.75);
 
-        // Acoustic height mapping:
-        // Left 8 bars (Green): AI energy dominant
-        // Middle 8 bars (Yellow): Both AI & Operator energies combined
-        // Right 8 bars (Red): Operator energy dominant
-        let zoneVoiceHeight = 0;
-        if (i < 8) {
-          // Green Zone: Driven by AI
-          const greenSpatial = 0.55 + 0.45 * (1.0 - i / 7);
-          const detailMod = 0.74 + 0.26 * aiDetail;
-          zoneVoiceHeight = aiEffectiveEnergy * greenSpatial * detailMod;
-        } else if (i < 16) {
-          // Yellow Zone: Driven by both AI & Operator
-          const midPos = (i - 8) / 7;
-          const yellowArch = 0.80 + 0.20 * (1.0 - Math.pow(Math.abs(midPos - 0.5) * 2, 1.4));
-          const maxEnergy = Math.max(aiEffectiveEnergy, userEffectiveEnergy);
-          const crossTalk = Math.min(aiEffectiveEnergy, userEffectiveEnergy);
-          const effectiveMidEnergy = maxEnergy * 0.85 + crossTalk * 0.35;
-          const detailMod = 0.74 + 0.26 * Math.max(aiDetail, userDetail);
-          zoneVoiceHeight = effectiveMidEnergy * yellowArch * detailMod;
-        } else {
-          // Red Zone: Driven by Operator
-          const redSpatial = 0.55 + 0.45 * ((i - 16) / 7);
-          const detailMod = 0.74 + 0.26 * userDetail;
-          zoneVoiceHeight = userEffectiveEnergy * redSpatial * detailMod;
-        }
+        // Spatial spread weighting: AI concentrated on left, User on right, smoothly overlapping in center
+        const aiSpatialWeight   = Math.pow(1.0 - pos, 0.75) * 0.70 + 0.30;
+        const userSpatialWeight = Math.pow(pos, 0.75) * 0.70 + 0.30;
 
-        // Symmetrical smooth arch
-        const clusterPos = (i % 8) / 7;
-        const clusterArch = 0.84 + 0.16 * (1.0 - Math.pow(Math.abs(clusterPos - 0.5) * 2, 1.6));
-        const overallArch = 0.88 + 0.12 * (1.0 - Math.pow(distFromCenter, 1.8));
+        const aiHeightContribution   = aiEffectiveEnergy * aiSpatialWeight * (0.75 + 0.25 * aiFreqVal);
+        const userHeightContribution = userEffectiveEnergy * userSpatialWeight * (0.75 + 0.25 * userFreqVal);
+
+        // Gaussian central arch
+        const centerArch = 0.85 + 0.15 * (1.0 - Math.pow(distFromCenter, 1.6));
+        const combinedVoiceHeight = Math.max(aiHeightContribution, userHeightContribution) * 0.70 + (aiHeightContribution + userHeightContribution) * 0.30;
 
         let targetHeight = BASELINE;
-        if (connected) {
-          targetHeight = BASELINE + zoneVoiceHeight * (1.0 - BASELINE) * clusterArch * overallArch;
+        if (connected && (userEffectiveEnergy > 0 || aiEffectiveEnergy > 0)) {
+          targetHeight = BASELINE + combinedVoiceHeight * (1.0 - BASELINE) * centerArch;
           targetHeight = Math.min(1.0, Math.max(BASELINE, targetHeight));
         }
 
         const speed = targetHeight > barLevels[i] ? ATTACK_SPEED : RELEASE_SPEED;
         barLevels[i] = approach(barLevels[i], targetHeight, speed, dt);
 
-        // ── Discrete 3-Zone Color Rendering: Green | Yellow | Red ──
-        let baseR: number, baseG: number, baseB: number;
-        let restingR: number, restingG: number, restingB: number;
-        let zoneActivity: number;
-
-        if (i < 8) {
-          // Zone 1: Apple Neon Green (#30D158)
-          baseR = 48; baseG = 209; baseB = 88;
-          restingR = 26; restingG = 76; restingB = 40;
-          zoneActivity = aiEffectiveEnergy;
-        } else if (i < 16) {
-          // Zone 2: Apple Bright Yellow (#FFD60A)
-          baseR = 255; baseG = 214; baseB = 10;
-          restingR = 86; restingG = 74; restingB = 20;
-          zoneActivity = Math.max(aiEffectiveEnergy, userEffectiveEnergy);
-        } else {
-          // Zone 3: Apple Vibrant Red (#FF3B30 / #FF453A)
-          baseR = 255; baseG = 59; baseB = 48;
-          restingR = 90; restingG = 30; restingB = 28;
-          zoneActivity = userEffectiveEnergy;
-        }
-
+        // ── Color Calculation: Continuous Green (AI) -> Warm Yellow (Center) -> Orange (User) ──
         let targetR: number, targetG: number, targetB: number;
         if (!connected) {
-          targetR = 75; targetG = 85; targetB = 99; // Disconnected Slate
+          targetR = 75; targetG = 85; targetB = 99; // Disconnected Slate: #4B5563
         } else {
-          const isZoneSpeaking =
-            (i < 8 && aiSpeakingRef.current) ||
-            (i >= 8 && i < 16 && (aiSpeakingRef.current || isSpeakingRef.current)) ||
-            (i >= 16 && isSpeakingRef.current);
+          // Dynamic active palette: Green (#30D158: 48, 209, 88) -> Yellow (#FFD60A: 255, 214, 10) -> Orange (#FF9F0A: 255, 159, 10)
+          let activeR: number, activeG: number, activeB: number;
+          if (pos <= 0.5) {
+            const k = pos / 0.5;
+            activeR = 48 + (255 - 48) * k;
+            activeG = 209 + (214 - 209) * k;
+            activeB = 88 + (10 - 88) * k;
+          } else {
+            const k = (pos - 0.5) / 0.5;
+            activeR = 255;
+            activeG = 214 + (159 - 214) * k;
+            activeB = 10;
+          }
 
-          const effectiveAct = Math.max(zoneActivity, isZoneSpeaking ? 0.50 : 0);
-          const glowFactor = Math.min(1.0, Math.max(0.0, (effectiveAct - 0.01) / 0.10));
+          // In silent/resting state, preserve spatial identity with subtle subdued tones
+          const restingR = 45 + 35 * pos;
+          const restingG = 85 - 25 * pos;
+          const restingB = 60 - 30 * pos;
 
-          targetR = restingR + (baseR - restingR) * (0.32 + 0.68 * glowFactor);
-          targetG = restingG + (baseG - restingG) * (0.32 + 0.68 * glowFactor);
-          targetB = restingB + (baseB - restingB) * (0.32 + 0.68 * glowFactor);
+          const activity = Math.max(
+            aiEffectiveEnergy * (1.0 - pos * 0.5),
+            userEffectiveEnergy * (0.5 + pos * 0.5)
+          );
+          const glowFactor = Math.min(1.0, Math.max(0.0, (activity - 0.01) / 0.10));
+
+          targetR = restingR + (activeR - restingR) * (0.35 + 0.65 * glowFactor);
+          targetG = restingG + (activeG - restingG) * (0.35 + 0.65 * glowFactor);
+          targetB = restingB + (activeB - restingB) * (0.35 + 0.65 * glowFactor);
         }
 
         barColors[i][0] = approach(barColors[i][0], targetR, 14.0, dt);
@@ -663,12 +632,12 @@ export default function VoiceTestPage() {
         barColors[i][2] = approach(barColors[i][2], targetB, 14.0, dt);
       }
 
-      // ── Step 9: Render Crisp High-DPI Waveform Canvas ──
+      // ── Step 9: 3-Point Gaussian Neighbor Smoothing & Crisp High-DPI Canvas ──
       if (waveformCanvasRef.current) {
         const canvas = waveformCanvasRef.current;
         const dpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1;
-        const cssW = 140;
-        const cssH = 28;
+        const cssW = 120;
+        const cssH = 26;
 
         if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
           canvas.width = Math.round(cssW * dpr);
@@ -680,6 +649,14 @@ export default function VoiceTestPage() {
           ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
           ctx.clearRect(0, 0, cssW, cssH);
 
+          // 3-point Gaussian neighbor smoothing across adjacent bars
+          for (let i = 0; i < BAR_COUNT; i++) {
+            const prev = i > 0 ? barLevels[i - 1] : barLevels[i];
+            const curr = barLevels[i];
+            const next = i < BAR_COUNT - 1 ? barLevels[i + 1] : barLevels[i];
+            smoothedLevels[i] = prev * 0.22 + curr * 0.56 + next * 0.22;
+          }
+
           const barWidth = 2.2;
           const barGap = 2.0;
           const totalWaveWidth = BAR_COUNT * barWidth + (BAR_COUNT - 1) * barGap;
@@ -687,9 +664,9 @@ export default function VoiceTestPage() {
           const centerY = cssH / 2;
 
           for (let i = 0; i < BAR_COUNT; i++) {
-            const normLevel = barLevels[i];
-            const minBarHeight = 2.2;
-            const maxBarHeight = cssH - 4; // 24px max height
+            const normLevel = smoothedLevels[i];
+            const minBarHeight = 1.5;
+            const maxBarHeight = 22; // max height inside 26px canvas
             const barHeight = Math.max(minBarHeight, Math.min(maxBarHeight, normLevel * maxBarHeight));
 
             const x = startX + i * (barWidth + barGap);
@@ -978,18 +955,19 @@ export default function VoiceTestPage() {
     isConnecting ? 'Connecting...' :
     connectionState !== 'CONNECTED' ? 'Ready' :
     isMuted ? 'Muted' :
+    isSpeaking && aiSpeaking ? 'Active' :
     isSpeaking ? 'You' :
     aiSpeaking ? 'Tocsin' :
-    waveStartedAt ? waveTimeLabel :
-    'Tocsin';
+    'Connected';
 
   const islandDotClass =
     connectionState === 'ERROR' ? 'error' :
     isConnecting ? 'connecting' :
-    connectionState !== 'CONNECTED' ? 'idle' :
+    connectionState !== 'CONNECTED' ? 'disconnected' :
     isMuted ? 'muted' :
-    aiSpeaking ? 'ai' :
+    isSpeaking && aiSpeaking ? 'active' :
     isSpeaking ? 'user' :
+    aiSpeaking ? 'ai' :
     'connected';
 
   const sevStyle = (sev: string): { bg: string; text: string; border: string } => {
@@ -1340,116 +1318,139 @@ export default function VoiceTestPage() {
           gap: 0;
         }
 
-        /* ── Compact Apple Dynamic Island Capsule (320px x 54px) ── */
+        /* ── Centered Interaction Cluster (42px Mic + 12px Gap + 310px Dynamic Island) ── */
+        .vcc-interaction-cluster {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 12px;
+          margin: 0 auto;
+          max-width: 100%;
+        }
+
+        /* ── Standalone 42px Circular Microphone Control (Left of Island) ── */
+        .vcc-cluster-mic-btn {
+          width: 42px;
+          height: 42px;
+          border-radius: 50%;
+          border: 1px solid rgba(0, 0, 0, 0.08);
+          background: #ffffff;
+          color: #374151;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          flex-shrink: 0;
+          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+          transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .vcc-cluster-mic-btn:hover:not(:disabled) {
+          background: #f9fafb;
+          border-color: rgba(0, 0, 0, 0.16);
+          transform: scale(1.04);
+        }
+        .vcc-cluster-mic-btn:active:not(:disabled) {
+          transform: scale(0.96);
+        }
+        .vcc-cluster-mic-btn:focus-visible {
+          outline: 2px solid #3b82f6;
+          outline-offset: 2px;
+        }
+        .vcc-cluster-mic-btn.active-user {
+          color: #ff9f0a;
+          border-color: #ff9f0a;
+          background: #fff7ed;
+          box-shadow: 0 0 12px rgba(255, 159, 10, 0.35);
+        }
+        .vcc-cluster-mic-btn.muted {
+          color: #ef4444;
+          border-color: #ef4444;
+          background: #fef2f2;
+        }
+        .vcc-cluster-mic-btn.disconnected {
+          opacity: 0.5;
+        }
+        .vcc-cluster-mic-btn:disabled {
+          opacity: 0.4;
+          cursor: not-allowed;
+        }
+
+        /* ── Compact Apple Dynamic Island Capsule (310px x 54px) ── */
         .vcc-dynamic-island {
-          width: min(320px, calc(100vw - 32px));
+          width: min(310px, calc(100vw - 32px));
           height: 54px;
           border-radius: 9999px;
           background: #000000;
-          box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28), 0 2px 6px rgba(0, 0, 0, 0.12);
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
           display: flex;
           align-items: center;
           justify-content: space-between;
-          padding: 0 14px 0 12px;
+          padding: 0 16px;
           box-sizing: border-box;
           user-select: none;
           transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease;
-          position: relative;
-          z-index: 10;
+          flex-shrink: 0;
         }
         .vcc-dynamic-island:hover {
           transform: translateY(-1px);
-          box-shadow: 0 16px 38px rgba(0, 0, 0, 0.34), 0 3px 8px rgba(0, 0, 0, 0.16);
+          box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
         }
 
         .vcc-island-left {
           display: flex;
           align-items: center;
-          gap: 6px;
+          gap: 8px;
           min-width: 0;
           flex: 1 1 auto;
           overflow: hidden;
-          padding-left: 4px;
         }
 
-        /* ── Integrated In-Capsule Apple Call Icon Button ── */
-        .vcc-island-mic-btn {
-          width: 28px;
-          height: 28px;
+        .vcc-island-dot {
+          width: 7px;
+          height: 7px;
           border-radius: 50%;
-          border: none;
-          background: transparent;
-          color: #30d158;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          cursor: pointer;
-          outline: none;
           flex-shrink: 0;
-          transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+          transition: background-color 0.2s ease;
         }
-        .vcc-island-mic-btn:hover:not(:disabled) {
-          background: rgba(255, 255, 255, 0.12);
-          transform: scale(1.08);
-        }
-        .vcc-island-mic-btn:active:not(:disabled) {
-          transform: scale(0.92);
-        }
-        .vcc-island-mic-btn.active-user {
-          color: #ff453a;
-          background: rgba(255, 69, 58, 0.15);
-        }
-        .vcc-island-mic-btn.active-ai {
-          color: #30d158;
-          background: rgba(48, 209, 88, 0.15);
-        }
-        .vcc-island-mic-btn.muted {
-          color: #ef4444;
-          background: rgba(239, 68, 68, 0.18);
-        }
-        .vcc-island-mic-btn.disconnected {
-          color: #9ca3af;
-        }
-        .vcc-island-mic-btn:disabled {
-          opacity: 0.4;
-          cursor: not-allowed;
-        }
-
-        .vcc-island-meta {
-          display: flex;
-          align-items: center;
-          min-width: 0;
-          overflow: hidden;
-        }
+        .vcc-island-dot.connected    { background: #30d158; }
+        .vcc-island-dot.user         { background: #ff9f0a; }
+        .vcc-island-dot.ai           { background: #30d158; }
+        .vcc-island-dot.active       { background: #ffd60a; }
+        .vcc-island-dot.muted        { background: #ef4444; }
+        .vcc-island-dot.connecting   { background: #ffd60a; }
+        .vcc-island-dot.disconnected { background: #9ca3af; }
+        .vcc-island-dot.error        { background: #ef4444; }
 
         .vcc-island-label {
-          font-size: 13.5px;
+          font-size: 13px;
           font-weight: 600;
-          color: #30d158;
+          color: #f3f4f6;
           letter-spacing: -0.01em;
-          font-variant-numeric: tabular-nums;
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
+          transition: color 0.2s ease;
         }
-        .vcc-island-label.muted {
-          color: #ef4444;
-        }
-        .vcc-island-label.disconnected {
-          color: #9ca3af;
-        }
+        .vcc-island-label.connected    { color: #30d158; }
+        .vcc-island-label.user         { color: #ff9f0a; }
+        .vcc-island-label.ai           { color: #30d158; }
+        .vcc-island-label.active       { color: #ffd60a; }
+        .vcc-island-label.muted        { color: #ef4444; }
+        .vcc-island-label.connecting   { color: #ffd60a; }
+        .vcc-island-label.disconnected { color: #9ca3af; }
+        .vcc-island-label.error        { color: #ef4444; }
 
         .vcc-island-wave {
           display: flex;
           align-items: center;
           justify-content: flex-end;
-          flex: 0 0 140px;
-          height: 28px;
+          flex: 0 0 120px;
+          height: 26px;
         }
         .vcc-island-canvas {
           display: block;
-          width: 140px;
-          height: 28px;
+          width: 120px;
+          height: 26px;
         }
 
         /* ── Minimal Secondary Controls & Telemetry Below Island ── */
@@ -1987,57 +1988,56 @@ export default function VoiceTestPage() {
           <main className="vcc-panel vcc-center" role="main">
             <div className="vcc-center-inner">
 
-              {/* ── Floating Apple Dynamic Island Capsule (320px x 54px) ── */}
-              <div className="vcc-dynamic-island" role="region" aria-label="Active voice call dynamic island">
-                {/* Left: In-Capsule Apple Call Icon Control & Call Timer */}
-                <div className="vcc-island-left">
-                  <button
-                    className={`vcc-island-mic-btn ${
-                      isMuted ? 'muted' :
-                      !isConnected ? 'disconnected' :
-                      isSpeaking && !isMuted ? 'active-user' :
-                      aiSpeaking ? 'active-ai' : ''
-                    }`}
-                    onClick={isConnected ? handleToggleMute : handleJoin}
-                    disabled={connectionState === 'FETCHING_TOKEN' || connectionState === 'JOINING'}
-                    aria-label={!isConnected ? 'Connect to voice channel' : isMuted ? 'Unmute microphone' : 'Mute microphone'}
-                    title={!isConnected ? 'Connect to voice' : isMuted ? 'Unmute microphone' : 'Mute microphone'}
-                  >
-                    {isMuted ? (
-                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                        <line x1="1" y1="1" x2="23" y2="23"/>
-                        <path d="M9 9v3a3 3 0 005.12 2.12M15 9.34V4a3 3 0 00-5.94-.6"/>
-                        <path d="M17 16.95A7 7 0 015 12v-2m14 0v2a7 7 0 01-.11 1.23"/>
-                        <line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="23" x2="16" y2="23"/>
-                      </svg>
-                    ) : isConnected ? (
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
-                      </svg>
-                    ) : (
-                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M12 2a3 3 0 00-3 3v7a3 3 0 006 0V5a3 3 0 00-3-3z"/>
-                        <path d="M19 10v2a7 7 0 01-14 0v-2"/>
-                        <line x1="12" y1="19" x2="12" y2="22"/>
-                      </svg>
-                    )}
-                  </button>
-                  <div className="vcc-island-meta">
-                    <span className={`vcc-island-label ${isMuted ? 'muted' : !isConnected ? 'disconnected' : ''}`}>
+              {/* ── Centered Interaction Cluster (42px Mic + 12px Gap + 310px Dynamic Island) ── */}
+              <div className="vcc-interaction-cluster" role="region" aria-label="Voice interaction control and visualizer">
+                {/* Standalone 42px Circular Mic Button */}
+                <button
+                  className={`vcc-cluster-mic-btn ${
+                    isMuted ? 'muted' :
+                    !isConnected ? 'disconnected' :
+                    isSpeaking ? 'active-user' : ''
+                  }`}
+                  onClick={isConnected ? handleToggleMute : handleJoin}
+                  disabled={connectionState === 'FETCHING_TOKEN' || connectionState === 'JOINING'}
+                  aria-label={!isConnected ? 'Connect to voice channel' : isMuted ? 'Unmute microphone' : 'Mute microphone'}
+                  title={!isConnected ? 'Connect to voice' : isMuted ? 'Unmute microphone' : 'Mute microphone'}
+                >
+                  {isMuted ? (
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="1" y1="1" x2="23" y2="23"/>
+                      <path d="M9 9v3a3 3 0 005.12 2.12M15 9.34V4a3 3 0 00-5.94-.6"/>
+                      <path d="M17 16.95A7 7 0 015 12v-2m14 0v2a7 7 0 01-.11 1.23"/>
+                      <line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="23" x2="16" y2="23"/>
+                    </svg>
+                  ) : (
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 2a3 3 0 00-3 3v7a3 3 0 006 0V5a3 3 0 00-3-3z"/>
+                      <path d="M19 10v2a7 7 0 01-14 0v-2"/>
+                      <line x1="12" y1="19" x2="12" y2="22"/>
+                    </svg>
+                  )}
+                </button>
+
+                {/* 310px Pure Black Dynamic Island Capsule */}
+                <div className="vcc-dynamic-island" aria-label="Dynamic island call visualizer">
+                  {/* Left: Status Dot & Concise Label */}
+                  <div className="vcc-island-left">
+                    <span className={`vcc-island-dot ${islandDotClass}`} aria-hidden="true" />
+                    <span className={`vcc-island-label ${islandDotClass}`}>
                       {islandStatusText}
                     </span>
                   </div>
-                </div>
 
-                {/* Right: Unified Symmetrical 24-Bar Dual-Energy Waveform Canvas */}
-                <div className="vcc-island-wave">
-                  <canvas
-                    ref={waveformCanvasRef}
-                    className="vcc-island-canvas"
-                    width={140}
-                    height={28}
-                    aria-label="Real-time voice dynamic island audio waveform"
-                  />
+                  {/* Right: Unified 20-Segment Dual-Energy Waveform Canvas */}
+                  <div className="vcc-island-wave">
+                    <canvas
+                      ref={waveformCanvasRef}
+                      className="vcc-island-canvas"
+                      width={120}
+                      height={26}
+                      aria-label="Real-time voice dynamic island audio waveform"
+                    />
+                  </div>
                 </div>
               </div>
 
