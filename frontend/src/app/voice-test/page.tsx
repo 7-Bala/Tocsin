@@ -30,60 +30,35 @@ function getTimeDomainBandEnergy(data: Uint8Array | null, bandIndex: number, ban
   const end = Math.max(start + 1, Math.floor(((bandIndex + 1) * data.length) / bandCount));
   let sumSquares = 0;
   for (let index = start; index < end; index++) {
-    const sample = data[index] / 128 - 1;
+    const sample = (data[index] - 128) / 128;
     sumSquares += sample * sample;
   }
-  return Math.min(1, Math.sqrt(sumSquares / (end - start)) * 18);
+  return Math.min(1, Math.sqrt(sumSquares / (end - start)) * 14);
 }
 
-/**
- * Soft-glow radial ring canvas renderer (preserved for backward compatibility).
- * Kept off-screen so any RAF loop null-check passes safely.
- */
-function drawGlowRing(
-  canvas: HTMLCanvasElement,
-  amplitude: number,
-  phase: number,
-  rgb: [number, number, number],
-  isActive: boolean,
-  isConnected: boolean
-): void {
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  const W = canvas.width, H = canvas.height, cx = W / 2, cy = H / 2, circleR = 75;
-  ctx.clearRect(0, 0, W, H);
-  const [r, g, b] = rgb;
-  const N = 90;
-  const baseAlpha = isActive ? 0.035 + amplitude * 0.05 : isConnected ? 0.015 : 0.005;
-  const spread    = isActive ? 10 + amplitude * 10 : isConnected ? 6 : 4;
-  const rotOffset = phase * 0.2;
-  for (let i = 0; i < N; i++) {
-    const angle = (i / N) * Math.PI * 2 + rotOffset;
-    let dr = 0;
-    if (isActive && amplitude > 0.004) {
-      dr = (
-        Math.sin(angle * 2 + phase * 1.2) * 1.5 +
-        Math.cos(angle * 4 - phase * 0.9) * 1.0 +
-        Math.sin(angle * 6 + phase * 1.5) * 0.5
-      ) * amplitude * 4.5;
-    } else if (isConnected) {
-      dr = Math.sin(angle * 2 + phase * 0.2) * 0.4;
-    }
-    const glowR  = circleR + 2 + Math.max(-2, dr);
-    const blobX  = cx + glowR * Math.cos(angle);
-    const blobY  = cy + glowR * Math.sin(angle);
-    const blobSz = spread + Math.max(0, dr * 0.5);
-    const grad   = ctx.createRadialGradient(blobX, blobY, 0, blobX, blobY, blobSz);
-    const peak   = Math.min(0.6, baseAlpha * 3.0);
-    const mid    = Math.min(0.3, baseAlpha * 1.5);
-    grad.addColorStop(0,   `rgba(${r},${g},${b},${peak})`);
-    grad.addColorStop(0.4, `rgba(${r},${g},${b},${mid})`);
-    grad.addColorStop(1,   `rgba(${r},${g},${b},0)`);
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(blobX, blobY, blobSz, 0, Math.PI * 2);
-    ctx.fill();
+function calculateRMS(data: Uint8Array | null): number {
+  if (!data || data.length === 0) return 0;
+  let sum = 0;
+  const len = data.length;
+  for (let i = 0; i < len; i++) {
+    const normalized = (data[i] - 128) / 128;
+    sum += normalized * normalized;
   }
+  return Math.sqrt(sum / len);
+}
+
+function approach(current: number, target: number, speed: number, dt: number): number {
+  const alpha = 1 - Math.exp(-speed * dt);
+  return current + (target - current) * alpha;
+}
+
+function getLogFrequencyEnergy(freqData: Uint8Array | null, distFromCenter: number): number {
+  if (!freqData || freqData.length === 0) return 0;
+  const logFrac = Math.pow(distFromCenter, 1.3);
+  const maxBins = Math.min(freqData.length, 120);
+  const binIdx = Math.min(maxBins - 1, Math.floor(2 + logFrac * (maxBins - 3)));
+  const rawVal = freqData[binIdx] || 0;
+  return Math.pow(rawVal / 255, 1.15);
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -155,16 +130,23 @@ export default function VoiceTestPage() {
   // ── Robust Speech Detection Gate refs ──────────────────────────────────
   const noiseFloorRef      = useRef<number>(0.006);
   const smoothedUserRmsRef = useRef<number>(0);
-  const smoothedUserVisualRmsRef = useRef<number>(0);
   const speakingFramesRef  = useRef<number>(0);
   const quietFramesRef     = useRef<number>(0);
   const vadCandidateRef    = useRef<boolean>(false);
   const vadProbabilityRef  = useRef<number>(0);
 
-  // ── Visualizer bar levels ref (16 Dynamic Island bars, preallocated) ──
-  const BAR_COUNT = 16;
+  // ── Visualizer bar levels ref (24 Dynamic Island bars, preallocated) ──
+  const BAR_COUNT = 24;
   const barLevelsRef  = useRef<Float32Array>(new Float32Array(BAR_COUNT));
-  const micMeterElRef = useRef<HTMLDivElement | null>(null);
+  const currentWaveformRgbRef = useRef<[number, number, number]>([107, 114, 128]);
+  const lastTimestampRef = useRef<number>(0);
+
+  // ── DOM meter refs for direct 60fps interpolation ─────────────────────
+  const micMeterElRef     = useRef<HTMLDivElement | null>(null);
+  const speechFillElRef   = useRef<HTMLDivElement | null>(null);
+  const speechValElRef    = useRef<HTMLSpanElement | null>(null);
+  const displayedSpeechProbRef = useRef<number>(0);
+  const displayedMicLevelRef   = useRef<number>(0);
 
   // ── Web Audio Analyser refs (User + AI Remote Audio) ───────────────────
   const audioCtxRef        = useRef<AudioContext | null>(null);
@@ -178,14 +160,10 @@ export default function VoiceTestPage() {
   const aiFreqDataRef      = useRef<Uint8Array | null>(null);
   const aiSourceRef        = useRef<MediaStreamAudioSourceNode | null>(null);
   const aiSmoothedRmsRef   = useRef<number>(0);
-  const userPitchRef       = useRef<number>(0);
-  const aiPitchRef         = useRef<number>(0);
 
   const aiAmpRef           = useRef<number>(0);
   const userAmpRef         = useRef<number>(0);
-  const phaseRef           = useRef<number>(0);
   const rafRef             = useRef<number>(0);
-  const glowCanvasRef      = useRef<HTMLCanvasElement | null>(null);
   const waveformCanvasRef  = useRef<HTMLCanvasElement | null>(null);
   const aiSpeakingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isSpeakingRef      = useRef<boolean>(false);
@@ -433,12 +411,11 @@ export default function VoiceTestPage() {
     quietFramesRef.current = 0;
     vadCandidateRef.current = false;
     smoothedUserRmsRef.current = 0;
-    smoothedUserVisualRmsRef.current = 0;
     aiSmoothedRmsRef.current = 0;
-    userAmpRef.current = 0;
-    userPitchRef.current = 0;
-    aiPitchRef.current = 0;
     barLevelsRef.current.fill(0);
+    currentWaveformRgbRef.current = [75, 85, 99];
+    displayedSpeechProbRef.current = 0;
+    displayedMicLevelRef.current = 0;
     addLog('Left voice channel. Dashboard data retained.');
   }, [addLog]);
 
@@ -451,268 +428,266 @@ export default function VoiceTestPage() {
     return () => { clearInterval(timer); handleLeave(); };
   }, [addLog, handleLeave]);
 
-  // ── Unified Real Audio-Reactive Analysis & Waveform Renderer ───────────
+  // ── Unified Real Audio-Reactive Analysis & Dynamic Island Renderer ─────
   useEffect(() => {
-    const loop = () => {
+    const loop = (timestamp: number) => {
       rafRef.current = requestAnimationFrame(loop);
       if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
         audioCtxRef.current.resume().catch(() => {});
       }
 
-      // ── Step 1: Measure Real User Microphone Audio ──
+      const now = timestamp || performance.now();
+      const lastTime = lastTimestampRef.current || now;
+      const dt = Math.min(0.05, Math.max(0.001, (now - lastTime) / 1000));
+      lastTimestampRef.current = now;
+
+      // ── Step 1: Read Real User Microphone Audio ──
       let rawUserRms = 0;
       if (userAnalyserRef.current && userTimeDataRef.current) {
-        userAnalyserRef.current.getByteTimeDomainData(userTimeDataRef.current);
-        let sumSq = 0;
-        const len = userTimeDataRef.current.length;
-        for (let j = 0; j < len; j++) {
-          const v = userTimeDataRef.current[j] / 128 - 1;
-          sumSq += v * v;
-        }
-        rawUserRms = Math.sqrt(sumSq / len);
+        userAnalyserRef.current.getByteTimeDomainData(userTimeDataRef.current as any);
+        rawUserRms = calculateRMS(userTimeDataRef.current);
       }
       if (userAnalyserRef.current && userFreqDataRef.current) {
-        userAnalyserRef.current.getByteFrequencyData(userFreqDataRef.current);
-        const detectedPitch = estimateDominantFrequency(
-          userFreqDataRef.current,
-          audioCtxRef.current?.sampleRate || 48000,
-          userAnalyserRef.current.fftSize
-        );
-        if (detectedPitch > 0) userPitchRef.current += (detectedPitch - userPitchRef.current) * 0.16;
+        userAnalyserRef.current.getByteFrequencyData(userFreqDataRef.current as any);
       }
 
-      // ── Step 2: Measure Real AI Remote Output Audio ──
+      // ── Step 2: Read Real AI Remote Audio ──
       let rawAiRms = 0;
       if (aiAnalyserRef.current && aiTimeDataRef.current) {
-        aiAnalyserRef.current.getByteTimeDomainData(aiTimeDataRef.current);
-        let sumSq = 0;
-        const len = aiTimeDataRef.current.length;
-        for (let j = 0; j < len; j++) {
-          const v = aiTimeDataRef.current[j] / 128 - 1;
-          sumSq += v * v;
-        }
-        rawAiRms = Math.sqrt(sumSq / len);
+        aiAnalyserRef.current.getByteTimeDomainData(aiTimeDataRef.current as any);
+        rawAiRms = calculateRMS(aiTimeDataRef.current);
       }
       if (aiAnalyserRef.current && aiFreqDataRef.current) {
-        aiAnalyserRef.current.getByteFrequencyData(aiFreqDataRef.current);
-        const detectedPitch = estimateDominantFrequency(
-          aiFreqDataRef.current,
-          audioCtxRef.current?.sampleRate || 48000,
-          aiAnalyserRef.current.fftSize
-        );
-        if (detectedPitch > 0) aiPitchRef.current += (detectedPitch - aiPitchRef.current) * 0.16;
+        aiAnalyserRef.current.getByteFrequencyData(aiFreqDataRef.current as any);
       }
-      // Fallback for AI amplitude from Agora volume indicator if remote audio node is not direct
-      const aiVolLevel = aiAmpRef.current / 100;
-      const effectiveAiRaw = Math.max(rawAiRms, aiSpeakingRef.current ? Math.max(0.04, aiVolLevel * 0.45) : 0);
 
-      // ── Step 3: Physical Audio Smoothing (Attack 0.35, Release 0.08) ──
-      const userAttack = 0.35, userRelease = 0.08;
-      smoothedUserRmsRef.current += (rawUserRms - smoothedUserRmsRef.current) * (rawUserRms > smoothedUserRmsRef.current ? userAttack : userRelease);
+      // Agora volume indicators as supporting telemetry
+      const localTrackVol = Number(localAudioTrackRef.current?.getVolumeLevel?.() || 0);
+      const effectiveUserRaw = Math.max(
+        rawUserRms,
+        localTrackVol * 0.14,
+        (userAmpRef.current / 100) * 0.14
+      );
+
+      const aiVolLevel = aiAmpRef.current / 100;
+      const effectiveAiRaw = Math.max(
+        rawAiRms,
+        aiSpeakingRef.current ? Math.max(0.035, aiVolLevel * 0.35) : 0
+      );
+
+      // ── Step 3: Physical Audio RMS Smoothing (Fast Attack, Smooth Decay) ──
+      smoothedUserRmsRef.current = approach(
+        smoothedUserRmsRef.current,
+        effectiveUserRaw,
+        effectiveUserRaw > smoothedUserRmsRef.current ? 38.0 : 8.0,
+        dt
+      );
       const smoothedUserRms = smoothedUserRmsRef.current;
 
-      const localTrackVolume = Number(localAudioTrackRef.current?.getVolumeLevel?.() || 0);
-      const effectiveUserVisualRaw = Math.max(
-        rawUserRms,
-        Math.max(0, Math.min(1, localTrackVolume)) * 0.11,
-        (userAmpRef.current / 100) * 0.11
+      aiSmoothedRmsRef.current = approach(
+        aiSmoothedRmsRef.current,
+        effectiveAiRaw,
+        effectiveAiRaw > aiSmoothedRmsRef.current ? 38.0 : 8.0,
+        dt
       );
-      const visualAttack = 0.56, visualRelease = 0.16;
-      smoothedUserVisualRmsRef.current += (effectiveUserVisualRaw - smoothedUserVisualRmsRef.current)
-        * (effectiveUserVisualRaw > smoothedUserVisualRmsRef.current ? visualAttack : visualRelease);
-      const smoothedUserVisualRms = smoothedUserVisualRmsRef.current;
-
-      const aiAttack = 0.35, aiRelease = 0.08;
-      aiSmoothedRmsRef.current += (effectiveAiRaw - aiSmoothedRmsRef.current) * (effectiveAiRaw > aiSmoothedRmsRef.current ? aiAttack : aiRelease);
       const smoothedAiRms = aiSmoothedRmsRef.current;
 
       // ── Step 4: Calibrated Adaptive Noise Floor ──
-      const isQuiet = smoothedUserRms < noiseFloorRef.current * 1.8;
-      if (isQuiet || !isSpeakingRef.current) {
-        noiseFloorRef.current += (smoothedUserRms - noiseFloorRef.current) * 0.015;
+      const isQuiet = smoothedUserRms < noiseFloorRef.current * 1.6;
+      if ((isQuiet || !isSpeakingRef.current) && isConnectedRef.current && !isMutedRef.current) {
+        noiseFloorRef.current += (smoothedUserRms - noiseFloorRef.current) * (1 - Math.exp(-0.8 * dt));
       }
-      noiseFloorRef.current = Math.max(0.003, Math.min(0.035, noiseFloorRef.current));
+      noiseFloorRef.current = Math.max(0.002, Math.min(0.035, noiseFloorRef.current));
       const noiseFloor = noiseFloorRef.current;
 
-      // ── Step 5: Conservative Speech Gate with Hysteresis ──
-      const SPEECH_ON_THRESHOLD  = Math.max(0.020, noiseFloor * 2.8);
-      const SPEECH_OFF_THRESHOLD = Math.max(0.011, noiseFloor * 1.6);
+      // ── Step 5: Speech Gate with Hysteresis (Prevents False "User Speaking") ──
+      const SPEECH_ON_THRESHOLD  = Math.max(0.018, noiseFloor * 2.8);
+      const SPEECH_OFF_THRESHOLD = Math.max(0.009, noiseFloor * 1.5);
       const SPEECH_ATTACK_FRAMES  = 3; // ~50ms confirmation
       const SPEECH_RELEASE_FRAMES = 12; // ~200ms confirmation before releasing
 
       if (!isSpeakingRef.current) {
-        if (smoothedUserRms > SPEECH_ON_THRESHOLD && !isMutedRef.current && isConnectedRef.current && !aiSpeakingRef.current) {
+        if (smoothedUserRms > SPEECH_ON_THRESHOLD && !isMutedRef.current && isConnectedRef.current && smoothedAiRms < 0.02) {
           speakingFramesRef.current++;
+          if (speakingFramesRef.current >= SPEECH_ATTACK_FRAMES) {
+            isSpeakingRef.current = true;
+            setIsSpeaking(true);
+            quietFramesRef.current = 0;
+          }
         } else {
           speakingFramesRef.current = 0;
-        }
-        if (speakingFramesRef.current >= SPEECH_ATTACK_FRAMES) {
-          isSpeakingRef.current = true;
-          setIsSpeaking(true);
-          quietFramesRef.current = 0;
         }
       } else {
         if (smoothedUserRms < SPEECH_OFF_THRESHOLD || isMutedRef.current || !isConnectedRef.current) {
           quietFramesRef.current++;
+          if (quietFramesRef.current >= SPEECH_RELEASE_FRAMES) {
+            isSpeakingRef.current = false;
+            setIsSpeaking(false);
+            speakingFramesRef.current = 0;
+          }
         } else {
           quietFramesRef.current = 0;
         }
-        if (quietFramesRef.current >= SPEECH_RELEASE_FRAMES) {
-          isSpeakingRef.current = false;
-          setIsSpeaking(false);
-          speakingFramesRef.current = 0;
-        }
       }
 
-      phaseRef.current = (phaseRef.current + 0.05) % (Math.PI * 200);
-      const phase = phaseRef.current;
+      // ── Step 6: Dynamic Normalization & Perceptual Compression ──
+      // Dynamic range: quiet speech ~ 20-30%, normal speech ~ 40-60%, shouting ~ 85-100%
+      const userDynamicRange = 0.12;
+      const normalizedUser = Math.min(1, Math.max(0, (smoothedUserRms - noiseFloor) / userDynamicRange));
+      const userVisualEnergy = Math.pow(normalizedUser, 0.65);
 
-      // ── Step 6: Determine Active Audio Source & Characteristics ──
+      const aiDynamicRange = 0.20;
+      const normalizedAi = Math.min(1, Math.max(0, smoothedAiRms / aiDynamicRange));
+      const aiVisualEnergy = Math.pow(normalizedAi, 0.65);
+
+      // ── Step 7: Determine Speaker Mode & Target Color ──
       const connected = isConnectedRef.current;
-      const aiActive = connected && (aiSpeakingRef.current || smoothedAiRms > 0.02);
-      const userVisualizationActive = connected && !isMutedRef.current && smoothedUserVisualRms > Math.max(0.006, noiseFloor * 0.8);
-      const userActive = userVisualizationActive && !aiActive;
+      const muted = isMutedRef.current;
 
-      // ── Step 7: Update Live Mic Level Meter (Direct DOM for 60 FPS performance) ──
-      if (micMeterElRef.current) {
-        const activeLevel = connected && !isMutedRef.current ? Math.min(1, Math.max(0, (smoothedUserVisualRms - noiseFloor * 0.5) / 0.06)) : 0;
-        const totalSegments = 12;
-        const activeCount = Math.round(activeLevel * totalSegments);
-        const segments = micMeterElRef.current.children;
-        for (let s = 0; s < segments.length; s++) {
-          const segEl = segments[s] as HTMLElement;
-          if (s < activeCount) {
-            segEl.style.backgroundColor = s >= 10 ? '#ef4444' : s >= 8 ? '#f59e0b' : '#16a34a';
-            segEl.style.opacity = '1';
-          } else {
-            segEl.style.backgroundColor = '#e5e7eb';
-            segEl.style.opacity = '0.4';
-          }
-        }
+      let mode: 'ai' | 'user' | 'idle' | 'disconnected' = 'disconnected';
+      let activeEnergy = 0;
+      let activeFreqData: Uint8Array | null = null;
+      let activeTimeData: Uint8Array | null = null;
+      let targetRgb: [number, number, number] = [75, 85, 99]; // Disconnected: #4B5563
+
+      if (!connected) {
+        mode = 'disconnected';
+        targetRgb = [75, 85, 99];
+      } else if (muted) {
+        mode = 'idle';
+        targetRgb = [156, 163, 175]; // Subdued gray
+      } else if (aiVisualEnergy > 0.05 || (aiSpeakingRef.current && smoothedAiRms > 0.015)) {
+        mode = 'ai';
+        activeEnergy = aiVisualEnergy;
+        activeFreqData = aiFreqDataRef.current;
+        activeTimeData = aiTimeDataRef.current;
+        targetRgb = [48, 209, 88]; // #30D158 Apple Green
+      } else if (isSpeakingRef.current || userVisualEnergy > 0.08) {
+        mode = 'user';
+        activeEnergy = userVisualEnergy;
+        activeFreqData = userFreqDataRef.current;
+        activeTimeData = userTimeDataRef.current;
+        targetRgb = [255, 159, 10]; // #FF9F0A Apple Orange
+      } else {
+        mode = 'idle';
+        targetRgb = [107, 114, 128]; // #6B7280 Neutral Gray
       }
 
-      // ── Step 8: High-DPI Real-Time Symmetrical Audio Waveform Renderer ──
+      // Smooth RGB Color Interpolation (120-180ms)
+      const currentRgb = currentWaveformRgbRef.current;
+      currentRgb[0] = approach(currentRgb[0], targetRgb[0], 10.0, dt);
+      currentRgb[1] = approach(currentRgb[1], targetRgb[1], 10.0, dt);
+      currentRgb[2] = approach(currentRgb[2], targetRgb[2], 10.0, dt);
+      const colorStr = `rgb(${Math.round(currentRgb[0])}, ${Math.round(currentRgb[1])}, ${Math.round(currentRgb[2])})`;
+
+      // ── Step 8: 24 Symmetrical Waveform Bars Physical Smoothing ──
+      const barLevels = barLevelsRef.current;
+      const BASELINE = connected && !muted ? 0.065 : 0.035;
+      const ATTACK_SPEED = 38.0;
+      const RELEASE_SPEED = 7.5;
+
+      for (let i = 0; i < BAR_COUNT; i++) {
+        let target = BASELINE;
+
+        if (mode === 'user' || mode === 'ai') {
+          const normalizedIdx = i / (BAR_COUNT - 1);
+          const distFromCenter = Math.abs(normalizedIdx - 0.5) * 2; // 0 at center, 1 at ends
+
+          const freqEnergy = getLogFrequencyEnergy(activeFreqData, distFromCenter);
+          const timeEnergy = getTimeDomainBandEnergy(activeTimeData, i, BAR_COUNT);
+          const bandDetail = Math.max(freqEnergy, timeEnergy * 0.75);
+
+          // Subtle center focus window like Apple call visualizer
+          const centerWeight = 1.0 - Math.pow(distFromCenter, 1.5) * 0.22;
+
+          target = BASELINE + activeEnergy * (0.16 + bandDetail * 0.84) * centerWeight;
+          target = Math.min(1.0, Math.max(BASELINE, target));
+        }
+
+        const speed = target > barLevels[i] ? ATTACK_SPEED : RELEASE_SPEED;
+        barLevels[i] = approach(barLevels[i], target, speed, dt);
+      }
+
+      // ── Step 9: Render Crisp High-DPI Canvas ──
       if (waveformCanvasRef.current) {
         const canvas = waveformCanvasRef.current;
         const dpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1;
-        const W = 135, H = 18;
-        if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
-          canvas.width = Math.round(W * dpr);
-          canvas.height = Math.round(H * dpr);
+        const cssW = 170;
+        const cssH = 32;
+
+        if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+          canvas.width = Math.round(cssW * dpr);
+          canvas.height = Math.round(cssH * dpr);
         }
+
         const ctx = canvas.getContext('2d');
         if (ctx) {
-          ctx.save();
-          ctx.scale(dpr, dpr);
-          ctx.clearRect(0, 0, W, H);
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          ctx.clearRect(0, 0, cssW, cssH);
 
-          const barGap = 2;
-          const barWidth = 3;
-          const centerY  = H / 2;
-          const barLevels = barLevelsRef.current;
-          const REST_LEVEL = connected && !isMutedRef.current ? 0.008 : 0.004;
-          const userPitch = Math.max(0, Math.min(1, (userPitchRef.current - 90) / 720));
-          const aiPitch = Math.max(0, Math.min(1, (aiPitchRef.current - 90) / 720));
+          const barWidth = 2.5;
+          const barGap = 2.2;
+          const totalWaveWidth = BAR_COUNT * barWidth + (BAR_COUNT - 1) * barGap;
+          const startX = Math.round((cssW - totalWaveWidth) / 2);
+          const centerY = cssH / 2;
+
+          ctx.fillStyle = colorStr;
 
           for (let i = 0; i < BAR_COUNT; i++) {
-            let targetBar = REST_LEVEL;
+            const normLevel = barLevels[i];
+            const minBarHeight = 2.0;
+            const maxBarHeight = cssH - 4; // 28px max height
+            const barHeight = Math.max(minBarHeight, Math.min(maxBarHeight, normLevel * maxBarHeight));
 
-            if (userActive) {
-              // Normalized RMS energy envelope with non-linear perception curve
-              const normalizedRms = Math.min(1, Math.max(0, (smoothedUserVisualRms - noiseFloor * 0.5) / 0.055));
-              const energy = Math.pow(normalizedRms, 0.45);
-
-              // Symmetrical logarithmic frequency bin distribution
-              // Center bars = fundamental voice frequencies (85-300Hz)
-              // Outer bars = voice formants & high harmonics (300-3400Hz)
-              const dist = i / (BAR_COUNT - 1); // low frequencies at left, harmonics at right
-              const binIdx = Math.min(
-                (userFreqDataRef.current?.length || 1) - 1,
-                Math.floor(Math.pow(dist, 1.4) * 64) + 2
-              );
-              const freqMag = userFreqDataRef.current ? (userFreqDataRef.current[binIdx] || 0) / 255 : 0;
-              const freqEnergy = Math.pow(freqMag, 1.2);
-              const timeEnergy = getTimeDomainBandEnergy(userTimeDataRef.current, i, BAR_COUNT);
-              const bandEnergy = Math.max(freqEnergy, timeEnergy);
-
-              const pitchShape = 0.72 + userPitch * 0.5;
-              targetBar = REST_LEVEL + energy * (0.22 + bandEnergy * 0.78) * pitchShape;
-              targetBar = Math.min(1, Math.max(REST_LEVEL, targetBar));
-
-              // Fast attack, smooth decay
-              const ATTACK = 0.5, RELEASE = 0.14;
-              barLevels[i] += (targetBar - barLevels[i]) * (targetBar > barLevels[i] ? ATTACK : RELEASE);
-
-            } else if (aiActive) {
-              // Real AI Audio Spectrum or smooth harmonic envelope
-              const normalizedAiRms = Math.min(1, Math.max(0, smoothedAiRms / 0.20));
-              const aiEnergy = Math.pow(normalizedAiRms, 0.65);
-
-              const dist = i / (BAR_COUNT - 1);
-              let aiFreqMag = 0;
-              if (aiFreqDataRef.current && aiFreqDataRef.current.length > 0) {
-                const binIdx = Math.min(aiFreqDataRef.current.length - 1, Math.floor(Math.pow(dist, 1.4) * 64) + 2);
-                aiFreqMag = (aiFreqDataRef.current[binIdx] || 0) / 255;
-              } else {
-                // Keep the fallback quiet and pitch-shaped until remote FFT data arrives.
-                aiFreqMag = 0.18 + (1 - dist) * 0.24 + aiPitch * 0.18;
-              }
-
-              const pitchShape = 0.72 + aiPitch * 0.5;
-              targetBar = REST_LEVEL + aiEnergy * (0.28 + aiFreqMag * 0.58) * pitchShape;
-              targetBar = Math.min(1, Math.max(REST_LEVEL, targetBar));
-
-              const ATTACK = 0.5, RELEASE = 0.14;
-              barLevels[i] += (targetBar - barLevels[i]) * (targetBar > barLevels[i] ? ATTACK : RELEASE);
-
-            } else if (connected && !isMutedRef.current) {
-              // Standby / Silence: Smooth natural decay to minimal resting line (no fake looping wave)
-              targetBar = REST_LEVEL;
-              const RELEASE = 0.08;
-              barLevels[i] += (targetBar - barLevels[i]) * RELEASE;
-
-            } else {
-              // Muted / Disconnected: flat quiet resting baseline
-              barLevels[i] += (targetBar - barLevels[i]) * 0.08;
-            }
-
-            const barH = Math.max(0.8, Math.min(H - 4, barLevels[i] * (H - 4)));
-            const x = i * (barWidth + barGap);
-            const y = centerY - barH / 2;
-
-            // Color scheme matching state
-            if (userActive || aiActive) {
-              ctx.fillStyle = '#FD4F30';
-            } else if (connected && !isMutedRef.current) {
-              ctx.fillStyle = 'rgba(255, 72, 26, 0.62)';
-            } else if (isMutedRef.current) {
-              ctx.fillStyle = 'rgba(255, 72, 26, 0.48)';
-            } else {
-              ctx.fillStyle = 'rgba(255, 72, 26, 0.82)';
-            }
+            const x = startX + i * (barWidth + barGap);
+            const y = centerY - barHeight / 2;
+            const radius = Math.min(barWidth / 2, barHeight / 2);
 
             ctx.beginPath();
-            const radius = Math.min(barWidth / 2, barH / 2);
-            if (typeof (ctx as any).roundRect === 'function') {
-              (ctx as any).roundRect(x, y, barWidth, barH, radius);
+            if (typeof ctx.roundRect === 'function') {
+              ctx.roundRect(x, y, barWidth, barHeight, radius);
             } else {
-              ctx.rect(x, y, barWidth, barH);
+              ctx.rect(x, y, barWidth, barHeight);
             }
             ctx.fill();
           }
-
-          ctx.restore();
         }
       }
 
-      // Glow canvas — kept off-screen for backward-compat
-      if (glowCanvasRef.current) {
-        const rgb: [number, number, number] = aiActive ? [96, 165, 250] : [148, 163, 184];
-        drawGlowRing(glowCanvasRef.current, aiActive ? smoothedAiRms * 0.9 : 0, phase, rgb, aiActive, connected);
+      // ── Step 10: Smooth Secondary DOM Indicators (Zero React Re-renders) ──
+      // Speech confidence meter
+      const targetProb = muted ? 0 : vadProbabilityRef.current;
+      displayedSpeechProbRef.current = approach(displayedSpeechProbRef.current, targetProb, 14.0, dt);
+      if (speechFillElRef.current) {
+        speechFillElRef.current.style.width = `${Math.max(0, Math.min(100, displayedSpeechProbRef.current)).toFixed(1)}%`;
+      }
+      if (speechValElRef.current) {
+        speechValElRef.current.textContent = `${Math.round(displayedSpeechProbRef.current)}%`;
+      }
+
+      // Live Mic Level meter (12 LED segments)
+      const targetMicLevel = connected && !muted ? userVisualEnergy : 0;
+      displayedMicLevelRef.current = approach(displayedMicLevelRef.current, targetMicLevel, 20.0, dt);
+      if (micMeterElRef.current) {
+        const segs = micMeterElRef.current.children;
+        const activeCount = Math.round(displayedMicLevelRef.current * segs.length);
+        for (let s = 0; s < segs.length; s++) {
+          const el = segs[s] as HTMLElement;
+          if (s < activeCount) {
+            el.style.backgroundColor = s >= 10 ? '#ef4444' : s >= 8 ? '#f59e0b' : '#30d158';
+            el.style.opacity = '1';
+          } else {
+            el.style.backgroundColor = '#e4e4e7';
+            el.style.opacity = '0.35';
+          }
+        }
       }
     };
+
     rafRef.current = requestAnimationFrame(loop);
-    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
   }, []);
 
   // ── handleJoin ─────────────────────────────────────────────────────────
@@ -774,7 +749,6 @@ export default function VoiceTestPage() {
           setRemoteAgentPresent(false); setAgentStatus('STOPPED'); setAiSpeaking(false);
           aiAmpRef.current = 0;
           aiSmoothedRmsRef.current = 0;
-          aiPitchRef.current = 0;
           if (aiSourceRef.current) { try { aiSourceRef.current.disconnect(); } catch {} }
           aiSourceRef.current = null;
           aiAnalyserRef.current = null;
@@ -926,44 +900,33 @@ export default function VoiceTestPage() {
   const isConnected  = connectionState === 'CONNECTED';
   const isConnecting = connectionState === 'FETCHING_TOKEN' || connectionState === 'JOINING';
   const now = currentTime || new Date();
-  const waveDuration = waveStartedAt ? Math.max(0, Math.floor((now.getTime() - waveStartedAt) / 1000)) : 0;
-  const waveTimeLabel = `${String(Math.floor(waveDuration / 60)).padStart(2, '0')}:${String(waveDuration % 60).padStart(2, '0')}`;
 
   const voiceState =
     connectionState === 'ERROR' ? 'error'
     : isConnecting ? 'connecting'
     : connectionState !== 'CONNECTED' ? 'disconnected'
-    : aiSpeaking ? 'ai-speaking'
-    : isSpeaking && !isMuted ? 'listening'
     : isMuted ? 'muted'
+    : aiSpeaking ? 'ai-speaking'
+    : isSpeaking ? 'user-speaking'
     : 'standby';
 
-  const statusLabel =
-    voiceState === 'error' ? 'Connection error' :
-    voiceState === 'connecting' ? 'Connecting...' :
-    voiceState === 'disconnected' ? 'Ready to connect' :
-    voiceState === 'ai-speaking' ? 'Tocsin is speaking' :
-    voiceState === 'listening' ? 'Listening' :
-    voiceState === 'muted' ? 'Microphone muted' :
-    'Standby';
+  const islandStatusText =
+    connectionState === 'ERROR' ? 'Connection error' :
+    isConnecting ? 'Connecting...' :
+    connectionState !== 'CONNECTED' ? 'Ready' :
+    isMuted ? 'Microphone muted' :
+    aiSpeaking ? 'Tocsin speaking' :
+    isSpeaking ? 'You speaking' :
+    'Voice connected';
 
-  const statusSub =
-    voiceState === 'error' ? 'Check connection and try again' :
-    voiceState === 'connecting' ? 'Establishing secure voice channel...' :
-    voiceState === 'disconnected' ? 'Join the emergency channel to begin' :
-    voiceState === 'ai-speaking' ? 'Tocsin is responding to your report' :
-    voiceState === 'listening' ? 'Transcribing live audio...' :
-    voiceState === 'muted' ? 'Unmute microphone to speak' :
-    'Waiting for voice input from field operators';
-
-  const statusColor =
-    voiceState === 'error' ? '#dc2626' :
-    voiceState === 'connecting' ? '#6366f1' :
-    voiceState === 'disconnected' ? '#9ca3af' :
-    voiceState === 'ai-speaking' ? '#6366f1' :
-    voiceState === 'listening' ? '#16a34a' :
-    voiceState === 'muted' ? '#ef4444' :
-    '#6b7280';
+  const islandDotClass =
+    connectionState === 'ERROR' ? 'error' :
+    isConnecting ? 'connecting' :
+    connectionState !== 'CONNECTED' ? 'idle' :
+    isMuted ? 'muted' :
+    aiSpeaking ? 'ai' :
+    isSpeaking ? 'user' :
+    'connected';
 
   const sevStyle = (sev: string): { bg: string; text: string; border: string } => {
     switch (sev) {
@@ -990,10 +953,6 @@ export default function VoiceTestPage() {
   // ─────────────────────────────────────────────────────────────────────────
   return (
     <>
-      {/* ── Off-screen glow canvas kept for backward compatibility ── */}
-      <canvas ref={glowCanvasRef} width={220} height={220} aria-hidden="true"
-        style={{ position: 'absolute', left: '-9999px', top: '-9999px', pointerEvents: 'none' }} />
-
       <style suppressHydrationWarning>{`
         /* ── Reset & root ── */
         .vcc-root {
@@ -1160,8 +1119,8 @@ export default function VoiceTestPage() {
           from { opacity: 0; transform: translateY(4px); }
           to   { opacity: 1; transform: translateY(0); }
         }
-        .vcc-msg.you { border-left: 3px solid #16a34a; }
-        .vcc-msg.ai  { border-left: 3px solid #6366f1; }
+        .vcc-msg.you { border-left: 3px solid #ff9f0a; }
+        .vcc-msg.ai  { border-left: 3px solid #30d158; }
         .vcc-msg-header {
           display: flex;
           align-items: center;
@@ -1175,8 +1134,8 @@ export default function VoiceTestPage() {
           padding: 1px 6px;
           border-radius: 3px;
         }
-        .vcc-msg-speaker.you { background: #f0fdf4; color: #16a34a; }
-        .vcc-msg-speaker.ai  { background: #eef2ff; color: #6366f1; }
+        .vcc-msg-speaker.you { background: #fff7ed; color: #ea580c; }
+        .vcc-msg-speaker.ai  { background: #f0fdf4; color: #16a34a; }
         .vcc-msg-time {
           font-size: 9px;
           color: #b0b0b0;
@@ -1317,210 +1276,214 @@ export default function VoiceTestPage() {
           gap: 0;
         }
 
-        /* ── Focused Voice Interaction Box (No giant empty orb) ── */
-        .vcc-interaction-card {
+        /* ── Floating Apple Dynamic Island Pill ── */
+        .vcc-dynamic-island {
+          width: min(360px, calc(100vw - 40px));
+          height: 64px;
+          border-radius: 9999px;
+          background: #000000;
+          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.12);
           display: flex;
-          flex-direction: column;
           align-items: center;
-          gap: 16px;
-          width: 100%;
-          max-width: 360px;
-          background: #ffffff;
-          border: 1px solid #e8e8e8;
-          border-radius: 14px;
-          padding: 24px 20px 20px;
-          box-shadow: 0 1px 6px rgba(0,0,0,0.04);
+          justify-content: space-between;
+          padding: 0 18px 0 20px;
+          box-sizing: border-box;
+          user-select: none;
+          transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease;
+          position: relative;
+          z-index: 10;
+        }
+        .vcc-dynamic-island:hover {
+          transform: translateY(-1px);
+          box-shadow: 0 14px 36px rgba(0, 0, 0, 0.28), 0 3px 10px rgba(0, 0, 0, 0.15);
         }
 
-        .vcc-card-top {
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          gap: 4px;
-          width: 100%;
-        }
-        .vcc-badge-header {
-          display: inline-flex;
-          align-items: center;
-          gap: 6px;
-          font-size: 10px;
-          font-weight: 700;
-          letter-spacing: 0.08em;
-          text-transform: uppercase;
-          color: #6b7280;
-          margin-bottom: 2px;
-        }
-
-        /* ── Status title & subtitle ── */
-        .vcc-status-title {
-          font-size: 17px;
-          font-weight: 700;
-          color: #1a1a1a;
-          letter-spacing: -0.02em;
-          text-align: center;
+        .vcc-island-status {
           display: flex;
           align-items: center;
           gap: 8px;
-        }
-        .vcc-status-dot {
-          width: 9px; height: 9px;
-          border-radius: 50%;
-          background: ${statusColor};
-          flex-shrink: 0;
-          box-shadow: ${voiceState === 'listening' ? '0 0 10px #16a34a' : voiceState === 'ai-speaking' ? '0 0 10px #6366f1' : 'none'};
-          animation: ${voiceState === 'listening' || voiceState === 'ai-speaking' ? 'vcc-pulse-dot 1.2s ease-in-out infinite' : 'none'};
-        }
-        @keyframes vcc-pulse-dot {
-          0%, 100% { transform: scale(1); opacity: 1; }
-          50% { transform: scale(1.3); opacity: 0.7; }
-        }
-
-        .vcc-status-desc {
-          font-size: 11.5px;
-          color: #9b9b9b;
-          text-align: center;
-          line-height: 1.4;
-          max-width: 260px;
-        }
-
-        /* ── Waveform Canvas Container ── */
-        .vcc-waveform-box {
-          display: flex;
-          flex-direction: row;
-          align-items: center;
-          justify-content: center;
-          gap: 0;
-          width: 200px;
-          height: 28px;
-          padding: 0 10px;
-          box-sizing: border-box;
-          background: #000000;
-          border: 0;
-          border-radius: 999px;
-          box-shadow: 0 1px 4px rgba(0,0,0,0.18);
-        }
-        .vcc-wave-canvas {
-          display: block;
-          width: 135px;
-          height: 18px;
-          flex: 0 0 135px;
-        }
-        .vcc-wave-time {
-          min-width: 35px;
-          color: #FD4F30;
-          font-family: Inter, sans-serif;
-          font-size: 12px;
-          font-weight: 600;
-          line-height: 16px;
-          font-variant-numeric: tabular-nums;
-          letter-spacing: normal;
-          text-align: right;
-        }
-        .vcc-waveform-box .vcc-meter-row,
-        .vcc-waveform-box .vcc-vad-row {
-          display: none;
-        }
-
-        /* ── Live Mic Level Meter (12 discrete segments) ── */
-        .vcc-meter-row {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          width: 320px;
-          padding: 0 4px;
-        }
-        .vcc-meter-label {
-          font-size: 9px;
-          font-weight: 700;
-          letter-spacing: 0.08em;
-          text-transform: uppercase;
-          color: #9ca3af;
-        }
-        .vcc-led-track {
-          display: flex;
-          gap: 3px;
-          align-items: center;
-        }
-        .vcc-led-seg {
-          width: 12px;
-          height: 5px;
-          border-radius: 1.5px;
-          background: #e5e7eb;
-          opacity: 0.4;
-          transition: background-color 0.08s ease, opacity 0.08s ease;
-        }
-
-        /* ── Speech Detection / VAD Meter ── */
-        .vcc-vad-row {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          width: 320px;
-          padding: 0 4px;
-          font-size: 10px;
-          color: #6b7280;
-        }
-        .vcc-vad-track {
-          width: 140px;
-          height: 4px;
-          background: #ebebeb;
-          border-radius: 2px;
+          min-width: 0;
+          flex: 1 1 auto;
           overflow: hidden;
         }
-        .vcc-vad-fill {
-          height: 100%;
-          border-radius: 2px;
+        .vcc-island-dot {
+          width: 7px;
+          height: 7px;
+          border-radius: 50%;
+          flex-shrink: 0;
+          background: #6b7280;
+          transition: background-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+        }
+        .vcc-island-dot.user {
+          background: #ff9f0a;
+          box-shadow: 0 0 8px rgba(255, 159, 10, 0.7);
+        }
+        .vcc-island-dot.ai {
+          background: #30d158;
+          box-shadow: 0 0 8px rgba(48, 209, 88, 0.7);
+        }
+        .vcc-island-dot.connected {
+          background: #30d158;
+        }
+        .vcc-island-dot.muted {
+          background: #ef4444;
+        }
+        .vcc-island-dot.error {
+          background: #dc2626;
+        }
+        .vcc-island-dot.connecting {
           background: #6366f1;
-          transition: width 0.1s ease;
+        }
+        .vcc-island-dot.idle {
+          background: #6b7280;
         }
 
-        /* ── Microphone button ── */
-        .vcc-mic-section {
+        .vcc-island-label {
+          font-size: 13px;
+          font-weight: 500;
+          color: #f3f4f6;
+          letter-spacing: -0.01em;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .vcc-island-wave {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          flex: 0 0 170px;
+          height: 32px;
+        }
+        .vcc-island-canvas {
+          display: block;
+          width: 170px;
+          height: 32px;
+        }
+
+        /* ── Minimal Secondary Controls Area ── */
+        .vcc-island-controls {
+          margin-top: 24px;
           display: flex;
           flex-direction: column;
           align-items: center;
-          gap: 6px;
+          gap: 12px;
+          width: min(360px, calc(100vw - 40px));
         }
-        .vcc-mic-btn {
-          width: 48px;
-          height: 48px;
+
+        .vcc-island-mic-btn {
+          width: 42px;
+          height: 42px;
           border-radius: 50%;
-          border: 2px solid #e2e8f0;
+          border: 1px solid #d4d4d8;
           background: #ffffff;
-          color: #4a4a4a;
+          color: #3f3f46;
           display: flex;
           align-items: center;
           justify-content: center;
           cursor: pointer;
-          transition: all 0.18s cubic-bezier(0.16,1,0.3,1);
-          box-shadow: 0 1px 4px rgba(0,0,0,0.06);
           outline: none;
+          box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+          transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
         }
-        .vcc-mic-btn:hover:not(:disabled) {
-          border-color: #6366f1;
-          color: #6366f1;
-          transform: translateY(-1.5px);
-          box-shadow: 0 4px 12px rgba(99,102,241,0.18);
+        .vcc-island-mic-btn:hover:not(:disabled) {
+          border-color: #a1a1aa;
+          color: #18181b;
+          transform: translateY(-1px);
+          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.09);
         }
-        .vcc-mic-btn:active:not(:disabled) {
-          transform: scale(0.95);
+        .vcc-island-mic-btn:active:not(:disabled) {
+          transform: scale(0.96);
         }
-        .vcc-mic-btn:focus-visible { outline: 2px solid #6366f1; outline-offset: 3px; }
-        .vcc-mic-btn.active-listening {
-          border-color: #16a34a;
-          color: #16a34a;
-          box-shadow: 0 0 14px rgba(22, 163, 74, 0.25);
+        .vcc-island-mic-btn:focus-visible {
+          outline: 2px solid #ff9f0a;
+          outline-offset: 2px;
         }
-        .vcc-mic-btn.muted {
+        .vcc-island-mic-btn.active-user {
+          border-color: #ff9f0a;
+          color: #ff9f0a;
+          box-shadow: 0 0 12px rgba(255, 159, 10, 0.25);
+        }
+        .vcc-island-mic-btn.muted {
           background: #fef2f2;
           border-color: #fecaca;
           color: #dc2626;
         }
-        .vcc-mic-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-        .vcc-mic-hint {
-          font-size: 10px;
-          color: #9ca3af;
+        .vcc-island-mic-btn:disabled {
+          opacity: 0.4;
+          cursor: not-allowed;
+        }
+
+        .vcc-island-hint {
+          font-size: 11px;
+          color: #71717a;
           font-weight: 500;
+          text-align: center;
+        }
+
+        .vcc-island-meters {
+          width: 100%;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          padding: 10px 14px;
+          background: #ffffff;
+          border: 1px solid #e4e4e7;
+          border-radius: 10px;
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+          box-sizing: border-box;
+        }
+
+        .vcc-submeter-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          font-size: 10px;
+          color: #71717a;
+        }
+        .vcc-submeter-label {
+          font-weight: 600;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+          font-size: 9px;
+          color: #a1a1aa;
+          min-width: 95px;
+        }
+
+        .vcc-submeter-leds {
+          display: flex;
+          gap: 3px;
+          align-items: center;
+        }
+        .vcc-submeter-seg {
+          width: 11px;
+          height: 4.5px;
+          border-radius: 1px;
+          background: #e4e4e7;
+          opacity: 0.35;
+          transition: background-color 0.08s ease, opacity 0.08s ease;
+        }
+
+        .vcc-submeter-track {
+          flex: 1;
+          height: 3px;
+          background: #f4f4f5;
+          border-radius: 999px;
+          overflow: hidden;
+        }
+        .vcc-submeter-fill {
+          height: 100%;
+          border-radius: 999px;
+          background: #ff9f0a;
+        }
+        .vcc-submeter-num {
+          font-size: 9.5px;
+          font-weight: 600;
+          font-variant-numeric: tabular-nums;
+          width: 28px;
+          text-align: right;
+          color: #71717a;
         }
 
         /* ── System status row ── */
@@ -1771,9 +1734,9 @@ export default function VoiceTestPage() {
           .vcc-transcript-section { max-height: 220px; }
         }
         @media (prefers-reduced-motion: reduce) {
-          .vcc-status-dot { animation: none !important; }
+          .vcc-dynamic-island { transition: none !important; }
+          .vcc-island-dot { transition: none !important; }
           .vcc-sys-dot    { animation: none !important; }
-          @keyframes vcc-pulse-dot {}
           @keyframes vcc-blink {}
         }
       `}</style>
@@ -1866,10 +1829,10 @@ export default function VoiceTestPage() {
                 )}
                 {/* Streaming indicator when AI is speaking */}
                 {aiSpeaking && transcript.length > 0 && transcript[transcript.length - 1].speaker === 'AI Agent' && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', fontSize: 11, color: '#6366f1', fontStyle: 'italic' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', fontSize: 11, color: '#30d158', fontStyle: 'italic' }}>
                     <span style={{ display: 'flex', gap: 3 }}>
                       {[0, 0.2, 0.4].map((d, i) => (
-                        <span key={i} style={{ width: 5, height: 5, borderRadius: '50%', background: '#6366f1', display: 'inline-block', animation: `vcc-blink 1s ${d}s ease-in-out infinite` }} />
+                        <span key={i} style={{ width: 5, height: 5, borderRadius: '50%', background: '#30d158', display: 'inline-block', animation: `vcc-blink 1s ${d}s ease-in-out infinite` }} />
                       ))}
                     </span>
                     Tocsin is responding...
@@ -1972,91 +1935,92 @@ export default function VoiceTestPage() {
             </div>
           </aside>
 
-          {/* ════════════════════ CENTER PANEL (FOCUSED VOICE INTERACTION) ════════════════════ */}
+          {/* ════════════════════ CENTER PANEL (DYNAMIC ISLAND CALL UI) ════════════════════ */}
           <main className="vcc-panel vcc-center" role="main">
             <div className="vcc-center-inner">
-              <div className="vcc-interaction-card">
 
-                {/* Header & Status */}
-                <div className="vcc-card-top">
-                  <span className="vcc-badge-header">Voice Interaction</span>
-                  <div className="vcc-status-title">
-                    <span className="vcc-status-dot" />
-                    {statusLabel}
-                  </div>
-                  <div className="vcc-status-desc">{statusSub}</div>
+              {/* ── Floating Apple Dynamic Island Capsule ── */}
+              <div className="vcc-dynamic-island" role="region" aria-label="Active voice call dynamic island">
+                {/* Left Status Section */}
+                <div className="vcc-island-status">
+                  <span className={`vcc-island-dot ${islandDotClass}`} />
+                  <span className="vcc-island-label">
+                    {islandStatusText}
+                  </span>
                 </div>
 
-                {/* ── Focal High-DPI Audio Equalizer Waveform Canvas ── */}
-                <div className="vcc-waveform-box">
+                {/* Right Symmetrical Waveform Canvas */}
+                <div className="vcc-island-wave">
                   <canvas
                     ref={waveformCanvasRef}
-                    className="vcc-wave-canvas"
-                    width={135}
-                    height={18}
-                    aria-label="Real-time voice waveform equalizer"
+                    className="vcc-island-canvas"
+                    width={170}
+                    height={32}
+                    aria-label="Real-time voice dynamic island audio waveform"
                   />
-                  <span className="vcc-wave-time" aria-label={`Voice session duration ${waveTimeLabel}`}>
-                    {waveTimeLabel}
-                  </span>
+                </div>
+              </div>
 
-                  {/* ── Live Mic Audio Level Meter (12 discrete segments) ── */}
-                  <div className="vcc-meter-row">
-                    <span className="vcc-meter-label">Mic Level</span>
-                    <div ref={micMeterElRef} className="vcc-led-track" aria-label="Microphone input level">
-                      {Array.from({ length: 12 }).map((_, idx) => (
-                        <div key={idx} className="vcc-led-seg" />
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* ── VAD Speech Detection Probability ── */}
-                  {isConnected && vadStatus === 'READY' && (
-                    <div className="vcc-vad-row">
-                      <span className="vcc-meter-label">Speech Detection</span>
-                      <div className="vcc-vad-track" role="progressbar" aria-valuenow={speechProbability} aria-valuemin={0} aria-valuemax={100}>
-                        <div className="vcc-vad-fill" style={{ width: `${speechProbability}%` }} />
-                      </div>
-                      <span style={{ fontSize: 9.5, fontWeight: 600, fontVariantNumeric: 'tabular-nums', width: 26, textAlign: 'right' }}>
-                        {speechProbability}%
-                      </span>
-                    </div>
+              {/* ── Minimal Secondary Controls & Telemetry ── */}
+              <div className="vcc-island-controls">
+                {/* Secondary 42px Circular Microphone Control */}
+                <button
+                  className={`vcc-island-mic-btn ${isSpeaking && !isMuted ? 'active-user' : isMuted ? 'muted' : ''}`}
+                  onClick={handleToggleMute}
+                  disabled={!isConnected}
+                  aria-label={!isConnected ? 'Connect to voice channel' : isMuted ? 'Unmute microphone' : 'Mute microphone'}
+                  title={!isConnected ? 'Connect first' : isMuted ? 'Unmute microphone' : 'Mute microphone'}
+                >
+                  {isMuted ? (
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="1" y1="1" x2="23" y2="23"/>
+                      <path d="M9 9v3a3 3 0 005.12 2.12M15 9.34V4a3 3 0 00-5.94-.6"/>
+                      <path d="M17 16.95A7 7 0 015 12v-2m14 0v2a7 7 0 01-.11 1.23"/>
+                      <line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="23" x2="16" y2="23"/>
+                    </svg>
+                  ) : (
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 2a3 3 0 00-3 3v7a3 3 0 006 0V5a3 3 0 00-3-3z"/>
+                      <path d="M19 10v2a7 7 0 01-14 0v-2"/>
+                      <line x1="12" y1="19" x2="12" y2="22"/>
+                    </svg>
                   )}
+                </button>
+                <div className="vcc-island-hint">
+                  {!isConnected ? 'Connect to start emergency voice' : isMuted ? 'Microphone muted (click to unmute)' : isSpeaking ? 'Field operator voice active' : aiSpeaking ? 'Tocsin AI responding' : 'Microphone active · Ready'}
                 </div>
 
-                {/* Tactical Microphone Button */}
-                <div className="vcc-mic-section">
-                  <button
-                    className={`vcc-mic-btn ${isSpeaking && !isMuted ? 'active-listening' : isMuted ? 'muted' : ''}`}
-                    onClick={handleToggleMute}
-                    disabled={!isConnected}
-                    aria-label={isMuted ? 'Unmute microphone' : 'Mute microphone'}
-                    title={!isConnected ? 'Connect first' : isMuted ? 'Unmute' : 'Mute'}
-                  >
-                    {isMuted ? (
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <line x1="1" y1="1" x2="23" y2="23"/>
-                        <path d="M9 9v3a3 3 0 005.12 2.12M15 9.34V4a3 3 0 00-5.94-.6"/>
-                        <path d="M17 16.95A7 7 0 015 12v-2m14 0v2a7 7 0 01-.11 1.23"/>
-                        <line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="23" x2="16" y2="23"/>
-                      </svg>
-                    ) : (
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M12 2a3 3 0 00-3 3v7a3 3 0 006 0V5a3 3 0 00-3-3z"/>
-                        <path d="M19 10v2a7 7 0 01-14 0v-2"/>
-                        <line x1="12" y1="19" x2="12" y2="22"/>
-                      </svg>
+                {/* Secondary Meters (Fluid VAD & Mic Level) */}
+                {isConnected && (
+                  <div className="vcc-island-meters">
+                    {/* Live Mic Level */}
+                    <div className="vcc-submeter-row">
+                      <span className="vcc-submeter-label">Mic Level</span>
+                      <div ref={micMeterElRef} className="vcc-submeter-leds" aria-label="Microphone input level">
+                        {Array.from({ length: 12 }).map((_, idx) => (
+                          <div key={idx} className="vcc-submeter-seg" />
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* VAD Speech Detection Probability */}
+                    {vadStatus === 'READY' && (
+                      <div className="vcc-submeter-row">
+                        <span className="vcc-submeter-label">Speech Confidence</span>
+                        <div className="vcc-submeter-track" role="progressbar" aria-label="Voice activity confidence">
+                          <div ref={speechFillElRef} className="vcc-submeter-fill" style={{ width: '0%' }} />
+                        </div>
+                        <span ref={speechValElRef} className="vcc-submeter-num">
+                          0%
+                        </span>
+                      </div>
                     )}
-                  </button>
-                  <span className="vcc-mic-hint">
-                    {!isConnected ? 'Join channel to speak' : isMuted ? 'Microphone muted (click to unmute)' : isSpeaking ? 'Transcribing...' : 'Microphone active'}
-                  </span>
-                </div>
-
+                  </div>
+                )}
               </div>
             </div>
 
-            {/* System status */}
+            {/* System status footer */}
             <div className="vcc-sys-status" role="status" aria-label="System status">
               <div className="vcc-sys-item"><span className="vcc-sys-label">Voice</span><Dot color={connDotColor} />{connectionState === 'CONNECTED' ? 'Connected' : connectionState === 'ERROR' ? 'Error' : 'Offline'}</div>
               <div className="vcc-sys-item"><span className="vcc-sys-label">Agent</span><Dot color={agentDotColor} />{agentStatus === 'RUNNING' || remoteAgentPresent ? 'Active' : agentStatus === 'STARTING' ? 'Starting' : agentStatus === 'STOPPING' ? 'Stopping' : agentStatus === 'ERROR' ? 'Error' : 'Stopped'}</div>
