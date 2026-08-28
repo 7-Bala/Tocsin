@@ -135,10 +135,12 @@ export default function VoiceTestPage() {
   const vadCandidateRef    = useRef<boolean>(false);
   const vadProbabilityRef  = useRef<number>(0);
 
-  // ── Visualizer bar levels ref (24 Dynamic Island bars, preallocated) ──
+  // ── Visualizer bar levels & spatial color refs (24 Dynamic Island bars) ──
   const BAR_COUNT = 24;
-  const barLevelsRef  = useRef<Float32Array>(new Float32Array(BAR_COUNT));
-  const currentWaveformRgbRef = useRef<[number, number, number]>([107, 114, 128]);
+  const barLevelsRef = useRef<Float32Array>(new Float32Array(BAR_COUNT));
+  const barColorsRef = useRef<Array<[number, number, number]>>(
+    Array.from({ length: BAR_COUNT }, () => [107, 114, 128])
+  );
   const lastTimestampRef = useRef<number>(0);
 
   // ── DOM meter refs for direct 60fps interpolation ─────────────────────
@@ -413,7 +415,7 @@ export default function VoiceTestPage() {
     smoothedUserRmsRef.current = 0;
     aiSmoothedRmsRef.current = 0;
     barLevelsRef.current.fill(0);
-    currentWaveformRgbRef.current = [75, 85, 99];
+    barColorsRef.current.forEach(c => { c[0] = 75; c[1] = 85; c[2] = 99; });
     displayedSpeechProbRef.current = 0;
     displayedMicLevelRef.current = 0;
     addLog('Left voice channel. Dashboard data retained.');
@@ -540,80 +542,115 @@ export default function VoiceTestPage() {
       const normalizedAi = Math.min(1, Math.max(0, smoothedAiRms / aiDynamicRange));
       const aiVisualEnergy = Math.pow(normalizedAi, 0.65);
 
-      // ── Step 7: Determine Speaker Mode & Target Color ──
+      // ── Step 7: Independent Simultaneous Audio Energy Calculation ──
       const connected = isConnectedRef.current;
       const muted = isMutedRef.current;
 
-      let mode: 'ai' | 'user' | 'idle' | 'disconnected' = 'disconnected';
-      let activeEnergy = 0;
-      let activeFreqData: Uint8Array | null = null;
-      let activeTimeData: Uint8Array | null = null;
-      let targetRgb: [number, number, number] = [75, 85, 99]; // Disconnected: #4B5563
+      // Effective energies (zero if channel/mic is inactive)
+      const userEffectiveEnergy = connected && !muted ? userVisualEnergy : 0;
+      const aiEffectiveEnergy = connected ? aiVisualEnergy : 0;
 
-      if (!connected) {
-        mode = 'disconnected';
-        targetRgb = [75, 85, 99];
-      } else if (muted) {
-        mode = 'idle';
-        targetRgb = [156, 163, 175]; // Subdued gray
-      } else if (aiVisualEnergy > 0.05 || (aiSpeakingRef.current && smoothedAiRms > 0.015)) {
-        mode = 'ai';
-        activeEnergy = aiVisualEnergy;
-        activeFreqData = aiFreqDataRef.current;
-        activeTimeData = aiTimeDataRef.current;
-        targetRgb = [48, 209, 88]; // #30D158 Apple Green
-      } else if (isSpeakingRef.current || userVisualEnergy > 0.08) {
-        mode = 'user';
-        activeEnergy = userVisualEnergy;
-        activeFreqData = userFreqDataRef.current;
-        activeTimeData = userTimeDataRef.current;
-        targetRgb = [255, 159, 10]; // #FF9F0A Apple Orange
-      } else {
-        mode = 'idle';
-        targetRgb = [107, 114, 128]; // #6B7280 Neutral Gray
-      }
+      const uFreq = userFreqDataRef.current;
+      const uTime = userTimeDataRef.current;
+      const aFreq = aiFreqDataRef.current;
+      const aTime = aiTimeDataRef.current;
 
-      // Smooth RGB Color Interpolation (120-180ms)
-      const currentRgb = currentWaveformRgbRef.current;
-      currentRgb[0] = approach(currentRgb[0], targetRgb[0], 10.0, dt);
-      currentRgb[1] = approach(currentRgb[1], targetRgb[1], 10.0, dt);
-      currentRgb[2] = approach(currentRgb[2], targetRgb[2], 10.0, dt);
-      const colorStr = `rgb(${Math.round(currentRgb[0])}, ${Math.round(currentRgb[1])}, ${Math.round(currentRgb[2])})`;
-
-      // ── Step 8: 24 Symmetrical Waveform Bars Physical Smoothing ──
+      // ── Step 8: Unified 24-Bar Dual-Energy Waveform Physical Engine ──
       const barLevels = barLevelsRef.current;
-      const BASELINE = connected && !muted ? 0.065 : 0.035;
-      const ATTACK_SPEED = 38.0;
-      const RELEASE_SPEED = 7.5;
+      const barColors = barColorsRef.current;
+
+      const BASELINE = connected && !muted ? 0.075 : connected ? 0.055 : 0.035;
+      const ATTACK_SPEED = 40.0;
+      const RELEASE_SPEED = 8.0;
 
       for (let i = 0; i < BAR_COUNT; i++) {
-        let target = BASELINE;
+        const pos = i / (BAR_COUNT - 1); // 0.0 (left: AI) -> 1.0 (right: User)
+        const distFromCenter = Math.abs(pos - 0.5) * 2; // 0 at center, 1 at ends
 
-        if (mode === 'user' || mode === 'ai') {
-          const normalizedIdx = i / (BAR_COUNT - 1);
-          const distFromCenter = Math.abs(normalizedIdx - 0.5) * 2; // 0 at center, 1 at ends
+        // Real frequency & time detail for subtle organic texture
+        const aiFreqVal   = getLogFrequencyEnergy(aFreq, (1.0 - pos) * 0.85 + 0.15);
+        const aiTimeVal   = getTimeDomainBandEnergy(aTime, BAR_COUNT - 1 - i, BAR_COUNT);
+        const aiDetail    = Math.max(aiFreqVal, aiTimeVal * 0.75);
 
-          const freqEnergy = getLogFrequencyEnergy(activeFreqData, distFromCenter);
-          const timeEnergy = getTimeDomainBandEnergy(activeTimeData, i, BAR_COUNT);
-          const bandDetail = Math.max(freqEnergy, timeEnergy * 0.75);
+        const userFreqVal = getLogFrequencyEnergy(uFreq, pos * 0.85 + 0.15);
+        const userTimeVal = getTimeDomainBandEnergy(uTime, i, BAR_COUNT);
+        const userDetail  = Math.max(userFreqVal, userTimeVal * 0.75);
 
-          // Subtle center focus window like Apple call visualizer
-          const centerWeight = 1.0 - Math.pow(distFromCenter, 1.5) * 0.22;
+        // Spatial spread weighting: AI concentrated on left, User on right, diffusing across center
+        const aiSpatialWeight   = Math.pow(1.0 - pos * 0.62, 1.1) * (0.84 + 0.16 * (1.0 - Math.pow(distFromCenter, 1.5)));
+        const userSpatialWeight = Math.pow(0.38 + pos * 0.62, 1.1) * (0.84 + 0.16 * (1.0 - Math.pow(distFromCenter, 1.5)));
 
-          target = BASELINE + activeEnergy * (0.16 + bandDetail * 0.84) * centerWeight;
-          target = Math.min(1.0, Math.max(BASELINE, target));
+        const aiHeightContribution   = aiEffectiveEnergy * aiSpatialWeight * (0.24 + 0.76 * aiDetail);
+        const userHeightContribution = userEffectiveEnergy * userSpatialWeight * (0.24 + 0.76 * userDetail);
+
+        // Soft center arch window
+        const centerArch = 0.88 + 0.12 * (1.0 - Math.pow(distFromCenter, 1.8));
+
+        let targetHeight = BASELINE;
+        if (connected) {
+          targetHeight = BASELINE + (aiHeightContribution + userHeightContribution) * centerArch;
+          targetHeight = Math.min(1.0, Math.max(BASELINE, targetHeight));
         }
 
-        const speed = target > barLevels[i] ? ATTACK_SPEED : RELEASE_SPEED;
-        barLevels[i] = approach(barLevels[i], target, speed, dt);
+        const speed = targetHeight > barLevels[i] ? ATTACK_SPEED : RELEASE_SPEED;
+        barLevels[i] = approach(barLevels[i], targetHeight, speed, dt);
+
+        // ── Spatial Color Calculation: Green (AI) -> Yellow (Mid) -> Orange (User) ──
+        let targetR: number, targetG: number, targetB: number;
+
+        if (!connected) {
+          targetR = 75; targetG = 85; targetB = 99; // Disconnected Slate: #4B5563
+        } else {
+          // Dynamic energy modulation shifts the palette slightly based on relative loudness
+          const energyBias = (userEffectiveEnergy - aiEffectiveEnergy) * 0.22;
+          const colorT = Math.max(0, Math.min(1, pos + energyBias));
+
+          let activeR: number, activeG: number, activeB: number;
+          if (colorT <= 0.5) {
+            // Green (#30D158: 48, 209, 88) -> Yellow (#FFD60A: 255, 214, 10)
+            const k = colorT / 0.5;
+            activeR = 48 + (255 - 48) * k;
+            activeG = 209 + (214 - 209) * k;
+            activeB = 88 + (10 - 88) * k;
+          } else {
+            // Yellow (#FFD60A: 255, 214, 10) -> Orange (#FF9F0A: 255, 159, 10)
+            const k = (colorT - 0.5) / 0.5;
+            activeR = 255;
+            activeG = 214 + (159 - 214) * k;
+            activeB = 10;
+          }
+
+          // In silent/resting state, preserve spatial identity with subtle saturation
+          const totalActivity = Math.max(
+            userEffectiveEnergy,
+            aiEffectiveEnergy,
+            isSpeakingRef.current ? 0.35 : 0,
+            aiSpeakingRef.current ? 0.35 : 0
+          );
+          const activityFactor = Math.min(1.0, Math.max(0.0, (totalActivity - 0.02) / 0.12));
+
+          // Calm resting tint: subtle green-gray on left, subtle orange-gray on right
+          const restingR = 90 + 38 * pos;
+          const restingG = 118 - 16 * pos;
+          const restingB = 126 - 28 * pos;
+
+          targetR = restingR + (activeR - restingR) * activityFactor;
+          targetG = restingG + (activeG - restingG) * activityFactor;
+          targetB = restingB + (activeB - restingB) * activityFactor;
+        }
+
+        // Smooth per-bar temporal color approach
+        barColors[i][0] = approach(barColors[i][0], targetR, 12.0, dt);
+        barColors[i][1] = approach(barColors[i][1], targetG, 12.0, dt);
+        barColors[i][2] = approach(barColors[i][2], targetB, 12.0, dt);
       }
 
-      // ── Step 9: Render Crisp High-DPI Canvas ──
+      // ── Step 9: Render Crisp High-DPI Waveform Canvas ──
       if (waveformCanvasRef.current) {
         const canvas = waveformCanvasRef.current;
         const dpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1;
-        const cssW = 170;
-        const cssH = 32;
+        const cssW = 140;
+        const cssH = 28;
 
         if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
           canvas.width = Math.round(cssW * dpr);
@@ -625,23 +662,26 @@ export default function VoiceTestPage() {
           ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
           ctx.clearRect(0, 0, cssW, cssH);
 
-          const barWidth = 2.5;
-          const barGap = 2.2;
+          const barWidth = 2.2;
+          const barGap = 2.0;
           const totalWaveWidth = BAR_COUNT * barWidth + (BAR_COUNT - 1) * barGap;
           const startX = Math.round((cssW - totalWaveWidth) / 2);
           const centerY = cssH / 2;
 
-          ctx.fillStyle = colorStr;
-
           for (let i = 0; i < BAR_COUNT; i++) {
             const normLevel = barLevels[i];
-            const minBarHeight = 2.0;
-            const maxBarHeight = cssH - 4; // 28px max height
+            const minBarHeight = 2.2;
+            const maxBarHeight = cssH - 4; // 24px max height
             const barHeight = Math.max(minBarHeight, Math.min(maxBarHeight, normLevel * maxBarHeight));
 
             const x = startX + i * (barWidth + barGap);
             const y = centerY - barHeight / 2;
             const radius = Math.min(barWidth / 2, barHeight / 2);
+
+            const r = Math.round(barColors[i][0]);
+            const g = Math.round(barColors[i][1]);
+            const b = Math.round(barColors[i][2]);
+            ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
 
             ctx.beginPath();
             if (typeof ctx.roundRect === 'function') {
@@ -910,14 +950,21 @@ export default function VoiceTestPage() {
     : isSpeaking ? 'user-speaking'
     : 'standby';
 
+  const waveDuration = waveStartedAt ? Math.max(0, Math.floor((Date.now() - waveStartedAt) / 1000)) : 0;
+  const waveMinutes = Math.floor(waveDuration / 60);
+  const waveSeconds = waveDuration % 60;
+  const waveTimeLabel = `${waveMinutes}:${waveSeconds.toString().padStart(2, '0')}`;
+
   const islandStatusText =
-    connectionState === 'ERROR' ? 'Connection error' :
+    connectionState === 'ERROR' ? 'Error' :
     isConnecting ? 'Connecting...' :
     connectionState !== 'CONNECTED' ? 'Ready' :
-    isMuted ? 'Microphone muted' :
-    aiSpeaking ? 'Tocsin speaking' :
-    isSpeaking ? 'You speaking' :
-    'Voice connected';
+    isMuted ? 'Muted' :
+    isSpeaking && aiSpeaking ? 'Active' :
+    isSpeaking ? 'You' :
+    aiSpeaking ? 'Tocsin' :
+    waveStartedAt ? waveTimeLabel :
+    'Voice';
 
   const islandDotClass =
     connectionState === 'ERROR' ? 'error' :
@@ -1276,17 +1323,17 @@ export default function VoiceTestPage() {
           gap: 0;
         }
 
-        /* ── Floating Apple Dynamic Island Pill ── */
+        /* ── Compact Apple Dynamic Island Capsule (320px x 54px) ── */
         .vcc-dynamic-island {
-          width: min(360px, calc(100vw - 40px));
-          height: 64px;
+          width: min(320px, calc(100vw - 32px));
+          height: 54px;
           border-radius: 9999px;
           background: #000000;
-          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.12);
+          box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28), 0 2px 6px rgba(0, 0, 0, 0.12);
           display: flex;
           align-items: center;
           justify-content: space-between;
-          padding: 0 18px 0 20px;
+          padding: 0 14px 0 12px;
           box-sizing: border-box;
           user-select: none;
           transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease;
@@ -1295,54 +1342,76 @@ export default function VoiceTestPage() {
         }
         .vcc-dynamic-island:hover {
           transform: translateY(-1px);
-          box-shadow: 0 14px 36px rgba(0, 0, 0, 0.28), 0 3px 10px rgba(0, 0, 0, 0.15);
+          box-shadow: 0 16px 38px rgba(0, 0, 0, 0.34), 0 3px 8px rgba(0, 0, 0, 0.16);
         }
 
-        .vcc-island-status {
+        .vcc-island-left {
           display: flex;
           align-items: center;
-          gap: 8px;
+          gap: 9px;
           min-width: 0;
           flex: 1 1 auto;
           overflow: hidden;
         }
-        .vcc-island-dot {
-          width: 7px;
-          height: 7px;
+
+        /* ── Integrated In-Capsule 32px Microphone Control ── */
+        .vcc-island-mic-btn {
+          width: 32px;
+          height: 32px;
           border-radius: 50%;
+          border: 1px solid rgba(255, 255, 255, 0.12);
+          background: rgba(255, 255, 255, 0.08);
+          color: #f3f4f6;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          outline: none;
           flex-shrink: 0;
-          background: #6b7280;
-          transition: background-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+          transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
         }
-        .vcc-island-dot.user {
-          background: #ff9f0a;
-          box-shadow: 0 0 8px rgba(255, 159, 10, 0.7);
+        .vcc-island-mic-btn:hover:not(:disabled) {
+          background: rgba(255, 255, 255, 0.16);
+          border-color: rgba(255, 255, 255, 0.25);
+          transform: scale(1.04);
         }
-        .vcc-island-dot.ai {
-          background: #30d158;
-          box-shadow: 0 0 8px rgba(48, 209, 88, 0.7);
+        .vcc-island-mic-btn:active:not(:disabled) {
+          transform: scale(0.96);
         }
-        .vcc-island-dot.connected {
-          background: #30d158;
+        .vcc-island-mic-btn.active-user {
+          background: rgba(255, 159, 10, 0.22);
+          border-color: #ff9f0a;
+          color: #ff9f0a;
+          box-shadow: 0 0 10px rgba(255, 159, 10, 0.4);
         }
-        .vcc-island-dot.muted {
-          background: #ef4444;
+        .vcc-island-mic-btn.active-ai {
+          background: rgba(48, 209, 88, 0.2);
+          border-color: #30d158;
+          color: #30d158;
         }
-        .vcc-island-dot.error {
-          background: #dc2626;
+        .vcc-island-mic-btn.muted {
+          background: rgba(239, 68, 68, 0.22);
+          border-color: #ef4444;
+          color: #ef4444;
         }
-        .vcc-island-dot.connecting {
-          background: #6366f1;
+        .vcc-island-mic-btn:disabled {
+          opacity: 0.4;
+          cursor: not-allowed;
         }
-        .vcc-island-dot.idle {
-          background: #6b7280;
+
+        .vcc-island-meta {
+          display: flex;
+          flex-direction: column;
+          min-width: 0;
+          overflow: hidden;
         }
 
         .vcc-island-label {
-          font-size: 13px;
-          font-weight: 500;
+          font-size: 12.5px;
+          font-weight: 600;
           color: #f3f4f6;
           letter-spacing: -0.01em;
+          font-variant-numeric: tabular-nums;
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
@@ -1352,66 +1421,23 @@ export default function VoiceTestPage() {
           display: flex;
           align-items: center;
           justify-content: flex-end;
-          flex: 0 0 170px;
-          height: 32px;
+          flex: 0 0 140px;
+          height: 28px;
         }
         .vcc-island-canvas {
           display: block;
-          width: 170px;
-          height: 32px;
+          width: 140px;
+          height: 28px;
         }
 
-        /* ── Minimal Secondary Controls Area ── */
+        /* ── Minimal Secondary Controls & Telemetry Below Island ── */
         .vcc-island-controls {
-          margin-top: 24px;
+          margin-top: 18px;
           display: flex;
           flex-direction: column;
           align-items: center;
-          gap: 12px;
-          width: min(360px, calc(100vw - 40px));
-        }
-
-        .vcc-island-mic-btn {
-          width: 42px;
-          height: 42px;
-          border-radius: 50%;
-          border: 1px solid #d4d4d8;
-          background: #ffffff;
-          color: #3f3f46;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          cursor: pointer;
-          outline: none;
-          box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
-          transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-        .vcc-island-mic-btn:hover:not(:disabled) {
-          border-color: #a1a1aa;
-          color: #18181b;
-          transform: translateY(-1px);
-          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.09);
-        }
-        .vcc-island-mic-btn:active:not(:disabled) {
-          transform: scale(0.96);
-        }
-        .vcc-island-mic-btn:focus-visible {
-          outline: 2px solid #ff9f0a;
-          outline-offset: 2px;
-        }
-        .vcc-island-mic-btn.active-user {
-          border-color: #ff9f0a;
-          color: #ff9f0a;
-          box-shadow: 0 0 12px rgba(255, 159, 10, 0.25);
-        }
-        .vcc-island-mic-btn.muted {
-          background: #fef2f2;
-          border-color: #fecaca;
-          color: #dc2626;
-        }
-        .vcc-island-mic-btn:disabled {
-          opacity: 0.4;
-          cursor: not-allowed;
+          gap: 8px;
+          width: min(320px, calc(100vw - 32px));
         }
 
         .vcc-island-hint {
@@ -1425,11 +1451,11 @@ export default function VoiceTestPage() {
           width: 100%;
           display: flex;
           flex-direction: column;
-          gap: 8px;
-          padding: 10px 14px;
+          gap: 6px;
+          padding: 8px 12px;
           background: #ffffff;
           border: 1px solid #e4e4e7;
-          border-radius: 10px;
+          border-radius: 8px;
           box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
           box-sizing: border-box;
         }
@@ -1438,7 +1464,7 @@ export default function VoiceTestPage() {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          gap: 10px;
+          gap: 8px;
           font-size: 10px;
           color: #71717a;
         }
@@ -1446,19 +1472,19 @@ export default function VoiceTestPage() {
           font-weight: 600;
           letter-spacing: 0.04em;
           text-transform: uppercase;
-          font-size: 9px;
+          font-size: 8.5px;
           color: #a1a1aa;
-          min-width: 95px;
+          min-width: 90px;
         }
 
         .vcc-submeter-leds {
           display: flex;
-          gap: 3px;
+          gap: 2.5px;
           align-items: center;
         }
         .vcc-submeter-seg {
-          width: 11px;
-          height: 4.5px;
+          width: 9px;
+          height: 4px;
           border-radius: 1px;
           background: #e4e4e7;
           opacity: 0.35;
@@ -1467,7 +1493,7 @@ export default function VoiceTestPage() {
 
         .vcc-submeter-track {
           flex: 1;
-          height: 3px;
+          height: 2.5px;
           background: #f4f4f5;
           border-radius: 999px;
           overflow: hidden;
@@ -1481,7 +1507,7 @@ export default function VoiceTestPage() {
           font-size: 9.5px;
           font-weight: 600;
           font-variant-numeric: tabular-nums;
-          width: 28px;
+          width: 24px;
           text-align: right;
           color: #71717a;
         }
@@ -1939,55 +1965,59 @@ export default function VoiceTestPage() {
           <main className="vcc-panel vcc-center" role="main">
             <div className="vcc-center-inner">
 
-              {/* ── Floating Apple Dynamic Island Capsule ── */}
+              {/* ── Floating Apple Dynamic Island Capsule (320px x 54px) ── */}
               <div className="vcc-dynamic-island" role="region" aria-label="Active voice call dynamic island">
-                {/* Left Status Section */}
-                <div className="vcc-island-status">
-                  <span className={`vcc-island-dot ${islandDotClass}`} />
-                  <span className="vcc-island-label">
-                    {islandStatusText}
-                  </span>
+                {/* Left: In-Capsule Mic Control & Call Status/Timer */}
+                <div className="vcc-island-left">
+                  <button
+                    className={`vcc-island-mic-btn ${
+                      isSpeaking && !isMuted ? 'active-user' :
+                      aiSpeaking ? 'active-ai' :
+                      isMuted ? 'muted' : ''
+                    }`}
+                    onClick={isConnected ? handleToggleMute : handleJoin}
+                    disabled={connectionState === 'FETCHING_TOKEN' || connectionState === 'JOINING'}
+                    aria-label={!isConnected ? 'Connect to voice channel' : isMuted ? 'Unmute microphone' : 'Mute microphone'}
+                    title={!isConnected ? 'Connect to voice' : isMuted ? 'Unmute microphone' : 'Mute microphone'}
+                  >
+                    {isMuted ? (
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="1" y1="1" x2="23" y2="23"/>
+                        <path d="M9 9v3a3 3 0 005.12 2.12M15 9.34V4a3 3 0 00-5.94-.6"/>
+                        <path d="M17 16.95A7 7 0 015 12v-2m14 0v2a7 7 0 01-.11 1.23"/>
+                        <line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="23" x2="16" y2="23"/>
+                      </svg>
+                    ) : (
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M12 2a3 3 0 00-3 3v7a3 3 0 006 0V5a3 3 0 00-3-3z"/>
+                        <path d="M19 10v2a7 7 0 01-14 0v-2"/>
+                        <line x1="12" y1="19" x2="12" y2="22"/>
+                      </svg>
+                    )}
+                  </button>
+                  <div className="vcc-island-meta">
+                    <span className="vcc-island-label">
+                      {islandStatusText}
+                    </span>
+                  </div>
                 </div>
 
-                {/* Right Symmetrical Waveform Canvas */}
+                {/* Right: Unified Symmetrical 24-Bar Dual-Energy Waveform Canvas */}
                 <div className="vcc-island-wave">
                   <canvas
                     ref={waveformCanvasRef}
                     className="vcc-island-canvas"
-                    width={170}
-                    height={32}
+                    width={140}
+                    height={28}
                     aria-label="Real-time voice dynamic island audio waveform"
                   />
                 </div>
               </div>
 
-              {/* ── Minimal Secondary Controls & Telemetry ── */}
+              {/* ── Minimal Secondary Controls & Telemetry Below Island ── */}
               <div className="vcc-island-controls">
-                {/* Secondary 42px Circular Microphone Control */}
-                <button
-                  className={`vcc-island-mic-btn ${isSpeaking && !isMuted ? 'active-user' : isMuted ? 'muted' : ''}`}
-                  onClick={handleToggleMute}
-                  disabled={!isConnected}
-                  aria-label={!isConnected ? 'Connect to voice channel' : isMuted ? 'Unmute microphone' : 'Mute microphone'}
-                  title={!isConnected ? 'Connect first' : isMuted ? 'Unmute microphone' : 'Mute microphone'}
-                >
-                  {isMuted ? (
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="1" y1="1" x2="23" y2="23"/>
-                      <path d="M9 9v3a3 3 0 005.12 2.12M15 9.34V4a3 3 0 00-5.94-.6"/>
-                      <path d="M17 16.95A7 7 0 015 12v-2m14 0v2a7 7 0 01-.11 1.23"/>
-                      <line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="23" x2="16" y2="23"/>
-                    </svg>
-                  ) : (
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M12 2a3 3 0 00-3 3v7a3 3 0 006 0V5a3 3 0 00-3-3z"/>
-                      <path d="M19 10v2a7 7 0 01-14 0v-2"/>
-                      <line x1="12" y1="19" x2="12" y2="22"/>
-                    </svg>
-                  )}
-                </button>
                 <div className="vcc-island-hint">
-                  {!isConnected ? 'Connect to start emergency voice' : isMuted ? 'Microphone muted (click to unmute)' : isSpeaking ? 'Field operator voice active' : aiSpeaking ? 'Tocsin AI responding' : 'Microphone active · Ready'}
+                  {!isConnected ? 'Tap microphone or join channel to start' : isMuted ? 'Microphone muted (tap mic to unmute)' : isSpeaking ? 'Field operator voice active' : aiSpeaking ? 'Tocsin AI responding' : 'Microphone active · Ready'}
                 </div>
 
                 {/* Secondary Meters (Fluid VAD & Mic Level) */}
