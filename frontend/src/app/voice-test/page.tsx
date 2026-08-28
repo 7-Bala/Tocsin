@@ -624,14 +624,16 @@ export default function VoiceTestPage() {
             activeB = 10;
           }
 
-          // In silent/resting state, preserve spatial identity with subtle saturation
-          const totalActivity = Math.max(
-            userEffectiveEnergy,
-            aiEffectiveEnergy,
-            isSpeakingRef.current ? 0.35 : 0,
-            aiSpeakingRef.current ? 0.35 : 0
+          // ── Active Speaker Glow: Per-bar dynamic saturation ──
+          const barAiActivity = aiEffectiveEnergy * (0.40 + 0.60 * Math.pow(1.0 - pos, 0.8));
+          const barUserActivity = userEffectiveEnergy * (0.40 + 0.60 * Math.pow(pos, 0.8));
+          const barTotalActivity = Math.max(
+            barAiActivity,
+            barUserActivity,
+            isSpeakingRef.current ? (0.35 + 0.65 * pos) : 0,
+            aiSpeakingRef.current ? (0.35 + 0.65 * (1.0 - pos)) : 0
           );
-          const activityFactor = Math.min(1.0, Math.max(0.0, (totalActivity - 0.02) / 0.12));
+          const activityFactor = Math.min(1.0, Math.max(0.0, (barTotalActivity - 0.015) / 0.10));
 
           // Calm resting tint: subtle green-gray on left, subtle orange-gray on right
           const restingR = 90 + 38 * pos;
@@ -964,9 +966,9 @@ export default function VoiceTestPage() {
     isConnecting ? 'Connecting...' :
     connectionState !== 'CONNECTED' ? 'Ready' :
     isMuted ? 'Muted' :
-    isSpeaking && aiSpeaking ? 'Tocsin' :
     isSpeaking ? 'You' :
     aiSpeaking ? 'Tocsin' :
+    waveStartedAt ? waveTimeLabel :
     'Tocsin';
 
   const islandDotClass =
