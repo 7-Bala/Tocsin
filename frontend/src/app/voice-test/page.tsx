@@ -533,14 +533,14 @@ export default function VoiceTestPage() {
       }
 
       // ── Step 6: Dynamic Normalization & Perceptual Compression ──
-      // Dynamic range: quiet speech ~ 20-30%, normal speech ~ 40-60%, shouting ~ 85-100%
-      const userDynamicRange = 0.12;
+      // Dynamic range calibrated for natural mic input & speech
+      const userDynamicRange = 0.075;
       const normalizedUser = Math.min(1, Math.max(0, (smoothedUserRms - noiseFloor) / userDynamicRange));
-      const userVisualEnergy = Math.pow(normalizedUser, 0.65);
+      const userVisualEnergy = Math.pow(normalizedUser, 0.55);
 
-      const aiDynamicRange = 0.20;
+      const aiDynamicRange = 0.09;
       const normalizedAi = Math.min(1, Math.max(0, smoothedAiRms / aiDynamicRange));
-      const aiVisualEnergy = Math.pow(normalizedAi, 0.65);
+      const aiVisualEnergy = Math.pow(normalizedAi, 0.55);
 
       // ── Step 7: Independent Simultaneous Audio Energy Calculation ──
       const connected = isConnectedRef.current;
@@ -560,8 +560,8 @@ export default function VoiceTestPage() {
       const barColors = barColorsRef.current;
 
       const BASELINE = connected && !muted ? 0.075 : connected ? 0.055 : 0.035;
-      const ATTACK_SPEED = 40.0;
-      const RELEASE_SPEED = 8.0;
+      const ATTACK_SPEED = 45.0;
+      const RELEASE_SPEED = 9.0;
 
       for (let i = 0; i < BAR_COUNT; i++) {
         const pos = i / (BAR_COUNT - 1); // 0.0 (left: AI) -> 1.0 (right: User)
@@ -576,19 +576,23 @@ export default function VoiceTestPage() {
         const userTimeVal = getTimeDomainBandEnergy(uTime, i, BAR_COUNT);
         const userDetail  = Math.max(userFreqVal, userTimeVal * 0.75);
 
-        // Spatial spread weighting: AI concentrated on left, User on right, diffusing across center
-        const aiSpatialWeight   = Math.pow(1.0 - pos * 0.62, 1.1) * (0.84 + 0.16 * (1.0 - Math.pow(distFromCenter, 1.5)));
-        const userSpatialWeight = Math.pow(0.38 + pos * 0.62, 1.1) * (0.84 + 0.16 * (1.0 - Math.pow(distFromCenter, 1.5)));
+        // Spatial spread weighting: AI concentrated on left, User on right, smoothly diffusing
+        const aiSpatialWeight   = 0.40 + 0.60 * Math.pow(1.0 - pos, 0.8);
+        const userSpatialWeight = 0.40 + 0.60 * Math.pow(pos, 0.8);
 
-        const aiHeightContribution   = aiEffectiveEnergy * aiSpatialWeight * (0.24 + 0.76 * aiDetail);
-        const userHeightContribution = userEffectiveEnergy * userSpatialWeight * (0.24 + 0.76 * userDetail);
+        const aiDetailMod   = 0.72 + 0.28 * aiDetail;
+        const userDetailMod = 0.72 + 0.28 * userDetail;
+
+        const aiHeightContribution   = aiEffectiveEnergy * aiSpatialWeight * aiDetailMod;
+        const userHeightContribution = userEffectiveEnergy * userSpatialWeight * userDetailMod;
 
         // Soft center arch window
-        const centerArch = 0.88 + 0.12 * (1.0 - Math.pow(distFromCenter, 1.8));
+        const centerArch = 0.86 + 0.14 * (1.0 - Math.pow(distFromCenter, 1.6));
+        const combinedVoiceHeight = Math.max(aiHeightContribution, userHeightContribution) * 0.70 + (aiHeightContribution + userHeightContribution) * 0.30;
 
         let targetHeight = BASELINE;
         if (connected) {
-          targetHeight = BASELINE + (aiHeightContribution + userHeightContribution) * centerArch;
+          targetHeight = BASELINE + combinedVoiceHeight * (1.0 - BASELINE) * centerArch;
           targetHeight = Math.min(1.0, Math.max(BASELINE, targetHeight));
         }
 
