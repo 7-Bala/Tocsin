@@ -960,11 +960,10 @@ export default function VoiceTestPage() {
     isConnecting ? 'Connecting...' :
     connectionState !== 'CONNECTED' ? 'Ready' :
     isMuted ? 'Muted' :
-    isSpeaking && aiSpeaking ? 'Active' :
+    isSpeaking && aiSpeaking ? 'Tocsin' :
     isSpeaking ? 'You' :
     aiSpeaking ? 'Tocsin' :
-    waveStartedAt ? waveTimeLabel :
-    'Voice';
+    'Tocsin';
 
   const islandDotClass =
     connectionState === 'ERROR' ? 'error' :
