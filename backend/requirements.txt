@@ -22,4 +22,5 @@ agora-token-builder==1.0.0
 # Testing
 pytest==9.1.1
 pytest-asyncio==1.4.0
-websockets==17.0.1
+websockets>=13.0.0,<17.0
+
