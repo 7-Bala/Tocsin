@@ -23,9 +23,16 @@ elif _root_env.exists():
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 
+import asyncio
 from app.api.agora import router as agora_router
+from app.api.demo import router as demo_router
 from app.api.incidents import router as incidents_router
+from app.api.observations import router as observations_router
+from app.api.participants import router as participants_router
+from app.api.summaries import router as summaries_router
 from app.engine.connection_manager import ws_manager
+from app.engine.database import close_db, get_db_type, init_db, is_db_connected
+from app.engine.repositories import incident_repo
 from app.engine.simulator import simulator
 
 # Configure structured logging
@@ -48,18 +55,58 @@ ALLOWED_ORIGINS: list[str] = [
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Application lifespan manager for clean startup and shutdown."""
+    """Application lifespan manager: initialize DB, load state, start background reminder loop."""
     logger.info("Tocsin backend service starting up...")
     logger.info(f"CORS allowed origins: {ALLOWED_ORIGINS}")
+
+    # Initialize database (PostgreSQL primary, SQLite fallback if configured)
+    try:
+        await init_db()
+        logger.info(f"Database initialized: {get_db_type()}")
+    except RuntimeError as e:
+        logger.error(f"Database initialization failed: {e}")
+        raise
+
+    # Load persisted incidents into in-memory simulator
+    try:
+        persisted = await incident_repo.list_all()
+        for state in persisted:
+            simulator._incidents[state.incident_id] = state
+        logger.info(f"Loaded {len(persisted)} persisted incidents from database.")
+    except Exception as e:
+        logger.warning(f"Could not load persisted incidents: {e}")
+
+    # Background task for checking overdue action item reminders
+    async def _reminder_background_worker():
+        while True:
+            try:
+                await asyncio.sleep(5)
+                for inc_id in list(simulator._incidents.keys()):
+                    await simulator.check_and_remind_overdue_actions(inc_id)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"Reminder background loop error: {e}")
+
+    reminder_task = asyncio.create_task(_reminder_background_worker())
+
     yield
+
     logger.info("Tocsin backend service shutting down...")
+    reminder_task.cancel()
+    try:
+        await reminder_task
+    except asyncio.CancelledError:
+        pass
+
     await simulator.shutdown()
+    await close_db()
 
 
 app = FastAPI(
     title="Tocsin Backend",
-    description="Real-time voice AI disaster-coordination platform backend",
-    version="0.2.0",
+    description="Real-time voice AI incident command platform backend",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -73,7 +120,11 @@ app.add_middleware(
 
 # Register REST routers
 app.include_router(incidents_router)
+app.include_router(demo_router)
 app.include_router(agora_router)
+app.include_router(observations_router)
+app.include_router(participants_router)
+app.include_router(summaries_router)
 
 
 @app.get("/", tags=["General"])
@@ -81,24 +132,42 @@ async def root() -> dict[str, Any]:
     return {
         "service": "Tocsin Backend",
         "status": "online",
-        "version": "0.2.0",
+        "version": "0.3.0",
     }
 
 
 @app.get("/health", tags=["General"])
 async def health_check() -> dict[str, Any]:
-    db_configured: bool = bool(os.getenv("DATABASE_URL"))
-    redis_configured: bool = bool(os.getenv("REDIS_URL"))
-    agora_configured: bool = bool(os.getenv("AGORA_APP_ID") and os.getenv("AGORA_APP_CERTIFICATE"))
+    """
+    Health check endpoint.
+    Reports actual database connectivity — not just whether env vars are set.
+    """
+    db_connected = is_db_connected()
+    db_type = get_db_type()
+    agora_configured: bool = bool(
+        os.getenv("AGORA_APP_ID") and os.getenv("AGORA_APP_CERTIFICATE")
+    )
+    gemini_configured: bool = bool(os.getenv("GEMINI_API_KEY"))
+    commander_key_configured: bool = bool(os.getenv("TOCSIN_COMMANDER_KEY", "").strip())
+
+    overall_status = "ok" if db_connected else "degraded"
+
     logger.debug(
-        f"Health check invoked. Database: {db_configured}, Redis: {redis_configured}, Agora: {agora_configured}"
+        f"Health check: db={db_connected}/{db_type}, agora={agora_configured}, "
+        f"gemini={gemini_configured}, commander_key={commander_key_configured}"
     )
     return {
-        "status": "ok",
+        "status": overall_status,
         "service": "tocsin-backend",
-        "database": db_configured,
-        "redis": redis_configured,
-        "agora": agora_configured,
+        "version": "0.3.0",
+        "database": {
+            "connected": db_connected,
+            "type": db_type,
+            "configured": bool(os.getenv("DATABASE_URL") or os.getenv("USE_SQLITE_FALLBACK")),
+        },
+        "agora": {"configured": agora_configured},
+        "gemini_extraction": {"configured": gemini_configured},
+        "approval_workflow": {"commander_key_configured": commander_key_configured},
     }
 
 
@@ -109,6 +178,7 @@ async def websocket_incident_endpoint(
     """
     WebSocket endpoint for real-time live incident state synchronization.
     Pushes live degradation, jitter, and resolution recovery state streams.
+    Also delivers OBSERVATION_INGESTED, CONFLICT_DETECTED, and FOLLOWUP_REMINDER events.
     """
     await ws_manager.connect(incident_id, websocket)
 

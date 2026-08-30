@@ -69,6 +69,14 @@ class ConnectionManager:
                     if not self._incident_connections[incident_id]:
                         del self._incident_connections[incident_id]
 
+    async def broadcast_json(self, incident_id: str, payload: dict[str, Any]) -> None:
+        """
+        Broadcast an arbitrary JSON payload (not necessarily a state snapshot)
+        to all subscribers of a specific incident.
+        Used for typed events: OBSERVATION_INGESTED, CONFLICT_DETECTED, etc.
+        """
+        await self.broadcast_state(incident_id, payload)
+
 
 # Global shared instance
 ws_manager = ConnectionManager()

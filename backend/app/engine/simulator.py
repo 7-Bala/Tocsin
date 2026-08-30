@@ -1,16 +1,22 @@
 """
 Tocsin Incident State Simulator
 Simulates continuous non-linear state degradation and resolution recovery with realistic jitter.
+Persists all state mutations to PostgreSQL / SQLite repository.
 """
 
 import asyncio
 import logging
 import random
 import uuid
+from typing import Any
 
 from app.engine.connection_manager import ws_manager
+from app.engine.repositories import incident_repo
 from app.models.incident import (
+    APPROVABLE_STATES,
+    REJECTABLE_STATES,
     ActionApprovalStatus,
+    ActionItem,
     ActionTaken,
     ApproveActionRequest,
     EventType,
@@ -20,9 +26,11 @@ from app.models.incident import (
     IncidentState,
     IncidentStatus,
     Participant,
+    ParticipantRole,
     ProposeActionRequest,
     ProposedAction,
     RejectActionRequest,
+    RoleSource,
     SeverityLevel,
     Symptom,
     TimelineEntry,
@@ -63,12 +71,13 @@ class IncidentSimulator:
     async def create_incident(
         self,
         title: str,
-        event_type: EventType,
+        event_type: EventType | str,
         incident_id: str | None = None,
         initial_symptoms: list[str] | None = None,
     ) -> IncidentState:
-        """Initialize and store a new incident state."""
+        """Initialize, store, and persist a new incident state."""
         inc_id = incident_id or f"inc-{uuid.uuid4().hex[:8]}"
+        ev_type = EventType(event_type) if isinstance(event_type, str) else event_type
         lock = await self._get_lock(inc_id)
 
         async with lock:
@@ -88,7 +97,7 @@ class IncidentSimulator:
             state = IncidentState(
                 incident_id=inc_id,
                 title=title,
-                event_type=event_type,
+                event_type=ev_type,
                 status=IncidentStatus.IDLE,
                 severity=SeverityLevel.LOW,
                 metrics=IncidentMetrics(
@@ -110,7 +119,7 @@ class IncidentSimulator:
                 hypotheses=[
                     Hypothesis(
                         id="hypo-1",
-                        title=f"Potential {event_type.value} risk",
+                        title=f"Potential {ev_type.value} risk",
                         description="Initial sensor and dispatch assessment pending voice confirmation.",
                         confidence=0.35,
                         status=HypothesisStatus.PROPOSED,
@@ -121,7 +130,9 @@ class IncidentSimulator:
                     Participant(
                         id="part-1",
                         name="System Dispatch",
-                        role="Coordinator",
+                        role=ParticipantRole.AI_AGENT,
+                        role_source=RoleSource.DECLARED,
+                        role_confidence=1.0,
                         language="en",
                     )
                 ],
@@ -131,12 +142,27 @@ class IncidentSimulator:
             self._incidents[inc_id] = state
 
         logger.info(f"Incident created: {inc_id} ({title})")
+        # Persist to repository
+        try:
+            await incident_repo.upsert(state)
+        except Exception as e:
+            logger.warning(f"DB persist failed for incident create {inc_id}: {e}")
+
         await ws_manager.broadcast_state(inc_id, state.model_dump())
         return state
 
     async def get_incident(self, incident_id: str) -> IncidentState | None:
-        """Retrieve state for a given incident_id."""
-        return self._incidents.get(incident_id)
+        """Retrieve state for a given incident_id, querying database if not in memory."""
+        if incident_id in self._incidents:
+            return self._incidents[incident_id]
+        try:
+            persisted = await incident_repo.get(incident_id)
+            if persisted:
+                self._incidents[incident_id] = persisted
+                return persisted
+        except Exception as e:
+            logger.debug(f"DB lookup for {incident_id} failed: {e}")
+        return None
 
     async def list_incidents(self) -> list[IncidentState]:
         """List all stored incidents."""
@@ -145,9 +171,7 @@ class IncidentSimulator:
     async def trigger_event(
         self, incident_id: str, request: TriggerEventRequest
     ) -> IncidentState:
-        """
-        Trigger a crisis event causing live degradation with light jitter.
-        """
+        """Trigger a crisis event causing live degradation with light jitter."""
         lock = await self._get_lock(incident_id)
         async with lock:
             if incident_id not in self._incidents:
@@ -164,13 +188,14 @@ class IncidentSimulator:
             state.event_type = request.event_type
             state.updated_at = now
 
-            # Add caller participant if new
             if request.caller_id and not any(p.name == request.caller_id for p in state.participants):
                 state.participants.append(
                     Participant(
                         id=f"part-{len(state.participants)+1}",
                         name=request.caller_id,
-                        role="Field Reporter",
+                        role=ParticipantRole.FIELD_RESPONDER,
+                        role_source=RoleSource.UNKNOWN,
+                        role_confidence=0.0,
                         language=request.caller_language or "en",
                         last_active=now,
                     )
@@ -192,21 +217,22 @@ class IncidentSimulator:
                 state.hypotheses[0].confidence = min(0.95, state.hypotheses[0].confidence + 0.3)
                 state.hypotheses[0].status = HypothesisStatus.CONFIRMED
 
-            # Spawn background degradation loop
             task = asyncio.create_task(
                 self._run_degradation_loop(incident_id, request.intensity)
             )
             self._tasks[incident_id] = task
 
         await ws_manager.broadcast_state(incident_id, state.model_dump())
+        try:
+            await incident_repo.upsert(state)
+        except Exception as e:
+            logger.warning(f"DB persist failed for trigger_event {incident_id}: {e}")
         return state
 
     async def _run_degradation_loop(self, incident_id: str, intensity: float) -> None:
-        """
-        Async background loop that progressively degrades incident state with randomized jitter.
-        """
+        """Async background loop that progressively degrades incident state with randomized jitter."""
         logger.info(f"Starting degradation loop for incident {incident_id} (intensity: {intensity})")
-        tick_interval = 0.5  # Run update every 500ms for smooth live updates
+        tick_interval = 0.5
 
         try:
             while True:
@@ -221,15 +247,12 @@ class IncidentSimulator:
                     if state.status != IncidentStatus.DEGRADING:
                         break
 
-                    # Apply light jitter (random uniform delta between 0.85 and 1.20)
                     jitter = random.uniform(0.85, 1.20)
                     m = state.metrics
 
-                    # Base degradation delta per tick
                     severity_delta = (2.2 * intensity * jitter)
                     m.severity_score = min(100.0, m.severity_score + severity_delta)
 
-                    # Update event-specific metrics
                     if state.event_type == EventType.FLOOD_SURGE:
                         flood_delta = (0.12 * intensity * jitter)
                         m.flood_depth_meters = round(m.flood_depth_meters + flood_delta, 2)
@@ -245,12 +268,10 @@ class IncidentSimulator:
                     else:
                         m.infrastructure_integrity_pct = max(10.0, round(m.infrastructure_integrity_pct - (1.2 * intensity * jitter), 1))
 
-                    # Update severity level
                     prev_severity = state.severity
                     state.severity = self._calculate_severity_level(m.severity_score)
                     state.updated_at = get_utc_now()
 
-                    # Add symptom dynamically if threshold crossed
                     if prev_severity != state.severity and state.severity in (SeverityLevel.HIGH, SeverityLevel.CRITICAL):
                         symptom_text = f"Escalation to {state.severity.value}: Severity reached {m.severity_score:.1f}"
                         if not any(s.description == symptom_text for s in state.symptoms):
@@ -264,10 +285,8 @@ class IncidentSimulator:
 
                     dump = state.model_dump()
 
-                # Broadcast tick to WebSockets outside the lock
                 await ws_manager.broadcast_state(incident_id, dump)
 
-                # Cap at critical max
                 if state.metrics.severity_score >= 100.0:
                     logger.debug(f"Incident {incident_id} reached maximum severity degradation.")
 
@@ -279,9 +298,7 @@ class IncidentSimulator:
     async def propose_action(
         self, incident_id: str, request: ProposeActionRequest
     ) -> IncidentState:
-        """
-        Propose a high-impact emergency action for commander approval.
-        """
+        """Propose an emergency action for commander approval."""
         lock = await self._get_lock(incident_id)
         async with lock:
             if incident_id not in self._incidents:
@@ -299,6 +316,7 @@ class IncidentSimulator:
                 proposed_by=request.proposed_by,
                 status=ActionApprovalStatus.PENDING_APPROVAL,
                 created_at=now,
+                pending_at=now,
                 recovery_duration_seconds=request.recovery_duration_seconds,
             )
             state.proposed_actions.append(action)
@@ -319,14 +337,16 @@ class IncidentSimulator:
             dump = state.model_dump()
 
         await ws_manager.broadcast_state(incident_id, dump)
+        try:
+            await incident_repo.upsert(state)
+        except Exception as e:
+            logger.warning(f"DB persist failed for propose_action {incident_id}: {e}")
         return state
 
     async def approve_action(
         self, incident_id: str, action_id: str, request: ApproveActionRequest
     ) -> IncidentState:
-        """
-        Approve an emergency action, transitioning it to EXECUTING and starting the recovery simulation loop.
-        """
+        """Approve an emergency action, transitioning to APPROVED -> EXECUTING and starting recovery."""
         lock = await self._get_lock(incident_id)
         async with lock:
             if incident_id not in self._incidents:
@@ -338,30 +358,45 @@ class IncidentSimulator:
                 None,
             )
             if not target_action:
-                raise ValueError(f"Proposed action '{action_id}' not found.")
+                raise LookupError(f"Proposed action '{action_id}' not found in incident '{incident_id}'.")
 
-            if target_action.status not in (ActionApprovalStatus.PENDING_APPROVAL, ActionApprovalStatus.REJECTED):
-                raise ValueError(f"Action '{action_id}' cannot be approved from status '{target_action.status.value}'.")
+            if target_action.status not in APPROVABLE_STATES:
+                raise PermissionError(
+                    f"Action '{action_id}' is in status '{target_action.status.value}' and cannot be approved. "
+                    f"Only actions in {[s.value for s in APPROVABLE_STATES]} can be approved. "
+                    "REJECTED actions are terminal."
+                )
 
-            # Cancel existing degradation loop
             if incident_id in self._tasks and not self._tasks[incident_id].done():
                 self._tasks[incident_id].cancel()
 
             now = get_utc_now()
-            target_action.status = ActionApprovalStatus.EXECUTING
+            target_action.status = ActionApprovalStatus.APPROVED
             target_action.approved_by = request.commander_id
             target_action.approved_at = now
-            target_action.executed_at = now
+            target_action.approval_notes = request.notes
             if request.override_parameters:
                 target_action.parameters.update(request.override_parameters)
 
-            # Record in backward-compatible actions_taken list
+            state.timeline.append(
+                TimelineEntry(
+                    timestamp=now,
+                    event_type="ACTION_APPROVED",
+                    description=f"Action '{target_action.tool_name}' approved by {request.commander_id}.",
+                    actor=request.commander_id,
+                    metadata={"action_id": action_id, "notes": request.notes},
+                )
+            )
+
+            target_action.status = ActionApprovalStatus.EXECUTING
+            target_action.executed_at = now
+
             taken_action = ActionTaken(
                 action_id=target_action.action_id,
                 tool_name=target_action.tool_name,
                 parameters=target_action.parameters,
                 executed_at=now,
-                result_summary=f"Approved and executing: {target_action.rationale}",
+                result_summary=f"Approved by {request.commander_id} and executing: {target_action.rationale}",
                 verified=False,
             )
             state.actions_taken.append(taken_action)
@@ -372,17 +407,13 @@ class IncidentSimulator:
             state.timeline.append(
                 TimelineEntry(
                     timestamp=now,
-                    event_type="ACTION_APPROVED",
-                    description=f"Action '{target_action.tool_name}' approved by {request.commander_id} and executing.",
-                    actor=request.commander_id,
-                    metadata={
-                        "action_id": action_id,
-                        "notes": request.notes,
-                    },
+                    event_type="ACTION_EXECUTING",
+                    description=f"Action '{target_action.tool_name}' transitioned to EXECUTING.",
+                    actor="SYSTEM",
+                    metadata={"action_id": action_id},
                 )
             )
 
-            # Spawn recovery loop
             task = asyncio.create_task(
                 self._run_recovery_loop(
                     incident_id,
@@ -394,14 +425,16 @@ class IncidentSimulator:
             dump = state.model_dump()
 
         await ws_manager.broadcast_state(incident_id, dump)
+        try:
+            await incident_repo.upsert(state)
+        except Exception as e:
+            logger.warning(f"DB persist failed for approve_action {incident_id}: {e}")
         return state
 
     async def reject_action(
         self, incident_id: str, action_id: str, request: RejectActionRequest
     ) -> IncidentState:
-        """
-        Reject a proposed emergency action with commander justification.
-        """
+        """Reject a proposed emergency action with commander justification. REJECTED is terminal."""
         lock = await self._get_lock(incident_id)
         async with lock:
             if incident_id not in self._incidents:
@@ -413,12 +446,19 @@ class IncidentSimulator:
                 None,
             )
             if not target_action:
-                raise ValueError(f"Proposed action '{action_id}' not found.")
+                raise LookupError(f"Proposed action '{action_id}' not found in incident '{incident_id}'.")
+
+            if target_action.status not in REJECTABLE_STATES:
+                raise PermissionError(
+                    f"Action '{action_id}' is in status '{target_action.status.value}' and cannot be rejected. "
+                    f"Only actions in {[s.value for s in REJECTABLE_STATES]} can be rejected."
+                )
 
             now = get_utc_now()
             target_action.status = ActionApprovalStatus.REJECTED
             target_action.rejection_reason = request.reason
-            target_action.approved_by = request.commander_id
+            target_action.rejected_by = request.commander_id
+            target_action.rejected_at = now
             state.updated_at = now
 
             state.timeline.append(
@@ -433,14 +473,16 @@ class IncidentSimulator:
             dump = state.model_dump()
 
         await ws_manager.broadcast_state(incident_id, dump)
+        try:
+            await incident_repo.upsert(state)
+        except Exception as e:
+            logger.warning(f"DB persist failed for reject_action {incident_id}: {e}")
         return state
 
     async def trigger_resolution(
         self, incident_id: str, request: TriggerResolutionRequest
     ) -> IncidentState:
-        """
-        Trigger a resolution tool action causing measurable recovery over N seconds with light jitter.
-        """
+        """Trigger a resolution action causing measurable recovery over N seconds with light jitter."""
         lock = await self._get_lock(incident_id)
         async with lock:
             if incident_id not in self._incidents:
@@ -448,7 +490,6 @@ class IncidentSimulator:
 
             state = self._incidents[incident_id]
 
-            # Cancel existing degradation task
             if incident_id in self._tasks and not self._tasks[incident_id].done():
                 self._tasks[incident_id].cancel()
 
@@ -456,7 +497,6 @@ class IncidentSimulator:
             state.status = IncidentStatus.RESOLVING
             state.updated_at = now
 
-            # Record action taken
             action = ActionTaken(
                 action_id=f"act-{len(state.actions_taken)+1}",
                 tool_name=request.tool_name,
@@ -467,7 +507,6 @@ class IncidentSimulator:
             )
             state.actions_taken.append(action)
 
-            # Keep proposed_actions synchronized
             prop_action = ProposedAction(
                 action_id=action.action_id,
                 tool_name=request.tool_name,
@@ -483,7 +522,6 @@ class IncidentSimulator:
             )
             state.proposed_actions.append(prop_action)
 
-            # Record timeline entry
             state.timeline.append(
                 TimelineEntry(
                     timestamp=now,
@@ -497,7 +535,6 @@ class IncidentSimulator:
                 )
             )
 
-            # Spawn recovery loop
             task = asyncio.create_task(
                 self._run_recovery_loop(
                     incident_id,
@@ -508,14 +545,16 @@ class IncidentSimulator:
             self._tasks[incident_id] = task
 
         await ws_manager.broadcast_state(incident_id, state.model_dump())
+        try:
+            await incident_repo.upsert(state)
+        except Exception as e:
+            logger.warning(f"DB persist failed for trigger_resolution {incident_id}: {e}")
         return state
 
     async def _run_recovery_loop(
         self, incident_id: str, duration_seconds: float, action_id: str
     ) -> None:
-        """
-        Progressively recovers incident metrics over N seconds with light jitter until stabilized.
-        """
+        """Progressively recovers incident metrics over N seconds with light jitter until stabilized."""
         logger.info(f"Starting recovery loop for incident {incident_id} over {duration_seconds}s")
         tick_interval = 0.5
         total_ticks = max(1, int(duration_seconds / tick_interval))
@@ -538,7 +577,6 @@ class IncidentSimulator:
                     jitter = random.uniform(0.90, 1.15)
                     m = state.metrics
 
-                    # Target nominal recovery
                     severity_recovery = (m.severity_score - 10.0) / (total_ticks - current_tick + 1) * jitter
                     m.severity_score = max(10.0, round(m.severity_score - severity_recovery, 1))
 
@@ -569,7 +607,6 @@ class IncidentSimulator:
                     state.metrics.water_safety_index = 95.0
                     state.metrics.infrastructure_integrity_pct = 98.0
 
-                    # Mark action verified in both collections
                     for act in state.actions_taken:
                         if act.action_id == action_id:
                             act.verified = True
@@ -594,11 +631,136 @@ class IncidentSimulator:
 
             await ws_manager.broadcast_state(incident_id, final_dump)
             logger.info(f"Incident {incident_id} successfully stabilized.")
+            try:
+                if incident_id in self._incidents:
+                    await incident_repo.upsert(self._incidents[incident_id])
+            except Exception as e:
+                logger.warning(f"DB persist failed for stabilization {incident_id}: {e}")
 
         except asyncio.CancelledError:
             logger.info(f"Recovery loop cancelled for incident {incident_id}")
         except (RuntimeError, ValueError, OSError) as exc:
             logger.error(f"Error in recovery loop for {incident_id}: {exc}")
+
+    async def check_and_remind_overdue_actions(self, incident_id: str) -> list[dict[str, Any]]:
+        """
+        Check for action items whose due_at has passed and status is OPEN.
+        Marks them OVERDUE, records last_reminder_at, and broadcasts a FOLLOWUP_REMINDER event.
+        Guards against reminder spam by throttling reminders to once per 60s per item.
+        """
+        from datetime import datetime, timezone
+
+        reminders = []
+        lock = await self._get_lock(incident_id)
+        async with lock:
+            if incident_id not in self._incidents:
+                return []
+
+            state = self._incidents[incident_id]
+            now_dt = datetime.now(timezone.utc)
+            now_iso = now_dt.isoformat()
+
+            for item in state.action_items:
+                if item.status in ("OPEN", "OVERDUE") and item.due_at:
+                    try:
+                        due_dt = datetime.fromisoformat(item.due_at)
+                        if due_dt.tzinfo is None:
+                            due_dt = due_dt.replace(tzinfo=timezone.utc)
+                    except (ValueError, TypeError):
+                        continue
+
+                    if due_dt < now_dt:
+                        # Check throttling (don't spam reminders if sent in last 60s)
+                        should_remind = True
+                        if item.last_reminder_at:
+                            try:
+                                last_rem_dt = datetime.fromisoformat(item.last_reminder_at)
+                                if last_rem_dt.tzinfo is None:
+                                    last_rem_dt = last_rem_dt.replace(tzinfo=timezone.utc)
+                                if (now_dt - last_rem_dt).total_seconds() < 60:
+                                    should_remind = False
+                            except (ValueError, TypeError):
+                                pass
+
+                        if should_remind:
+                            item.status = "OVERDUE"
+                            item.last_reminder_at = now_iso
+                            mins_overdue = max(1, int((now_dt - due_dt).total_seconds() / 60))
+
+                            reminder_payload = {
+                                "action_id": item.id,
+                                "incident_id": incident_id,
+                                "description": item.description,
+                                "owner_name": item.owner_name or "Unassigned",
+                                "due_at": item.due_at,
+                                "minutes_overdue": mins_overdue,
+                                "timestamp": now_iso,
+                            }
+                            reminders.append(reminder_payload)
+
+                            state.timeline.append(
+                                TimelineEntry(
+                                    timestamp=now_iso,
+                                    event_type="FOLLOWUP_REMINDER",
+                                    description=f"Action '{item.description}' assigned to {item.owner_name or 'Unassigned'} is OVERDUE ({mins_overdue}m).",
+                                    actor="SYSTEM",
+                                    metadata=reminder_payload,
+                                )
+                            )
+
+            if reminders:
+                state.updated_at = now_iso
+                dump = state.model_dump()
+                await ws_manager.broadcast_state(incident_id, dump)
+                for r in reminders:
+                    await ws_manager.broadcast_json(incident_id, {
+                        "type": "FOLLOWUP_REMINDER",
+                        "incident_id": incident_id,
+                        "reminder": r,
+                    })
+                try:
+                    await incident_repo.upsert(state)
+                except Exception as e:
+                    logger.warning(f"DB persist failed for overdue reminder {incident_id}: {e}")
+
+        return reminders
+
+    async def complete_action_item(
+        self, incident_id: str, item_id: str, completion_evidence: str | None = None
+    ) -> ActionItem | None:
+        """Mark an action item as COMPLETE with optional evidence."""
+        lock = await self._get_lock(incident_id)
+        async with lock:
+            if incident_id not in self._incidents:
+                raise ValueError(f"Incident '{incident_id}' does not exist.")
+
+            state = self._incidents[incident_id]
+            target = next((a for a in state.action_items if a.id == item_id), None)
+            if not target:
+                raise LookupError(f"Action item '{item_id}' not found in incident '{incident_id}'.")
+
+            now = get_utc_now()
+            target.status = "COMPLETE"
+            target.completion_evidence = completion_evidence
+            state.updated_at = now
+
+            state.timeline.append(
+                TimelineEntry(
+                    timestamp=now,
+                    event_type="ACTION_ITEM_COMPLETED",
+                    description=f"Action item '{target.description}' completed by {target.owner_name or 'operator'}.",
+                    actor=target.owner_name or "SYSTEM",
+                    metadata={"item_id": item_id, "evidence": completion_evidence},
+                )
+            )
+            dump = state.model_dump()
+
+        await ws_manager.broadcast_state(incident_id, dump)
+        try:
+            await incident_repo.upsert(state)
+        except Exception as e:
+            logger.warning(f"DB persist failed for complete_action {incident_id}: {e}")
+        return target
 
     async def shutdown(self) -> None:
         """Cancel all running background simulation tasks during server shutdown."""

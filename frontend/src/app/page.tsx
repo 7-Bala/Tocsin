@@ -10,11 +10,14 @@ import { ActionApprovalQueue } from '@/components/ActionApprovalQueue';
 import { HypothesesPanel } from '@/components/HypothesesPanel';
 import { TimelineFeed } from '@/components/TimelineFeed';
 import { VoiceHUD } from '@/components/VoiceHUD';
+import { IntelligencePanel } from '@/components/IntelligencePanel';
+import { DemoModeControl } from '@/components/DemoModeControl';
 
 export default function IncidentCommandDashboard() {
   const [incidentsList, setIncidentsList] = useState<IncidentState[]>([]);
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<string>(new Date().toISOString());
 
   // WebSocket real-time subscription
   const { incidentState: wsIncident, status: wsStatus, setIncidentState } =
@@ -27,14 +30,14 @@ export default function IncidentCommandDashboard() {
         setIsLoading(true);
         let list = await fetchIncidents();
         if (list.length === 0) {
-          // Initialize default crisis incident for immediate demo readiness
+          // Initialize default payment outage incident for immediate demo readiness
           const defaultInc = await createIncident({
-            title: 'Downtown Coastal Flash Flood Surge',
-            event_type: 'FLOOD_SURGE',
-            incident_id: 'inc-demo-flood-01',
+            title: 'Major Payment Processing & Checkout Outage',
+            event_type: 'PAYMENT_OUTAGE',
+            incident_id: 'inc-demo-payment-outage',
             initial_symptoms: [
-              'Rapid overflow detected at River Embankment Sector 4',
-              'Multiple vehicles stranded near Low-lying Viaduct',
+              'HTTP 500 error surge on /api/v1/checkout across US-East',
+              'Customer transaction success rate dropped to 54.2%',
             ],
           });
           list = [defaultInc];
@@ -45,23 +48,23 @@ export default function IncidentCommandDashboard() {
       } catch {
         // Fallback demo state if backend connection fails on initial render
         const fallback: IncidentState = {
-          incident_id: 'inc-demo-flood-01',
-          title: 'Downtown Coastal Flash Flood Surge',
-          event_type: 'FLOOD_SURGE',
+          incident_id: 'inc-demo-payment-outage',
+          title: 'Major Payment Processing & Checkout Outage',
+          event_type: 'PAYMENT_OUTAGE',
           status: 'IDLE',
-          severity: 'LOW',
+          severity: 'HIGH',
           metrics: {
-            severity_score: 10,
-            water_safety_index: 95,
+            severity_score: 55,
+            water_safety_index: 45,
             flood_depth_meters: 0,
-            affected_population: 0,
-            infrastructure_integrity_pct: 100,
+            affected_population: 8500,
+            infrastructure_integrity_pct: 70,
           },
           symptoms: [
             {
               id: 'sym-1',
-              description: 'Initial sensor alert: rapid water runoff',
-              severity: 'LOW',
+              description: 'Initial alert: 500 errors on checkout API',
+              severity: 'HIGH',
               reported_at: new Date().toISOString(),
             },
           ],
@@ -69,20 +72,11 @@ export default function IncidentCommandDashboard() {
             {
               timestamp: new Date().toISOString(),
               event_type: 'INCIDENT_INITIALIZED',
-              description: 'Incident initialized in standby mode.',
+              description: 'Payment outage incident initialized in standby mode.',
               actor: 'SYSTEM',
             },
           ],
-          hypotheses: [
-            {
-              id: 'hypo-1',
-              title: 'Flash Flood & Culvert Breach Hazard',
-              description: 'Sensor data indicates runoff accumulation pending voice confirmation.',
-              confidence: 0.4,
-              status: 'PROPOSED',
-              updated_at: new Date().toISOString(),
-            },
-          ],
+          hypotheses: [],
           proposed_actions: [],
           actions_taken: [],
           participants: [],
@@ -94,6 +88,7 @@ export default function IncidentCommandDashboard() {
         setIncidentState(() => fallback);
       } finally {
         setIsLoading(false);
+        setLastUpdated(new Date().toISOString());
       }
     }
 
@@ -105,6 +100,7 @@ export default function IncidentCommandDashboard() {
   const handleIncidentUpdated = useCallback(
     (updated: IncidentState) => {
       setIncidentState(() => updated);
+      setLastUpdated(new Date().toISOString());
       setIncidentsList((prev) => {
         const idx = prev.findIndex((i) => i.incident_id === updated.incident_id);
         if (idx >= 0) {
@@ -148,11 +144,33 @@ export default function IncidentCommandDashboard() {
         onIncidentUpdated={handleIncidentUpdated}
       />
 
+      {/* Demo Mode Control & Scenario Runner */}
+      <DemoModeControl
+        activeIncidentId={activeIncident?.incident_id || null}
+        onIncidentUpdated={handleIncidentUpdated}
+      />
+
+      {/* Human Confirmation Security Notice Banner */}
+      <div className="p-3 rounded-lg bg-amber-950/30 border border-amber-500/30 flex items-center justify-between gap-3 text-xs text-amber-200">
+        <div className="flex items-center gap-2">
+          <span>🛡️</span>
+          <span>
+            <b>Human Confirmation Mandate:</b> Critical recovery operations require explicit Incident Commander sign-off (via <code>TOCSIN_COMMANDER_KEY</code>). AI proposals cannot execute autonomously.
+          </span>
+        </div>
+        <span className="text-[11px] font-mono text-zinc-400 whitespace-nowrap">
+          Last Synced: {new Date(lastUpdated).toLocaleTimeString()}
+        </span>
+      </div>
+
       {/* Live Telemetry Gauges */}
       <MetricsOverview
         metrics={activeIncident?.metrics}
         status={activeIncident?.status}
       />
+
+      {/* Shared Intelligence Record */}
+      <IntelligencePanel incident={activeIncident} />
 
       {/* 2-Column Responsive Operation Grid */}
       <div
@@ -163,7 +181,7 @@ export default function IncidentCommandDashboard() {
           alignItems: 'start',
         }}
       >
-        {/* Left Column: Approvals & AI Understanding */}
+        {/* Left Column: Approvals & Hypotheses */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
           <ActionApprovalQueue
             incident={activeIncident}
@@ -178,7 +196,8 @@ export default function IncidentCommandDashboard() {
         {/* Right Column: Voice AI Radio HUD & Operational Timeline */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
           <VoiceHUD
-            channelName={activeIncident?.incident_id || 'tocsin-emergency-room'}
+            channelName={activeIncident?.incident_id || 'inc-demo-payment-outage'}
+            incidentId={activeIncident?.incident_id}
           />
           <TimelineFeed
             timeline={activeIncident?.timeline}
@@ -205,7 +224,7 @@ export default function IncidentCommandDashboard() {
           🚨 <b>TOCSIN Crisis Coordination Engine</b> • Multi-Party Voice AI & Emergency MCP
         </span>
         <span>
-          Active Incident: <code>{activeIncident?.incident_id || '---'}</code> • Status: <b>{activeIncident?.status || 'IDLE'}</b>
+          Active Incident: <code>{activeIncident?.incident_id || '---'}</code> • Status: <b>{activeIncident?.status || 'IDLE'}</b> • Severity: <b>{activeIncident?.severity || 'LOW'}</b>
         </span>
       </footer>
     </main>

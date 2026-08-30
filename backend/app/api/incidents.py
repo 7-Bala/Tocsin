@@ -5,7 +5,8 @@ REST routes for managing and interacting with live disaster simulations.
 
 import logging
 import os
-from typing import Annotated
+from typing import Annotated, Any
+from pydantic import BaseModel, Field
 
 from fastapi import APIRouter, Header, HTTPException, status
 
@@ -24,7 +25,11 @@ logger = logging.getLogger("tocsin.api.incidents")
 
 router = APIRouter(prefix="/api/incidents", tags=["Incidents"])
 
-COMMANDER_AUTH_KEY: str = os.getenv("TOCSIN_COMMANDER_KEY", "tocsin-commander-key")
+
+def _get_configured_commander_key() -> str | None:
+    """Return the configured commander key, or None if not set."""
+    key = os.getenv("TOCSIN_COMMANDER_KEY", "").strip()
+    return key if key else None
 
 
 def verify_commander_authorization(
@@ -33,15 +38,31 @@ def verify_commander_authorization(
 ) -> str:
     """
     Ensure caller possesses commander-level authorization to approve/reject emergency operations.
+
+    Reads TOCSIN_COMMANDER_KEY from environment. If the env var is not set,
+    returns HTTP 503 — the service is not safely configured for approval operations.
+    There is no hardcoded fallback key.
     """
-    token = x_tocsin_auth or (authorization.replace("Bearer ", "").strip() if authorization else None)
+    configured_key = _get_configured_commander_key()
+    if configured_key is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "TOCSIN_COMMANDER_KEY is not configured on the server. "
+                "Set this environment variable before approval operations can be authorized."
+            ),
+        )
+
+    token = x_tocsin_auth or (
+        authorization.replace("Bearer ", "").strip() if authorization else None
+    )
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authorization required. Provide 'X-Tocsin-Auth' or 'Authorization' Bearer header.",
+            detail="Authorization required. Provide 'X-Tocsin-Auth' or 'Authorization: Bearer' header.",
         )
-    # Check configured key if set, or accept valid commander token
-    if COMMANDER_AUTH_KEY and token != COMMANDER_AUTH_KEY and token != "tocsin-commander-key":
+
+    if token != configured_key:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid commander credentials. Operation rejected.",
@@ -148,19 +169,31 @@ async def approve_action(
 ) -> IncidentState:
     """
     Commander approves a pending emergency action.
-    Transitions action to EXECUTING and triggers progressive recovery simulation.
+    Transitions action to APPROVED → EXECUTING and triggers progressive recovery simulation.
     Requires commander authorization header.
     """
     verify_commander_authorization(x_tocsin_auth, authorization)
     try:
         return await simulator.approve_action(incident_id, action_id, request)
+    except LookupError as err:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(err),
+        )
+    except PermissionError as err:
+        # Idempotency conflict or invalid state transition
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(err),
+        )
     except ValueError as err:
         err_msg = str(err)
-        status_code = status.HTTP_404_NOT_FOUND if "does not exist" in err_msg else status.HTTP_400_BAD_REQUEST
-        raise HTTPException(
-            status_code=status_code,
-            detail=err_msg,
+        sc = (
+            status.HTTP_404_NOT_FOUND
+            if "does not exist" in err_msg
+            else status.HTTP_400_BAD_REQUEST
         )
+        raise HTTPException(status_code=sc, detail=err_msg)
 
 
 @router.post(
@@ -177,32 +210,49 @@ async def reject_action(
 ) -> IncidentState:
     """
     Commander rejects a pending emergency action with justification.
+    Rejection is terminal — a rejected action cannot be re-approved.
     Requires commander authorization header.
     """
     verify_commander_authorization(x_tocsin_auth, authorization)
     try:
         return await simulator.reject_action(incident_id, action_id, request)
+    except LookupError as err:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(err),
+        )
+    except PermissionError as err:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(err),
+        )
     except ValueError as err:
         err_msg = str(err)
-        status_code = status.HTTP_404_NOT_FOUND if "does not exist" in err_msg else status.HTTP_400_BAD_REQUEST
-        raise HTTPException(
-            status_code=status_code,
-            detail=err_msg,
+        sc = (
+            status.HTTP_404_NOT_FOUND
+            if "does not exist" in err_msg
+            else status.HTTP_400_BAD_REQUEST
         )
+        raise HTTPException(status_code=sc, detail=err_msg)
 
 
 @router.post(
     "/{incident_id}/resolve",
     response_model=IncidentState,
-    summary="Trigger a resolution action (starts recovery loop)",
+    summary="Trigger a resolution action (Commander Sign-Off Required)",
 )
 async def trigger_resolution(
-    incident_id: str, request: TriggerResolutionRequest
+    incident_id: str,
+    request: TriggerResolutionRequest,
+    x_tocsin_auth: Annotated[str | None, Header(alias="X-Tocsin-Auth")] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> IncidentState:
     """
-    Trigger an emergency resolution tool action.
-    Transitions incident state to RESOLVING and recovers metrics back to nominal.
+    Trigger an emergency resolution action. Commander authorization is required.
+    Transitions incident to RESOLVING and recovers metrics back to nominal.
+    This endpoint bypasses the propose/approve workflow — use sparingly.
     """
+    verify_commander_authorization(x_tocsin_auth, authorization)
     try:
         return await simulator.trigger_resolution(incident_id, request)
     except ValueError as err:
@@ -210,3 +260,56 @@ async def trigger_resolution(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(err),
         )
+
+
+class CompleteActionItemRequest(BaseModel):
+    evidence: str = Field(default="Completed via verification check")
+
+
+@router.post(
+    "/{incident_id}/check-reminders",
+    summary="Scan and emit reminders for overdue action items",
+)
+async def check_incident_reminders(incident_id: str) -> dict[str, Any]:
+    """
+    Manually triggers scan for overdue action items, broadcasts FOLLOWUP_REMINDER events,
+    and returns emitted reminders.
+    """
+    state = await simulator.get_incident(incident_id)
+    if not state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident with ID '{incident_id}' not found.",
+        )
+    reminders = await simulator.check_and_remind_overdue_actions(incident_id)
+    return {
+        "incident_id": incident_id,
+        "overdue_reminders_emitted": len(reminders),
+        "reminders": reminders,
+    }
+
+
+@router.post(
+    "/{incident_id}/action-items/{item_id}/complete",
+    summary="Mark an action item as completed",
+)
+async def complete_action_item(
+    incident_id: str,
+    item_id: str,
+    request: CompleteActionItemRequest,
+) -> dict[str, Any]:
+    """
+    Mark an assigned action item as COMPLETE with verification evidence.
+    """
+    completed = await simulator.complete_action_item(
+        incident_id, item_id, completion_evidence=request.evidence
+    )
+    if not completed:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Action item '{item_id}' not found in incident '{incident_id}'.",
+        )
+    return {
+        "status": "success",
+        "action_item": completed.model_dump(),
+    }

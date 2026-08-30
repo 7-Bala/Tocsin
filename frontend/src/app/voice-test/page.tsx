@@ -855,7 +855,16 @@ export default function VoiceTestPage() {
         try {
           const msg = JSON.parse(raw);
           const content = msg.text ?? msg.transcript ?? null;
-          if (content && content.length > 3) { addTranscriptEntryRef.current('AI Agent', content); extractIncidentInfo(content, 'ai'); }
+          if (content && content.length > 3) {
+            addTranscriptEntryRef.current('AI Agent', content);
+            extractIncidentInfo(content, 'ai');
+            const incId = channelName.trim() || 'inc-demo-flood-01';
+            fetch(`${API_BASE_URL}/api/incidents/${incId}/observations`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ raw_utterance: content, speaker: 'AI Agent', source: 'agora_voice_agent' }),
+            }).catch(() => {});
+          }
         } catch {}
       });
 
@@ -870,6 +879,12 @@ export default function VoiceTestPage() {
             if (text.length < 3) continue;
             addTranscriptEntryRef.current('You', text);
             extractIncidentInfo(text, 'user');
+            const incId = channelName.trim() || 'inc-demo-flood-01';
+            fetch(`${API_BASE_URL}/api/incidents/${incId}/observations`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ raw_utterance: text, speaker: 'Operator', source: 'voice_transcript' }),
+            }).catch(() => {});
           }
         };
         rec.onerror = (e: any) => { if (e.error !== 'no-speech' && e.error !== 'aborted') addLog(`⚠️ [Speech recognition] ${e.error}`); };
@@ -924,6 +939,12 @@ export default function VoiceTestPage() {
     if (!commandInput.trim()) return;
     const text = commandInput.trim();
     addTranscriptEntry('You', text); extractIncidentInfo(text); setCommandInput('');
+    const incId = channelName.trim() || 'inc-demo-flood-01';
+    fetch(`${API_BASE_URL}/api/incidents/${incId}/observations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ raw_utterance: text, speaker: 'Operator', source: 'command_input' }),
+    }).catch(() => {});
   };
 
   const handleResetIncident = () => {

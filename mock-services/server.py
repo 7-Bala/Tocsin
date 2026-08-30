@@ -650,66 +650,103 @@ async def dispatch_resolution_action(
     actor: str = "AgoraVoiceAgent",
 ) -> dict[str, Any]:
     """
-    Dispatch an emergency resolution tool action against the active incident, triggering recovery in the simulation engine.
+    Propose an emergency resolution action for Incident Commander review and human approval.
+    This tool does NOT execute the action directly — it creates a PENDING_APPROVAL record.
+    Execution requires an Incident Commander to explicitly approve via the dashboard or API.
 
     :param incident_id: Incident identifier to apply resolution to
     :param tool_name: Name of the resolution tool (e.g. 'deploy_water_filtration', 'dispatch_rescue_boats')
-    :param action_description: Summary of the physical response action taken
-    :param recovery_duration_seconds: Time window for state stabilization (1.0 to 60.0, default 5.0)
-    :param actor: Identifier of the dispatching agent or operator
+    :param action_description: Summary of the proposed physical response action
+    :param recovery_duration_seconds: Estimated stabilization window (1.0 to 60.0, default 5.0)
+    :param actor: Identifier of the proposing agent or operator
     """
     if not incident_id or not incident_id.strip():
         return {"error": "incident_id must not be empty."}
 
+    # SAFETY: Proposes for approval — does NOT execute directly.
     payload = {
         "tool_name": tool_name.strip(),
-        "action_description": action_description.strip(),
+        "rationale": action_description.strip(),
         "recovery_duration_seconds": max(1.0, min(60.0, recovery_duration_seconds)),
-        "actor": actor.strip(),
+        "proposed_by": actor.strip(),
         "parameters": {},
     }
 
-    url = f"{BACKEND_URL}/api/incidents/{incident_id.strip()}/resolve"
+    url = f"{BACKEND_URL}/api/incidents/{incident_id.strip()}/actions/propose"
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
             resp = await client.post(url, json=payload)
             if resp.status_code == 404:
-                return {
-                    "error": f"Incident '{incident_id}' not found.",
-                    "status_code": 404,
-                }
+                return make_evidence_envelope(
+                    source="Tocsin Action Approval Workflow",
+                    source_type="PROPOSED_ACTION",
+                    summary=f"Incident '{incident_id}' not found.",
+                    data={"proposed": False, "error": f"Incident '{incident_id}' not found."},
+                    confidence="UNAVAILABLE",
+                    limitations=["Incident does not exist in backend state engine."],
+                    extra_root_fields={
+                        "proposed": False,
+                        "error": f"Incident '{incident_id}' not found.",
+                        "status_code": 404,
+                        "tool_classification": "LOCAL_SIMULATOR",
+                    },
+                )
             resp.raise_for_status()
             data = resp.json()
+            proposed_list = data.get("proposed_actions", [])
+            latest_action = proposed_list[-1] if proposed_list else {}
 
-            summary = f"Dispatched resolution action '{tool_name}' against incident '{incident_id}'."
+            notice = (
+                f"Action '{tool_name}' has been PROPOSED for Incident Commander approval. "
+                "This action will NOT execute until a human commander explicitly approves it. "
+                "No physical deployment should begin until approval is confirmed."
+            )
+
             res = make_evidence_envelope(
-                source="Tocsin Resolution Dispatcher",
-                source_type="RESOLUTION_DISPATCH",
-                summary=summary,
-                data=data,
-                confidence="COMMANDER_AUTHORIZED",
-                limitations=[
-                    "Action marked RESOLVING; physical stabilization takes time. Ongoing telemetry monitoring required."
-                ],
-                extra_root_fields={
-                    "dispatched": True,
+                source="Tocsin Action Approval Workflow",
+                source_type="PROPOSED_ACTION",
+                summary=f"Action '{tool_name}' proposed for commander review (status: PENDING_APPROVAL).",
+                data={
+                    "proposed": True,
+                    "action_id": latest_action.get("action_id"),
+                    "status": latest_action.get("status", "PENDING_APPROVAL"),
                     "incident_id": incident_id,
                     "tool_name": tool_name,
-                    "status": data.get("status"),
-                    "severity": data.get("severity"),
-                    "metrics": data.get("metrics"),
-                    "actions_taken": data.get("actions_taken"),
-                    "proposed_actions": data.get("proposed_actions"),
+                    "rationale": action_description,
+                },
+                confidence="REQUIRES_HUMAN_APPROVAL",
+                limitations=[
+                    "Action is NOT executed. Physical units must not deploy until Incident Commander approval is granted.",
+                    "Use the dashboard or POST /api/incidents/{id}/actions/{action_id}/approve to approve.",
+                ],
+                extra_root_fields={
+                    "proposed": True,
+                    "action_id": latest_action.get("action_id"),
+                    "status": latest_action.get("status", "PENDING_APPROVAL"),
+                    "incident_id": incident_id,
+                    "tool_name": tool_name,
+                    "rationale": action_description,
+                    "notice_for_agent": notice,
+                    "tool_classification": "LOCAL_SIMULATOR",
                 },
             )
             return res
     except (httpx.HTTPError, OSError, ValueError) as exc:
-        logger.error(f"Backend POST /api/incidents/{incident_id}/resolve failed: {exc}")
-        return {
-            "dispatched": False,
-            "error": f"Failed to dispatch resolution action: {exc}",
-            "incident_id": incident_id,
-        }
+        logger.error(f"Backend POST /api/incidents/{incident_id}/actions/propose failed: {exc}")
+        return make_evidence_envelope(
+            source="Tocsin Action Approval Workflow",
+            source_type="PROPOSED_ACTION",
+            summary=f"Failed to propose action: {exc}",
+            data={"proposed": False, "error": str(exc), "incident_id": incident_id},
+            confidence="COMMUNICATION_FAILURE",
+            limitations=["Backend API unreachable."],
+            extra_root_fields={
+                "proposed": False,
+                "error": f"Failed to propose action: {exc}",
+                "incident_id": incident_id,
+                "tool_classification": "LOCAL_SIMULATOR",
+            },
+        )
 
 
 # ==============================================================================
@@ -720,99 +757,99 @@ async def notify_stakeholders(
     incident_id: str, message: str, chat_id: str = "emergency_dispatch_channel"
 ) -> dict[str, Any]:
     """
-    Send an emergency broadcast message to response stakeholders via Telegram Bot API with graceful mock fallback.
+    Send an emergency broadcast message to response stakeholders via Slack Webhook or Telegram Bot API.
+    If credentials (SLACK_WEBHOOK_URL or TELEGRAM_BOT_TOKEN) are absent, returns a transparently labeled mock fallback.
 
     :param incident_id: Associated incident identifier
     :param message: Emergency notification text
-    :param chat_id: Target Telegram chat ID or channel name
+    :param chat_id: Target Slack channel or Telegram chat ID
     """
     if not message or not message.strip():
         return {"error": "Message content cannot be empty."}
 
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    slack_url = os.getenv("SLACK_WEBHOOK_URL", "").strip()
+    tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     formatted_text = f"🚨 [TOCSIN EMERGENCY ALERT - {incident_id}]\n{message.strip()}"
 
-    if not token or not token.strip():
-        logger.info(
-            "TELEGRAM_BOT_TOKEN not configured. Returning explicit mock fallback."
-        )
-        notice = (
-            "NOT ACTUALLY SENT - this is a simulated/mock response because no live Telegram bot token is configured. "
-            "You MUST explicitly tell the user that this message was NOT actually sent or transmitted to real stakeholders in the real world."
-        )
-        res_mock = make_evidence_envelope(
-            source="Tocsin Local Mock Dispatcher",
-            source_type="SIMULATED",
-            summary=f"Simulated emergency broadcast bulletin generated for incident '{incident_id}'.",
-            data={
-                "sent": False,
-                "mode": "MOCK_FALLBACK",
-                "incident_id": incident_id,
-                "chat_id": chat_id,
-                "simulated_message": formatted_text,
-            },
-            confidence="SIMULATED_ONLY",
-            limitations=[
-                "Message was NOT actually transmitted to external stakeholders. Mock dev mode active."
-            ],
-            extra_root_fields={
-                "sent": False,
-                "mode": "MOCK_FALLBACK",
-                "status_for_agent": notice,
-                "incident_id": incident_id,
-                "chat_id": chat_id,
-                "simulated_message": formatted_text,
-                "notice": "Simulated broadcast only. Real Telegram bot credentials are not configured.",
-            },
-        )
-        return res_mock
+    # 1. Live Slack Webhook Dispatch
+    if slack_url:
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.post(slack_url, json={"text": formatted_text})
+                resp.raise_for_status()
+                return make_evidence_envelope(
+                    source="Slack Webhook Integration",
+                    source_type="EXTERNAL_DISPATCH",
+                    summary=f"Broadcast alert dispatched to Slack channel for incident '{incident_id}'.",
+                    data={"sent": True, "channel": "slack", "incident_id": incident_id},
+                    confidence="CONFIRMED_TRANSMITTED",
+                    limitations=["Message delivered to Slack webhook endpoint."],
+                    extra_root_fields={
+                        "sent": True,
+                        "delivery_status": "delivered",
+                        "channel": "slack",
+                        "incident_id": incident_id,
+                        "tool_classification": "LIVE_EXTERNAL",
+                    },
+                )
+        except Exception as exc:
+            logger.error(f"Slack webhook delivery failed: {exc}")
 
-    url = f"https://api.telegram.org/bot{token.strip()}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": formatted_text,
-        "parse_mode": "Markdown",
-    }
+    # 2. Live Telegram Dispatch
+    if tg_token:
+        url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": formatted_text, "parse_mode": "Markdown"}
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.post(url, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                return make_evidence_envelope(
+                    source="Telegram Bot API",
+                    source_type="EXTERNAL_DISPATCH",
+                    summary=f"Transmitted broadcast alert to Telegram channel '{chat_id}'.",
+                    data={"sent": True, "incident_id": incident_id, "message_id": data.get("result", {}).get("message_id")},
+                    confidence="CONFIRMED_TRANSMITTED",
+                    limitations=["Broadcast delivery confirmed by Telegram API."],
+                    extra_root_fields={
+                        "sent": True,
+                        "delivery_status": "delivered",
+                        "channel": "telegram",
+                        "incident_id": incident_id,
+                        "tool_classification": "LIVE_EXTERNAL",
+                    },
+                )
+        except Exception as exc:
+            logger.error(f"Telegram delivery failed: {exc}")
 
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.post(url, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-
-            res_live = make_evidence_envelope(
-                source="Telegram Bot API",
-                source_type="EXTERNAL_DISPATCH",
-                summary=f"Transmitted broadcast alert to Telegram channel '{chat_id}'.",
-                data={
-                    "sent": True,
-                    "incident_id": incident_id,
-                    "chat_id": chat_id,
-                    "message_id": data.get("result", {}).get("message_id"),
-                },
-                confidence="CONFIRMED_TRANSMITTED",
-                limitations=[
-                    "Broadcast delivery confirmed by Telegram API; recipient acknowledgement requires field confirmation."
-                ],
-                extra_root_fields={
-                    "sent": True,
-                    "incident_id": incident_id,
-                    "chat_id": chat_id,
-                    "message_id": data.get("result", {}).get("message_id"),
-                    "status_for_agent": "Successfully transmitted to live Telegram channel.",
-                },
-            )
-            return res_live
-    except (httpx.HTTPError, OSError, ValueError) as exc:
-        logger.error(
-            f"Failed to transmit Telegram notification (redacted token): {exc}"
-        )
-        return {
+    # 3. Transparent Mock Fallback when credentials are not configured
+    logger.info("No external messaging credentials configured. Returning explicit mock fallback.")
+    notice = (
+        "NOT ACTUALLY SENT - Simulated response because no live SLACK_WEBHOOK_URL or TELEGRAM_BOT_TOKEN is configured. "
+        "This message was NOT transmitted to real external stakeholders."
+    )
+    return make_evidence_envelope(
+        source="Tocsin Local Mock Dispatcher",
+        source_type="SIMULATED",
+        summary=f"Simulated emergency broadcast bulletin generated for incident '{incident_id}'.",
+        data={
             "sent": False,
-            "error": "Telegram transmission failed. Check network or chat ID.",
+            "delivery_status": "skipped_no_credentials",
+            "mode": "MOCK_FALLBACK",
             "incident_id": incident_id,
-            "status_for_agent": "FAILED to send Telegram alert due to network or gateway error.",
-        }
+            "simulated_message": formatted_text,
+        },
+        confidence="SIMULATED_ONLY",
+        limitations=["Message was NOT actually transmitted. Mock dev mode active."],
+        extra_root_fields={
+            "sent": False,
+            "delivery_status": "skipped_no_credentials",
+            "mode": "MOCK_FALLBACK",
+            "status_for_agent": notice,
+            "incident_id": incident_id,
+            "tool_classification": "MOCK_FALLBACK",
+        },
+    )
 
 
 # ==============================================================================

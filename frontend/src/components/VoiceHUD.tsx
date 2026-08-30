@@ -8,6 +8,7 @@ import {
   FinalizedUtterance,
   ActivePartialUtterance,
 } from '@/lib/utteranceManager';
+import { ingestObservation } from '@/hooks/useIncidentApi';
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -24,11 +25,13 @@ type AgentStatus = 'STOPPED' | 'STARTING' | 'RUNNING' | 'STOPPING' | 'ERROR';
 
 interface VoiceHUDProps {
   channelName?: string;
+  incidentId?: string;
   onVoiceLog?: (msg: string) => void;
 }
 
 export const VoiceHUD: React.FC<VoiceHUDProps> = ({
   channelName = 'tocsin-emergency-room',
+  incidentId,
   onVoiceLog,
 }) => {
   const [connectionState, setConnectionState] =
@@ -197,6 +200,14 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
           // Technical metadata ONLY in Live Diagnostic Logs (Zero transcript text, zero base64)
           if (decoded.isFinal) {
             addLog(`📡 [Stream Frame] Finalized frame from UID ${msgUid} (bytes: ${payload.byteLength}, id: ${decoded.utteranceId})`);
+            if (incidentId) {
+              void ingestObservation(incidentId, {
+                raw_utterance: decoded.text,
+                speaker: decoded.speaker === 'TOCSIN' ? 'Tocsin AI' : undefined,
+                agora_uid: String(msgUid),
+                source: decoded.speaker === 'TOCSIN' ? 'agora_agent_transcript' : 'agora_user_transcript',
+              }).catch((err: Error) => addLog(`⚠️ Observation ingestion failed: ${err.message}`));
+            }
           }
         } catch (err: any) {
           addLog(`⚠️ [Stream Decoder Error] ${err?.message || 'Frame decoding issue'}`);

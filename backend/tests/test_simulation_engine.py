@@ -150,9 +150,10 @@ async def test_rest_api_endpoints():
         assert trigger_res.status_code == 200
         assert trigger_res.json()["status"] == "DEGRADING"
 
-        # Trigger resolution
+        # Trigger resolution — requires commander auth
         resolve_res = await client.post(
             "/api/incidents/test-inc-api-999/resolve",
+            headers={"X-Tocsin-Auth": "tocsin-commander-key"},
             json={
                 "tool_name": "activate_activated_carbon_filtration",
                 "action_description": "Engaged auxiliary carbon filtration bank.",
@@ -356,7 +357,7 @@ async def test_approval_lifecycle_edge_cases():
             headers={"X-Tocsin-Auth": "tocsin-commander-key"},
             json={"commander_id": "Commander-1"},
         )
-        assert res_bad_act.status_code == 400
+        assert res_bad_act.status_code == 404  # LookupError — action not found
 
         # 3. Propose action and approve it once
         prop_res = await client.post(
@@ -373,13 +374,13 @@ async def test_approval_lifecycle_edge_cases():
         )
         assert app_1.status_code == 200
 
-        # Attempt duplicate approval while EXECUTING -> 400
+        # Attempt duplicate approval while EXECUTING -> 409 Conflict
         app_2 = await client.post(
             f"/api/incidents/{inc_id}/actions/{action_id}/approve",
             headers={"X-Tocsin-Auth": "tocsin-commander-key"},
             json={"commander_id": "Commander-2"},
         )
-        assert app_2.status_code == 400
+        assert app_2.status_code == 409
         assert "cannot be approved" in app_2.json()["detail"]
 
         # 4. Malformed requests (missing required fields / invalid types)

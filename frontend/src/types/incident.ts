@@ -12,17 +12,52 @@ export type EventType =
   | 'FLOOD_SURGE'
   | 'STRANDED_GROUP'
   | 'POWER_FAILURE'
-  | 'STRUCTURAL_HAZARD';
+  | 'STRUCTURAL_HAZARD'
+  | 'TECHNICAL_INCIDENT'
+  | 'PAYMENT_OUTAGE';
 
 export type HypothesisStatus = 'PROPOSED' | 'CONFIRMED' | 'DISPROVEN';
 
 export type ActionApprovalStatus =
+  | 'PROPOSED'
   | 'PENDING_APPROVAL'
   | 'APPROVED'
   | 'REJECTED'
   | 'EXECUTING'
   | 'VERIFIED'
   | 'FAILED';
+
+export type ParticipantRole =
+  | 'INCIDENT_COMMANDER'
+  | 'ENGINEER'
+  | 'SUPPORT'
+  | 'BUSINESS_LEADERSHIP'
+  | 'FIELD_RESPONDER'
+  | 'AI_AGENT'
+  | 'UNKNOWN';
+
+export type RoleSource = 'declared' | 'inferred' | 'unknown';
+
+export type EvidenceStatus =
+  | 'CONFIRMED'
+  | 'REPORTED'
+  | 'ASSUMED'
+  | 'UNVERIFIED'
+  | 'CONFLICTED'
+  | 'RESOLVED'
+  | 'OPEN';
+
+export type ObservationCategory =
+  | 'FACT'
+  | 'REPORT'
+  | 'ASSUMPTION'
+  | 'HYPOTHESIS'
+  | 'DECISION'
+  | 'ACTION_ITEM'
+  | 'CONFLICT'
+  | 'MISSING_INFO'
+  | 'RISK'
+  | 'UNCLASSIFIED';
 
 export interface Symptom {
   id: string;
@@ -78,9 +113,96 @@ export interface ActionTaken {
 export interface Participant {
   id: string;
   name: string;
-  role: string;
+  role: ParticipantRole | string;
+  role_source?: RoleSource | string;
+  role_confidence?: number;
+  agora_uid?: string | null;
   language: string;
+  joined_at?: string;
   last_active: string;
+}
+
+export interface Claim {
+  id: string;
+  observation_id: string;
+  incident_id: string;
+  claim_type: string;
+  entity: string;
+  value: string;
+  speaker?: string | null;
+  source: string;
+  timestamp: string;
+  confidence: number;
+  status: EvidenceStatus | string;
+  extraction_method: 'llm' | 'heuristic_fallback' | 'manual' | string;
+}
+
+export interface Observation {
+  id: string;
+  incident_id: string;
+  raw_utterance: string;
+  speaker?: string | null;
+  participant_id?: string | null;
+  source: string;
+  category: ObservationCategory | string;
+  status: EvidenceStatus | string;
+  content: string;
+  confidence: number;
+  evidence_refs?: string[];
+  timestamp: string;
+  extraction_method: 'llm' | 'heuristic_fallback' | 'manual' | string;
+  claims?: Claim[];
+}
+
+export interface ActionItem {
+  id: string;
+  incident_id: string;
+  description: string;
+  owner_name?: string | null;
+  owner_participant_id?: string | null;
+  status: 'OPEN' | 'IN_PROGRESS' | 'COMPLETE' | 'OVERDUE' | 'BLOCKED' | string;
+  created_at: string;
+  due_at?: string | null;
+  follow_up_at?: string | null;
+  source_utterance?: string | null;
+  completion_evidence?: string | null;
+}
+
+export interface ConflictRecord {
+  id: string;
+  incident_id: string;
+  claim_a_id: string;
+  claim_b_id: string;
+  entity: string;
+  value_a: string;
+  value_b: string;
+  source_a: string;
+  source_b: string;
+  speaker_a?: string | null;
+  speaker_b?: string | null;
+  status: EvidenceStatus | string;
+  recommended_action?: string | null;
+  created_at: string;
+  resolved_at?: string | null;
+  resolution_notes?: string | null;
+}
+
+export interface MissingInfo {
+  id: string;
+  incident_id: string;
+  description: string;
+  recommended_action?: string | null;
+  status: EvidenceStatus | string;
+  created_at: string;
+}
+
+export interface UnresolvedRisk {
+  id: string;
+  incident_id: string;
+  description: string;
+  severity?: SeverityLevel;
+  status: EvidenceStatus | string;
+  created_at: string;
 }
 
 export interface IncidentMetrics {
@@ -104,6 +226,13 @@ export interface IncidentState {
   proposed_actions: ProposedAction[];
   actions_taken: ActionTaken[];
   participants: Participant[];
+  observations?: Observation[];
+  claims?: Claim[];
+  conflicts?: ConflictRecord[];
+  missing_info?: MissingInfo[];
+  unresolved_risks?: UnresolvedRisk[];
+  action_items?: ActionItem[];
+  final_summary?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -148,4 +277,21 @@ export interface TriggerResolutionRequest {
   recovery_duration_seconds?: number;
   parameters?: Record<string, any>;
   actor?: string;
+}
+
+export interface IngestObservationRequest {
+  raw_utterance: string;
+  speaker?: string | null;
+  participant_id?: string | null;
+  source?: string;
+  agora_uid?: string | null;
+}
+
+export interface ParticipantRegisterRequest {
+  name: string;
+  role?: ParticipantRole | string;
+  role_source?: RoleSource | string;
+  agora_uid?: string | null;
+  language?: string;
+  participant_id?: string | null;
 }
