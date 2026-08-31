@@ -41,6 +41,7 @@ from app.engine.repositories import (
 )
 from app.engine.simulator import simulator
 from app.models.incident import (
+    ClaimType,
     EvidenceStatus,
     ResolveEvidenceRequest,
     TimelineEntry,
@@ -398,9 +399,14 @@ def _build_handoff(state) -> dict[str, Any]:
     commander's job is the open set.
     """
     claims = state.claims or []
-    confirmed = [c for c in claims if c.status == EvidenceStatus.CONFIRMED]
+    # Decisions get their own dedicated section below (with rationale/supersession);
+    # excluded here so a decision never double-appears as a generic "confirmed fact"
+    # too, and so a superseded decision's still-CONFIRMED status can't leak it back
+    # into the "what's current" facts list after it's been superseded.
+    non_decision_claims = [c for c in claims if c.claim_type != ClaimType.DECISION]
+    confirmed = [c for c in non_decision_claims if c.status == EvidenceStatus.CONFIRMED]
     reported = [
-        c for c in claims
+        c for c in non_decision_claims
         if c.status in (EvidenceStatus.REPORTED, EvidenceStatus.UNVERIFIED, EvidenceStatus.ASSUMED)
     ]
 
@@ -418,6 +424,15 @@ def _build_handoff(state) -> dict[str, Any]:
     unowned_actions = [a for a in open_actions if not a.owner_name]
 
     heuristic_claims = [c for c in claims if c.extraction_method.value == "heuristic_fallback"]
+
+    # Decisions with rationale/supersession (docs/strategy/INNOVATION_ROADMAP.md
+    # §3.1): only the ACTIVE end of each chain is what an incoming commander should
+    # act on — a superseded decision is handoff-relevant only as history, never as
+    # something still in force. This is the whole point of tracking supersession:
+    # without it, a handoff could hand over a reversed decision as current.
+    decisions = [c for c in claims if c.claim_type == ClaimType.DECISION]
+    active_decisions = [d for d in decisions if not d.superseded_by_id]
+    superseded_decisions = [d for d in decisions if d.superseded_by_id]
 
     sections = {
         "incident": {
@@ -481,6 +496,30 @@ def _build_handoff(state) -> dict[str, Any]:
         "unresolved_risks": [
             {"risk_id": r.id, "description": r.description, "severity": r.severity.value}
             for r in open_risks
+        ],
+        "active_decisions": [
+            {
+                "claim_id": d.id,
+                "entity": d.entity,
+                "value": d.value,
+                "rationale": d.rationale,
+                "decided_by": d.decided_by,
+                "timestamp": d.timestamp,
+                "supersedes_id": d.supersedes_id,
+            }
+            for d in active_decisions
+        ],
+        "superseded_decisions": [
+            {
+                "claim_id": d.id,
+                "entity": d.entity,
+                "value": d.value,
+                "rationale": d.rationale,
+                "decided_by": d.decided_by,
+                "timestamp": d.timestamp,
+                "superseded_by_id": d.superseded_by_id,
+            }
+            for d in superseded_decisions
         ],
         "record_quality": {
             "total_claims": len(claims),
@@ -550,6 +589,12 @@ def _build_handoff(state) -> dict[str, Any]:
         spoken_lines.append(
             f"Still at risk: {'; '.join(r.description for r in open_risks[:3])}."
         )
+    if active_decisions:
+        spoken_lines.append(
+            f"{len(active_decisions)} decision{'s' if len(active_decisions) != 1 else ''} in force: "
+            + "; ".join(f"{d.entity}: {d.value}, because {d.rationale}" for d in active_decisions[:3])
+            + "."
+        )
     spoken_lines.append(
         "Tocsin organized reported evidence and did not independently determine root cause. "
         "Verify anything you intend to act on."
@@ -565,6 +610,7 @@ def _build_handoff(state) -> dict[str, Any]:
             "overdue_actions": len(overdue_actions),
             "unowned_actions": len(unowned_actions),
             "risks": len(open_risks),
+            "active_decisions": len(active_decisions),
         },
     }
 

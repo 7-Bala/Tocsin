@@ -134,6 +134,10 @@ export interface Claim {
   confidence: number;
   status: EvidenceStatus | string;
   extraction_method: 'llm' | 'heuristic_fallback' | 'manual' | string;
+  rationale?: string | null;
+  decided_by?: string | null;
+  supersedes_id?: string | null;
+  superseded_by_id?: string | null;
 }
 
 export interface Observation {

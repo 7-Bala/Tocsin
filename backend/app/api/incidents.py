@@ -266,6 +266,20 @@ class CompleteActionItemRequest(BaseModel):
     evidence: str = Field(default="Completed via verification check")
 
 
+class RecordDecisionRequest(BaseModel):
+    entity: str = Field(min_length=1, description="What this decision concerns, e.g. 'Rollback timing'")
+    value: str = Field(min_length=1, description="The decision itself, e.g. 'Hold rollback for 10 minutes'")
+    rationale: str = Field(min_length=1, description="Why this decision was made")
+    decided_by: str = Field(min_length=1, description="Who made this decision")
+
+
+class SupersedeDecisionRequest(BaseModel):
+    entity: str = Field(min_length=1, description="What this decision concerns")
+    value: str = Field(min_length=1, description="The new decision, replacing the old one")
+    rationale: str = Field(min_length=1, description="Why the decision changed")
+    decided_by: str = Field(min_length=1, description="Who made the new decision")
+
+
 @router.post(
     "/{incident_id}/check-reminders",
     summary="Scan and emit reminders for overdue action items",
@@ -313,3 +327,51 @@ async def complete_action_item(
         "status": "success",
         "action_item": completed.model_dump(),
     }
+
+
+@router.post(
+    "/{incident_id}/decisions",
+    summary="Record a first-class decision with rationale",
+)
+async def record_decision(incident_id: str, request: RecordDecisionRequest) -> dict[str, Any]:
+    """
+    Record a decision directly, with the rationale attached at the moment it's made
+    (see docs/strategy/INNOVATION_ROADMAP.md §3.1) — distinct from a DECISION-typed
+    claim arrived at via observation extraction, which carries no rationale field.
+    """
+    try:
+        decision = await simulator.record_decision(
+            incident_id, request.entity, request.value, request.rationale, request.decided_by
+        )
+    except ValueError as err:
+        err_msg = str(err)
+        sc = status.HTTP_404_NOT_FOUND if "does not exist" in err_msg else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=sc, detail=err_msg)
+    return {"status": "success", "decision": decision.model_dump()}
+
+
+@router.post(
+    "/{incident_id}/decisions/{claim_id}/supersede",
+    summary="Supersede a prior decision, keeping the chain linked",
+)
+async def supersede_decision(
+    incident_id: str, claim_id: str, request: SupersedeDecisionRequest
+) -> dict[str, Any]:
+    """
+    Replace decision `claim_id` with a new one. Both ends of the chain
+    (`supersedes_id` / `superseded_by_id`) are recorded so a handoff can never
+    present a reversed decision as still current.
+    """
+    try:
+        new_decision = await simulator.supersede_decision(
+            incident_id, claim_id, request.entity, request.value, request.rationale, request.decided_by
+        )
+    except LookupError as err:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(err))
+    except PermissionError as err:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(err))
+    except ValueError as err:
+        err_msg = str(err)
+        sc = status.HTTP_404_NOT_FOUND if "does not exist" in err_msg else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=sc, detail=err_msg)
+    return {"status": "success", "decision": new_decision.model_dump()}

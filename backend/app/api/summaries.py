@@ -23,7 +23,16 @@ def build_evidence_summary(state) -> dict[str, Any]:
     """
     facts = [c.value for c in (state.claims or []) if c.status.value == "CONFIRMED"]
     reports = [f"{c.entity}: {c.value} (source: {c.source})" for c in (state.claims or []) if c.status.value in ("REPORTED", "UNVERIFIED", "CONFLICTED")]
-    decisions = [c.value for c in (state.claims or []) if c.claim_type.value == "decision"]
+    # Only the ACTIVE end of each decision's supersession chain belongs in a summary
+    # a reader will act on — a superseded decision is history, not something still
+    # in force. See docs/strategy/INNOVATION_ROADMAP.md §3.1.
+    decision_claims = [c for c in (state.claims or []) if c.claim_type.value == "decision"]
+    active_decision_claims = [c for c in decision_claims if not c.superseded_by_id]
+    superseded_decision_claims = [c for c in decision_claims if c.superseded_by_id]
+    decisions = [
+        f"{c.value} (because {c.rationale})" if c.rationale else c.value
+        for c in active_decision_claims
+    ]
     open_tasks = [f"{a.description} (owner: {a.owner_name or 'unassigned'}, status: {a.status})" for a in (state.action_items or []) if a.status != "COMPLETE"]
     conflicts = [f"{c.entity}: '{c.value_a}' vs '{c.value_b}' (action: {c.recommended_action or 'verify telemetry'})" for c in (state.conflicts or []) if c.status.value == "OPEN"]
     risks = [r.description for r in (state.unresolved_risks or []) if r.status.value == "OPEN"]
@@ -32,7 +41,7 @@ def build_evidence_summary(state) -> dict[str, Any]:
         f"Incident: {state.title} (Status: {state.status.value}, Severity: {state.severity.value})",
         f"Confirmed Facts: {'; '.join(facts) if facts else 'None confirmed by authoritative telemetry.'}",
         f"Reported / Unverified Intelligence: {'; '.join(reports) if reports else 'None recorded.'}",
-        f"Decisions Made: {'; '.join(decisions) if decisions else 'None recorded.'}",
+        f"Decisions In Force: {'; '.join(decisions) if decisions else 'None recorded.'}",
         f"Open Action Items: {'; '.join(open_tasks) if open_tasks else 'None.'}",
         f"Open Conflicts Requiring Verification: {'; '.join(conflicts) if conflicts else 'None recorded.'}",
         f"Unresolved Risks: {'; '.join(risks) if risks else 'None recorded.'}",
@@ -49,6 +58,9 @@ def build_evidence_summary(state) -> dict[str, Any]:
             "confirmed_facts": facts,
             "reported_items": reports,
             "decisions": decisions,
+            "superseded_decisions": [
+                f"{c.value} — superseded" for c in superseded_decision_claims
+            ],
             "open_tasks": open_tasks,
             "open_conflicts": conflicts,
             "unresolved_risks": risks,

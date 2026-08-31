@@ -161,6 +161,15 @@ class Claim(BaseModel):
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     status: EvidenceStatus = EvidenceStatus.UNVERIFIED
     extraction_method: ExtractionMethod = ExtractionMethod.LLM
+    # Decision-specific fields (only meaningful when claim_type == DECISION). Left
+    # None for every other claim type. See docs/strategy/INNOVATION_ROADMAP.md §3.1
+    # — "we decided X because Y at T1, superseded by Z at T2" — a decision without a
+    # recorded rationale or supersession chain can hand a reversed call to the next
+    # shift as if it were still current.
+    rationale: str | None = None
+    decided_by: str | None = None
+    supersedes_id: str | None = None
+    superseded_by_id: str | None = None
 
 
 class Observation(BaseModel):

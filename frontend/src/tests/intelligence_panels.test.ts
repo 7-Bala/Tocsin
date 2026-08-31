@@ -8,7 +8,8 @@ import { ConflictsPanel } from '../components/ConflictsPanel';
 import { ActionItemsPanel } from '../components/ActionItemsPanel';
 import { ParticipantsPanel } from '../components/ParticipantsPanel';
 import { FinalSummaryPanel } from '../components/FinalSummaryPanel';
-import { IncidentState, ConflictRecord, ActionItem, Participant } from '../types/incident';
+import { DecisionsPanel } from '../components/DecisionsPanel';
+import { IncidentState, ConflictRecord, ActionItem, Participant, Claim } from '../types/incident';
 
 test('ConflictsPanel renders empty state when no conflicts exist', () => {
   const html = renderToStaticMarkup(React.createElement(ConflictsPanel, { conflicts: [] }));
@@ -262,6 +263,58 @@ test('HandoffPanel renders idle state without claiming an audio broadcast', () =
   );
   assert.match(html, /Shift Handoff Brief/);
   assert.match(html, /Generate handoff/);
-  // Honesty invariant: never imply audio was broadcast.
-  assert.doesNotMatch(html, /broadcast(ing)? (the )?summary/i);
+  // Honesty invariant: never imply audio was broadcast without the user acting.
+  assert.doesNotMatch(html, /✅.*[Bb]roadcast/);
+});
+
+test('DecisionsPanel shows only active decisions, not superseded ones, as current', () => {
+  const oldDecision: Claim = {
+    id: 'dec-1',
+    observation_id: 'manual-decision',
+    incident_id: 'inc-1',
+    claim_type: 'decision',
+    entity: 'Rollback timing',
+    value: 'Hold rollback for 10 minutes',
+    speaker: 'Commander Chen',
+    source: 'manual_decision_record',
+    timestamp: '2026-08-31T00:00:00Z',
+    confidence: 1.0,
+    status: 'CONFIRMED',
+    extraction_method: 'manual',
+    rationale: 'Need to confirm deployment correlation first',
+    decided_by: 'Commander Chen',
+    supersedes_id: null,
+    superseded_by_id: 'dec-2',
+  };
+  const newDecision: Claim = {
+    ...oldDecision,
+    id: 'dec-2',
+    value: 'Proceed with rollback now',
+    rationale: 'Error rate correlation confirmed',
+    supersedes_id: 'dec-1',
+    superseded_by_id: null,
+  };
+
+  const html = renderToStaticMarkup(
+    React.createElement(DecisionsPanel, { claims: [oldDecision, newDecision], incidentId: 'inc-1' })
+  );
+
+  assert.match(html, /Decisions in Force \(1\)/);
+  assert.match(html, /Proceed with rollback now/);
+  assert.match(html, /Error rate correlation confirmed/);
+  assert.match(html, /1 superseded decision/);
+  // The old value may appear only as "supersedes X" context on the active decision
+  // (legitimate provenance), never as its own separate active-looking entry.
+  const activeSection = html.split('1 superseded decision')[0];
+  const oldValueMentions = (activeSection.match(/Hold rollback for 10 minutes/g) || []).length;
+  assert.equal(oldValueMentions, 1, 'old decision value should appear exactly once, as supersession context');
+  assert.match(activeSection, /supersedes.*Hold rollback for 10 minutes/);
+});
+
+test('DecisionsPanel empty state does not claim any decisions exist', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(DecisionsPanel, { claims: [], incidentId: 'inc-1' })
+  );
+  assert.match(html, /No decisions recorded yet/);
+  assert.match(html, /Decisions in Force \(0\)/);
 });

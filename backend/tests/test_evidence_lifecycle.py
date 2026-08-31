@@ -484,3 +484,131 @@ async def test_handoff_unowned_and_overdue_action_item_not_double_announced():
         # Covered by the overdue line ("owned by nobody"), not the separate unowned line.
         assert "no owner assigned" not in body["spoken_brief"]
         assert "owned by nobody" in body["spoken_brief"]
+
+
+# ─── 5. Decisions: rationale + supersession ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_record_decision_with_rationale():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        inc = await client.post(
+            "/api/incidents",
+            json={"title": "Decision Test", "event_type": "TECHNICAL_INCIDENT"},
+        )
+        inc_id = inc.json()["incident_id"]
+
+        r = await client.post(
+            f"/api/incidents/{inc_id}/decisions",
+            json={
+                "entity": "Rollback timing",
+                "value": "Hold rollback for 10 minutes",
+                "rationale": "Need to confirm deployment correlation first",
+                "decided_by": "Commander Chen",
+            },
+        )
+        assert r.status_code == 200
+        decision = r.json()["decision"]
+        assert decision["claim_type"] == "decision"
+        assert decision["rationale"] == "Need to confirm deployment correlation first"
+        assert decision["decided_by"] == "Commander Chen"
+        assert decision["supersedes_id"] is None
+        assert decision["superseded_by_id"] is None
+
+        h = await client.get(f"/api/incidents/{inc_id}/handoff")
+        body = h.json()
+        assert body["open_item_counts"]["active_decisions"] == 1
+        active = body["sections"]["active_decisions"]
+        assert len(active) == 1
+        assert active[0]["value"] == "Hold rollback for 10 minutes"
+        assert "Hold rollback for 10 minutes" in body["spoken_brief"]
+        assert "Need to confirm deployment correlation first" in body["spoken_brief"]
+
+
+@pytest.mark.asyncio
+async def test_supersede_decision_keeps_chain_linked_and_hides_superseded_from_active():
+    """
+    The whole point of supersession: a handoff must never present a reversed
+    decision as still current. Both ends of the chain must stay linked.
+    """
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        inc = await client.post(
+            "/api/incidents",
+            json={"title": "Supersede Test", "event_type": "TECHNICAL_INCIDENT"},
+        )
+        inc_id = inc.json()["incident_id"]
+
+        first = await client.post(
+            f"/api/incidents/{inc_id}/decisions",
+            json={
+                "entity": "Rollback timing",
+                "value": "Hold rollback for 10 minutes",
+                "rationale": "Need to confirm deployment correlation first",
+                "decided_by": "Commander Chen",
+            },
+        )
+        old_id = first.json()["decision"]["id"]
+
+        second = await client.post(
+            f"/api/incidents/{inc_id}/decisions/{old_id}/supersede",
+            json={
+                "entity": "Rollback timing",
+                "value": "Proceed with rollback now",
+                "rationale": "Error rate correlation confirmed",
+                "decided_by": "Commander Chen",
+            },
+        )
+        assert second.status_code == 200
+        new_decision = second.json()["decision"]
+        assert new_decision["supersedes_id"] == old_id
+
+        h = await client.get(f"/api/incidents/{inc_id}/handoff")
+        body = h.json()
+
+        # Only the new decision is active; the old one must not appear as current.
+        assert body["open_item_counts"]["active_decisions"] == 1
+        active_values = [d["value"] for d in body["sections"]["active_decisions"]]
+        assert active_values == ["Proceed with rollback now"]
+
+        superseded_ids = {d["claim_id"] for d in body["sections"]["superseded_decisions"]}
+        assert old_id in superseded_ids
+
+        assert "Proceed with rollback now" in body["spoken_brief"]
+        assert "Hold rollback for 10 minutes" not in body["spoken_brief"]
+
+        # Re-superseding the already-superseded decision must fail (409), not silently
+        # create a second, competing "active" chain from the same stale decision.
+        again = await client.post(
+            f"/api/incidents/{inc_id}/decisions/{old_id}/supersede",
+            json={
+                "entity": "Rollback timing",
+                "value": "Something else",
+                "rationale": "irrelevant",
+                "decided_by": "Commander Chen",
+            },
+        )
+        assert again.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_supersede_nonexistent_decision_returns_404():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        inc = await client.post(
+            "/api/incidents",
+            json={"title": "Supersede 404 Test", "event_type": "TECHNICAL_INCIDENT"},
+        )
+        inc_id = inc.json()["incident_id"]
+
+        r = await client.post(
+            f"/api/incidents/{inc_id}/decisions/clm-nope/supersede",
+            json={
+                "entity": "X",
+                "value": "Y",
+                "rationale": "Z",
+                "decided_by": "Commander Chen",
+            },
+        )
+        assert r.status_code == 404

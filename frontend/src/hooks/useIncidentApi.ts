@@ -321,6 +321,42 @@ export async function fetchHandoffBrief(incidentId: string): Promise<any> {
   return res.json();
 }
 
+export async function recordDecision(
+  incidentId: string,
+  payload: { entity: string; value: string; rationale: string; decided_by: string }
+): Promise<any> {
+  const res = await fetch(`${API_BASE_URL}/api/incidents/${incidentId}/decisions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to record decision (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
+export async function supersedeDecision(
+  incidentId: string,
+  claimId: string,
+  payload: { entity: string; value: string; rationale: string; decided_by: string }
+): Promise<any> {
+  const res = await fetch(
+    `${API_BASE_URL}/api/incidents/${incidentId}/decisions/${claimId}/supersede`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to supersede decision (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
 export async function speakIntoChannel(
   channelName: string,
   text: string

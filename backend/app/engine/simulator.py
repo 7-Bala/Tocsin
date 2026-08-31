@@ -11,6 +11,7 @@ import uuid
 from typing import Any
 
 from app.engine.connection_manager import ws_manager
+from app.engine.database import new_id
 from app.engine.repositories import incident_repo
 from app.models.incident import (
     APPROVABLE_STATES,
@@ -19,7 +20,11 @@ from app.models.incident import (
     ActionItem,
     ActionTaken,
     ApproveActionRequest,
+    Claim,
+    ClaimType,
     EventType,
+    EvidenceStatus,
+    ExtractionMethod,
     Hypothesis,
     HypothesisStatus,
     IncidentMetrics,
@@ -779,6 +784,136 @@ class IncidentSimulator:
         except Exception as e:
             logger.warning(f"DB persist failed for complete_action {incident_id}: {e}")
         return target
+
+    async def record_decision(
+        self,
+        incident_id: str,
+        entity: str,
+        value: str,
+        rationale: str,
+        decided_by: str,
+    ) -> Claim | None:
+        """Record a new first-class decision, directly authored by a human (not
+        extracted from an observation) — a decision needs a rationale attached at
+        the moment it's made, not inferred after the fact."""
+        lock = await self._get_lock(incident_id)
+        async with lock:
+            if incident_id not in self._incidents:
+                raise ValueError(f"Incident '{incident_id}' does not exist.")
+
+            state = self._incidents[incident_id]
+            now = get_utc_now()
+            decision = Claim(
+                id=new_id("dec-"),
+                observation_id="manual-decision",
+                incident_id=incident_id,
+                claim_type=ClaimType.DECISION,
+                entity=entity,
+                value=value,
+                speaker=decided_by,
+                source="manual_decision_record",
+                timestamp=now,
+                confidence=1.0,
+                status=EvidenceStatus.CONFIRMED,
+                extraction_method=ExtractionMethod.MANUAL,
+                rationale=rationale,
+                decided_by=decided_by,
+            )
+            state.claims.append(decision)
+            state.updated_at = now
+
+            state.timeline.append(
+                TimelineEntry(
+                    timestamp=now,
+                    event_type="DECISION_RECORDED",
+                    description=f"Decision recorded by {decided_by}: {value} — {rationale}",
+                    actor=decided_by,
+                    metadata={"claim_id": decision.id, "entity": entity},
+                )
+            )
+            dump = state.model_dump()
+
+        await ws_manager.broadcast_state(incident_id, dump)
+        try:
+            await incident_repo.upsert(state)
+        except Exception as e:
+            logger.warning(f"DB persist failed for record_decision {incident_id}: {e}")
+        return decision
+
+    async def supersede_decision(
+        self,
+        incident_id: str,
+        old_claim_id: str,
+        entity: str,
+        value: str,
+        rationale: str,
+        decided_by: str,
+    ) -> Claim | None:
+        """Replace a prior decision with a new one, keeping both ends of the chain
+        linked so a handoff never presents a reversed decision as still current."""
+        lock = await self._get_lock(incident_id)
+        async with lock:
+            if incident_id not in self._incidents:
+                raise ValueError(f"Incident '{incident_id}' does not exist.")
+
+            state = self._incidents[incident_id]
+            old_decision = next((c for c in state.claims if c.id == old_claim_id), None)
+            if not old_decision:
+                raise LookupError(f"Decision claim '{old_claim_id}' not found in incident '{incident_id}'.")
+            if old_decision.claim_type != ClaimType.DECISION:
+                raise ValueError(f"Claim '{old_claim_id}' is not a decision (claim_type={old_decision.claim_type}).")
+            if old_decision.superseded_by_id:
+                raise PermissionError(
+                    f"Decision '{old_claim_id}' was already superseded by "
+                    f"'{old_decision.superseded_by_id}' — supersede the current one instead."
+                )
+
+            now = get_utc_now()
+            new_decision = Claim(
+                id=new_id("dec-"),
+                observation_id="manual-decision",
+                incident_id=incident_id,
+                claim_type=ClaimType.DECISION,
+                entity=entity,
+                value=value,
+                speaker=decided_by,
+                source="manual_decision_record",
+                timestamp=now,
+                confidence=1.0,
+                status=EvidenceStatus.CONFIRMED,
+                extraction_method=ExtractionMethod.MANUAL,
+                rationale=rationale,
+                decided_by=decided_by,
+                supersedes_id=old_claim_id,
+            )
+            old_decision.superseded_by_id = new_decision.id
+            state.claims.append(new_decision)
+            state.updated_at = now
+
+            state.timeline.append(
+                TimelineEntry(
+                    timestamp=now,
+                    event_type="DECISION_SUPERSEDED",
+                    description=(
+                        f"Decision superseded by {decided_by}: \"{old_decision.value}\" → "
+                        f"\"{value}\" — {rationale}"
+                    ),
+                    actor=decided_by,
+                    metadata={
+                        "old_claim_id": old_claim_id,
+                        "new_claim_id": new_decision.id,
+                        "entity": entity,
+                    },
+                )
+            )
+            dump = state.model_dump()
+
+        await ws_manager.broadcast_state(incident_id, dump)
+        try:
+            await incident_repo.upsert(state)
+        except Exception as e:
+            logger.warning(f"DB persist failed for supersede_decision {incident_id}: {e}")
+        return new_decision
 
     async def shutdown(self) -> None:
         """Cancel all running background simulation tasks during server shutdown."""

@@ -7,6 +7,7 @@ import { ActionItemsPanel } from './ActionItemsPanel';
 import { ParticipantsPanel } from './ParticipantsPanel';
 import { FinalSummaryPanel } from './FinalSummaryPanel';
 import { HandoffPanel } from './HandoffPanel';
+import { DecisionsPanel } from './DecisionsPanel';
 
 interface IntelligencePanelProps {
   incident: IncidentState | null;
@@ -165,23 +166,7 @@ export const IntelligencePanel: React.FC<IntelligencePanelProps> = ({
             )}
           </div>
 
-          <div className="p-3.5 rounded-xl bg-zinc-900/60 border border-zinc-800 space-y-2">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
-              <span>⚖️</span> Incident Decisions ({decisions.length})
-            </h3>
-            {decisions.length > 0 ? (
-              <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
-                {decisions.map((dec) => (
-                  <div key={dec.id} className="p-2 rounded bg-zinc-950/50 border border-sky-950/60 text-xs">
-                    <span className="font-semibold text-zinc-200">{dec.value}</span>
-                    <span className="ml-2 text-[10px] text-zinc-500">(By: {dec.speaker || 'Commander'})</span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-zinc-500 italic">No decisions recorded yet.</p>
-            )}
-          </div>
+          <DecisionsPanel claims={claims} incidentId={incident.incident_id} onChanged={onEvidenceResolved} />
         </div>
       )}
 
