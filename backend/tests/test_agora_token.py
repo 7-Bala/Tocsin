@@ -385,6 +385,16 @@ async def test_composed_tools_pipeline_wires_mcp_servers_under_llm(monkeypatch):
             assert props["llm"]["vendor"] == "custom"
             assert props["llm"]["style"] == "gemini"
             assert "mock_gemini_api_key" in props["llm"]["url"] or props["llm"]["api_key"] == "mock_gemini_api_key"
+            # composed_tools must NOT default to the gemini_live-only Live model --
+            # confirmed live 2026-08-31: calling gemini-3.1-flash-live-preview via
+            # the plain streamGenerateContent REST endpoint (what composed_tools
+            # actually uses) returns HTTP 400 "only supports real-time
+            # bidirectional streaming via WebSocket". This is why the two
+            # pipelines have separate model fields (model vs
+            # composed_tools_llm_model) instead of sharing one.
+            assert props["llm"]["params"]["model"] == "gemini-3.6-flash"
+            assert "live" not in props["llm"]["params"]["model"]
+            assert "live" not in props["llm"]["url"]
             assert props["llm"]["mcp_servers"] == [
                 {
                     "name": "tocsin-emergency-tools",

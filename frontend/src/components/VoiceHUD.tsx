@@ -201,6 +201,11 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
         await client.subscribe(user, mediaType);
         if (mediaType === 'audio' && user.audioTrack) {
           user.audioTrack.play();
+          // Mitigates acoustic echo on built-in mic+speaker setups; see the same
+          // comment in voice-test/page.tsx. Not a full fix -- headphones are.
+          if (typeof user.audioTrack.setVolume === 'function') {
+            user.audioTrack.setVolume(60);
+          }
         }
       });
 

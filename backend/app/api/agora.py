@@ -170,8 +170,26 @@ class StartAgentRequest(BaseModel):
   )
   model: str = Field(
     default="gemini-3.1-flash-live-preview",
-    description="Gemini Live model version",
+    description=(
+      "Gemini model for the gemini_live pipeline only -- this must be a model "
+      "that supports the WebSocket Live API (bidiGenerateContent). Ignored for "
+      "voice_pipeline='composed_tools', which uses composed_tools_llm_model "
+      "instead (a live-only model here would break composed_tools -- confirmed "
+      "live 2026-08-31: gemini-3.1-flash-live-preview returns HTTP 400 'only "
+      "supports real-time bidirectional streaming via WebSocket' when called "
+      "through the plain streamGenerateContent REST endpoint composed_tools "
+      "actually uses)."
+    ),
     examples=["gemini-3.1-flash-live-preview"],
+  )
+  composed_tools_llm_model: str = Field(
+    default="gemini-3.6-flash",
+    description=(
+      "Gemini model for the composed_tools pipeline's llm block -- must support "
+      "the plain streamGenerateContent REST endpoint (not a Live-only model). "
+      "Ignored for voice_pipeline='gemini_live'."
+    ),
+    examples=["gemini-3.6-flash"],
   )
   system_prompt: str | None = Field(
     default=None,
@@ -567,7 +585,7 @@ async def start_conversational_agent(
     # actual reasoning model doesn't change, only how tool-calling reaches it.
     gemini_llm_url = (
       "https://generativelanguage.googleapis.com/v1beta/models/"
-      f"{request.model}:streamGenerateContent?alt=sse&key={gemini_key}"
+      f"{request.composed_tools_llm_model}:streamGenerateContent?alt=sse&key={gemini_key}"
     )
     payload = {
       "name": f"tocsin_agent_{channel_name}",
@@ -607,7 +625,7 @@ async def start_conversational_agent(
           "api_key": gemini_key,
           "system_messages": [{"role": "system", "content": prompt}],
           "max_history": 32,
-          "params": {"model": request.model},
+          "params": {"model": request.composed_tools_llm_model},
           "greeting_message": "Tocsin emergency coordinator active. How can I assist?",
           "failure_message": "Sorry, I encountered an issue. Please try again.",
         },

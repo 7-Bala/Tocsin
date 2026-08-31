@@ -47,7 +47,9 @@ export async function startRtmTranscriptSession(options: {
 }): Promise<RtmTranscriptSession> {
   const { appId, rtmToken, userAccount, channelName, onEvent, onLog } = options;
 
+  onLog('📡 RTM: loading agora-rtm SDK module...');
   const AgoraRTM = (await import('agora-rtm')).default;
+  onLog(`📡 RTM: SDK loaded (v${AgoraRTM.VERSION}), creating client...`);
   const client = new AgoraRTM.RTM(appId, userAccount);
 
   const handleMessage = (event: any) => {
@@ -70,10 +72,26 @@ export async function startRtmTranscriptSession(options: {
 
   client.addEventListener('message', handleMessage);
 
-  await client.login({ token: rtmToken });
+  // client.login()/subscribe() have no documented timeout of their own -- if the
+  // RTM WSS connection is blocked (firewall, network policy) rather than
+  // rejected, these can hang indefinitely with zero error, which is exactly
+  // what made this path undiagnosable in earlier live tests (no success log, no
+  // failure log, forever). A hard timeout turns a silent hang into a visible,
+  // logged failure.
+  const withTimeout = <T,>(promise: Promise<T>, label: string, ms = 10000): Promise<T> =>
+    Promise.race([
+      promise,
+      new Promise<T>((_, reject) =>
+        setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms (no response -- likely network/firewall blocking the RTM WSS connection)`)), ms)
+      ),
+    ]);
+
+  onLog('📡 RTM: logging in...');
+  await withTimeout(client.login({ token: rtmToken }), 'RTM login');
   onLog(`📡 RTM signaling login succeeded (user_account: ${userAccount})`);
 
-  await client.subscribe(channelName, { withMessage: true });
+  onLog(`📡 RTM: subscribing to '${channelName}'...`);
+  await withTimeout(client.subscribe(channelName, { withMessage: true }), 'RTM subscribe');
   onLog(`📡 RTM subscribed to transcript channel '${channelName}'`);
 
   return {

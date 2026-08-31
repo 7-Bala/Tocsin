@@ -169,6 +169,11 @@ export default function VoiceTestPage() {
   const isSpeakingRef      = useRef<boolean>(false);
   const aiSpeakingRef      = useRef<boolean>(false);
   const isConnectedRef     = useRef<boolean>(false);
+  // Chrome's local SpeechRecognition finalizes results with 1-3s of lag behind
+  // the actual audio, so checking aiSpeakingRef.current at result-time misses
+  // agent speech that already ended by the time onresult fires. Track when the
+  // agent last stopped speaking and extend suppression past that lag window.
+  const aiSpeechEndedAtRef = useRef<number>(0);
 
   // ── Speech recognition refs ────────────────────────────────────────────
   const speechRecognitionRef       = useRef<any>(null);
@@ -600,6 +605,14 @@ export default function VoiceTestPage() {
         await client.subscribe(user, mediaType as 'audio' | 'video');
         if (mediaType === 'audio' && user.audioTrack) {
           user.audioTrack.play();
+          // Mitigates acoustic echo (agent's own voice looping back into the mic)
+          // on built-in laptop mic+speaker setups, where software AEC alone often
+          // isn't enough to fully cancel speaker bleed at full volume. This is a
+          // mitigation, not a fix -- AEC:true is already set on the mic track
+          // below; headphones remain the reliable fix for acoustic feedback.
+          if (typeof user.audioTrack.setVolume === 'function') {
+            user.audioTrack.setVolume(60);
+          }
           // Pipe remote audio track to Web Audio Analyser for real AI audio visualization
           try {
             const mediaStreamTrack = user.audioTrack.getMediaStreamTrack();
@@ -692,7 +705,12 @@ export default function VoiceTestPage() {
           if (aiSpeakingTimerRef.current) { clearTimeout(aiSpeakingTimerRef.current); aiSpeakingTimerRef.current = null; }
           setAiSpeaking(true);
         } else if (!aiSpeakingTimerRef.current) {
-          aiSpeakingTimerRef.current = setTimeout(() => { setAiSpeaking(false); aiAmpRef.current = 0; aiSpeakingTimerRef.current = null; }, 400);
+          aiSpeakingTimerRef.current = setTimeout(() => {
+            setAiSpeaking(false);
+            aiAmpRef.current = 0;
+            aiSpeakingTimerRef.current = null;
+            aiSpeechEndedAtRef.current = Date.now();
+          }, 400);
         }
       });
 
@@ -756,6 +774,20 @@ export default function VoiceTestPage() {
         rec.onresult = (event: any) => {
           for (let i = event.resultIndex; i < event.results.length; i++) {
             if (!event.results[i].isFinal) continue;
+            // Chrome's local SpeechRecognition transcribes whatever the mic
+            // picks up -- it cannot distinguish the operator's own voice from the
+            // agent's speaker audio leaking back into the mic (common on
+            // built-in laptop mic+speaker setups without headphones). Every
+            // result from this path is unconditionally labeled 'You' below, so
+            // without this guard, agent speech bleeding into the mic gets
+            // mislabeled as the operator's own words. Suppress results while the
+            // agent is actively speaking (aiSpeakingRef, tracked via the RTC
+            // volume indicator) AND for a cooldown window after it stops --
+            // Chrome finalizes SpeechRecognition results 1-3s behind the actual
+            // audio, so a same-instant check alone misses agent speech that
+            // already ended by the time onresult fires.
+            if (aiSpeakingRef.current) continue;
+            if (Date.now() - aiSpeechEndedAtRef.current < 3000) continue;
             const text = event.results[i][0].transcript.trim();
             if (text.length < 3) continue;
             addTranscriptEntryRef.current('You', text);
@@ -1027,7 +1059,9 @@ export default function VoiceTestPage() {
         .vcc-root {
           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
           background: #f2f1ef;
-          min-height: 100vh;
+          height: 100vh;
+          height: 100dvh;
+          overflow: hidden;
           display: flex;
           flex-direction: column;
           color: #1a1a1a;
@@ -1600,13 +1634,20 @@ export default function VoiceTestPage() {
         .vcc-right {
           background: #ffffff;
           border-left: 1px solid #e5e5e5;
+          min-height: 0;
         }
         .vcc-right-inner {
           padding: 16px;
           display: flex;
           flex-direction: column;
           gap: 12px;
+          flex: 1;
+          min-height: 0;
+          overflow-y: auto;
+          overflow-x: hidden;
         }
+        .vcc-right-inner::-webkit-scrollbar { width: 4px; }
+        .vcc-right-inner::-webkit-scrollbar-thumb { background: #d8d8d8; border-radius: 2px; }
         .vcc-right-title {
           font-size: 10px;
           font-weight: 700;
