@@ -66,3 +66,62 @@ async def test_overdue_action_item_detection_and_throttling():
         assert completed is not None
         assert completed.status == "COMPLETE"
         assert completed.completion_evidence == "Inspection report filed"
+
+
+@pytest.mark.asyncio
+async def test_repeat_overdue_reminders_do_not_duplicate_timeline_entries():
+    """
+    Regression test for a live-observed defect (2026-08-31): a background worker calls
+    check_and_remind_overdue_actions() every 5s for every loaded incident. The 60s
+    throttle only limits reminder *frequency* — left unbounded, an item that stays
+    overdue for an hour produced ~60 duplicate "is OVERDUE" timeline rows (one demo
+    incident reached 120+ timeline events, almost all duplicates), burying genuinely
+    new events and making the incident look far more active than it actually was.
+
+    The fix: only the first reminder for a given overdue occurrence writes a timeline
+    entry. Repeat throttled reminders still fire (for a live WebSocket "still overdue"
+    nudge) but must not add a second row to the persisted timeline.
+    """
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        inc_res = await client.post(
+            "/api/incidents",
+            json={"title": "Repeat Reminder Dedup Test", "event_type": "TECHNICAL_INCIDENT"},
+        )
+        inc_id = inc_res.json()["incident_id"]
+
+        state = await simulator.get_incident(inc_id)
+        assert state is not None
+
+        past_due = (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat()
+        item = ActionItem(
+            id="act-item-test-repeat-overdue-1",
+            incident_id=inc_id,
+            description="Compare authentication error rates before and after deployment",
+            owner_name="Dave Miller",
+            status="OPEN",
+            due_at=past_due,
+        )
+        state.action_items.append(item)
+
+        # First check: new occurrence -> exactly one timeline entry.
+        reminders_1 = await simulator.check_and_remind_overdue_actions(inc_id)
+        assert len(reminders_1) == 1
+        followup_entries = [t for t in state.timeline if t.event_type == "FOLLOWUP_REMINDER"]
+        assert len(followup_entries) == 1
+
+        # Simulate the 60s throttle window having elapsed (as the background worker
+        # would encounter after ~12 five-second polls) by backdating last_reminder_at,
+        # rather than sleeping in the test.
+        for _ in range(5):
+            item.last_reminder_at = (datetime.now(timezone.utc) - timedelta(seconds=61)).isoformat()
+            reminders_n = await simulator.check_and_remind_overdue_actions(inc_id)
+            # The live "still overdue" nudge keeps firing...
+            assert len(reminders_n) == 1
+            assert reminders_n[0]["action_id"] == "act-item-test-repeat-overdue-1"
+
+        # ...but the persisted timeline must still hold exactly one entry, not six.
+        followup_entries_after = [t for t in state.timeline if t.event_type == "FOLLOWUP_REMINDER"]
+        assert len(followup_entries_after) == 1, (
+            f"expected exactly 1 deduplicated timeline entry, got {len(followup_entries_after)}"
+        )

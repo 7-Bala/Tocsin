@@ -683,6 +683,19 @@ class IncidentSimulator:
                                 pass
 
                         if should_remind:
+                            # Only the FIRST reminder for a given overdue item is a new
+                            # historical event. A background worker (main.py) calls this
+                            # every 5s for every loaded incident, and the 60s throttle
+                            # above only limits *reminder frequency*, not repeat count —
+                            # left unbounded, an item that stays overdue for an hour
+                            # produced ~60 identical "is OVERDUE" timeline rows (found
+                            # live 2026-08-31: one demo incident reached 120+ events,
+                            # almost all duplicates, burying genuinely new events and
+                            # making the incident look far more active than it was).
+                            # `was_already_overdue` captures the pre-update status: if
+                            # this item was already OVERDUE, this is a repeat ping, not
+                            # a new occurrence, so it does not get its own timeline row.
+                            was_already_overdue = item.status == "OVERDUE"
                             item.status = "OVERDUE"
                             item.last_reminder_at = now_iso
                             mins_overdue = max(1, int((now_dt - due_dt).total_seconds() / 60))
@@ -696,17 +709,22 @@ class IncidentSimulator:
                                 "minutes_overdue": mins_overdue,
                                 "timestamp": now_iso,
                             }
+                            # Still returned/broadcast on every throttled repeat (a live
+                            # "still overdue" nudge over WebSocket is legitimate and
+                            # intentionally kept) — only the persisted timeline write is
+                            # deduplicated below.
                             reminders.append(reminder_payload)
 
-                            state.timeline.append(
-                                TimelineEntry(
-                                    timestamp=now_iso,
-                                    event_type="FOLLOWUP_REMINDER",
-                                    description=f"Action '{item.description}' assigned to {item.owner_name or 'Unassigned'} is OVERDUE ({mins_overdue}m).",
-                                    actor="SYSTEM",
-                                    metadata=reminder_payload,
+                            if not was_already_overdue:
+                                state.timeline.append(
+                                    TimelineEntry(
+                                        timestamp=now_iso,
+                                        event_type="FOLLOWUP_REMINDER",
+                                        description=f"Action '{item.description}' assigned to {item.owner_name or 'Unassigned'} is OVERDUE ({mins_overdue}m).",
+                                        actor="SYSTEM",
+                                        metadata=reminder_payload,
+                                    )
                                 )
-                            )
 
             if reminders:
                 state.updated_at = now_iso

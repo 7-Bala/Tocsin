@@ -5,27 +5,13 @@ Auto-maintained by Claude: an entry is added when work is identified, and delete
 it's done. Do not treat an entry's presence here as "not started"; check the note for
 current state. This file is the resume point after any session/context reset.
 
-Last updated: 2026-08-31 (`/voice-test` dynamic-tiles rollout complete and live-verified; new timeline-spam finding).
+Last updated: 2026-08-31 (real-Chrome mic/tile verification; timeline-spam bug found, fixed, and live-verified).
 
 ---
 
 ## P0 — Breaks the demo / actively misleading
 
-### 1. Timeline is spammed with duplicate `FOLLOWUP_REMINDER` entries
-**Status:** newly found 2026-08-31, not fixed. Found while live-verifying the dynamic
-tiles work below — the demo incident's timeline had **120 events**, the large majority
-being the exact same reminder ("Action 'Compare authentication error rates before and
-after deployment' assigned to Dave Miller is O...") repeated once per minute for
-over an hour, from `backend/app/engine/simulator.py`'s background overdue-reminder
-scheduler. Each firing appends a new `TimelineEntry` with no dedup against the
-previous minute's identical reminder for the same action item.
-**Impact:** any UI that surfaces the timeline (both `/` and `/voice-test`, now that
-`voice-test` shows the real one) gets flooded with noise that buries genuinely new
-events, and — worse — makes an incident look far more active/eventful than it is.
-**Fix:** either don't append a new timeline entry on every repeat reminder for the
-same still-overdue item (append once, then just re-emit the WebSocket notification
-without a new persisted row), or collapse consecutive identical reminders in the
-repository/API layer before they reach a client.
+None open right now.
 
 ---
 
@@ -72,6 +58,21 @@ times. The code itself is correctly wired (`frontend/src/app/voice-test/page.tsx
 an app bug — needs a human to actually press Enter in a real browser to confirm either
 way before spending time "fixing" something that might not be broken.
 
+### 9. Demo incident's timeline unexpectedly reset around a backend restart (2026-08-31, cause unconfirmed)
+**Status:** observed once, root cause not found — flagged rather than silently ignored.
+While verifying the `FOLLOWUP_REMINDER` dedup fix (item above), `inc-demo-identity-outage`'s
+timeline dropped from 132 events to 7 (matching the base identity-outage demo scenario's
+seed shape), and the one action item's `due_at` was set to exactly 5 minutes after the
+reset timestamp — the signature of `/api/demo/identity-outage/run-all` being called
+fresh. This happened right around a `docker compose up -d --build backend` restart, but
+nothing in `main.py`'s lifespan shutdown/startup or `simulator.shutdown()` re-seeds
+data, and no deliberate call to that endpoint was made in that turn. Not chased further
+since it didn't block the actual fix being verified (all tests independent of it) and
+Postgres data itself was not wiped (74 other incidents survived). Possible causes not
+ruled out: a stale browser tab from earlier in the session reconnecting and triggering
+something on the frontend, or a manual re-run the user or another process performed
+outside this conversation. Watch for recurrence.
+
 ---
 
 ## P2 — Smaller, cheap, queued
@@ -87,6 +88,41 @@ a real incident needs "we decided X because Y, superseded by Z at T2."
 ---
 
 ## Recently completed (kept briefly for context, then deleted next pass)
+
+- ✅ **`FOLLOWUP_REMINDER` timeline duplication fixed and live-verified** (2026-08-31).
+  Root cause: `check_and_remind_overdue_actions()` (`backend/app/engine/simulator.py`)
+  correctly throttled the reminder *broadcast* to once per 60s per item, but every one
+  of those throttled firings still wrote a brand-new persisted `TimelineEntry` — an
+  item that stayed overdue for an hour produced ~60 duplicate rows (found live via the
+  real-Chrome test above: one demo incident reached 132 timeline events, the large
+  majority identical). Fix: track `was_already_overdue` (the item's status before this
+  check) — only the first transition into `OVERDUE` writes a timeline entry; every
+  subsequent throttled reminder still fires the live WebSocket nudge (an active
+  commander keeps getting reminded) but no longer duplicates the persisted record.
+  Regression test added (`test_repeat_overdue_reminders_do_not_duplicate_timeline_entries`)
+  that backdates `last_reminder_at` to simulate the throttle window elapsing five times
+  in a row without sleeping in the test, asserting exactly one timeline entry survives.
+  **Live-verified against the real running backend** (not just tests): polled the demo
+  incident every 10s across the item's actual due time and past two 60s throttle
+  windows — count went `0 → 1` at the due time and **stayed at 1** for the next ~100
+  seconds, while `last_reminder_at` kept advancing (proving the live ping mechanism is
+  still active, not accidentally disabled). 57/57 backend tests pass, `git diff --check`
+  clean.
+- ✅ **Real-Chrome verification session** (2026-08-31): opened `/voice-test` in the
+  actual Chrome browser (not the sandboxed pane) specifically to exercise real
+  microphone permission. Confirmed live: Agora RTC connected for real
+  (`Voice: Connected`), and the console showed `VAD | debug > started micVAD`, which
+  only appears after the browser's actual `getUserMedia()` mic permission succeeded —
+  proof the real audio pipeline works, not just the UI. Did not start the paid Gemini
+  Live agent (separate billed action, held pending explicit go-ahead). Verified the
+  dynamic-tiles mechanism by typing observations: one phrasing ("surged to 300")
+  produced no new tile, which turned out to be **correct** behavior, not a bug — the
+  backend's heuristic fallback extractor (Gemini was unreachable at the time) genuinely
+  extracted zero claims for that exact phrasing (confirmed via direct API check, not
+  guessed). A second phrasing the extractor recognizes ("is down and unresponsive")
+  produced a brand-new tile live, correctly toned red/unhealthy, correctly flagged
+  "Unverified (heuristic)", with the overflow counter updating from "+2" to "+3" — no
+  page refresh. Zero console errors throughout.
 
 - ✅ **`/voice-test`'s disconnected client-side simulator fully replaced with real
   backend data — all 6 rollout steps of
