@@ -207,8 +207,8 @@ export async function getFinalSummary(incidentId: string): Promise<{ content: st
   return res.json();
 }
 
-export async function runPaymentOutageDemo(): Promise<any> {
-  const res = await fetch(`${API_BASE_URL}/api/demo/payment-outage/run-all`, {
+export async function runIdentityOutageDemo(): Promise<any> {
+  const res = await fetch(`${API_BASE_URL}/api/demo/identity-outage/run-all`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
   });

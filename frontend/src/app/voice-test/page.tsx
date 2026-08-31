@@ -282,6 +282,7 @@ export default function VoiceTestPage() {
       else if (has(/\btsunami\b/))                                                            detectedType = 'Tsunami Emergency';
       else if (has(/\bdrought\b/, /\bwater\s+scarcity\b/, /\bwater\s+shortage\b/))           detectedType = 'Drought Emergency';
       else if (has(/\baccident\b/, /\bcrash\b/, /\bcollision\b/))                            detectedType = 'Accident / Disaster';
+      if (!detectedType && has(/login/, /authentication/, /identity-service/, /identity service/)) detectedType = 'Identity Service Outage';
       if (detectedType && d.title !== detectedType) { d.title = detectedType; changed = true; }
 
       const cityMatch  = text.match(/\b(Guwahati|Dibrugarh|Jorhat|Silchar|Tezpur|Nagaon|Delhi|Mumbai|Chennai|Kolkata|Bangalore|Bengaluru|Hyderabad|Pune|Ahmedabad|Jaipur|Lucknow|Patna|Bhopal|Bhubaneswar|Chandigarh|Dehradun|Imphal|Kohima|Aizawl|Agartala|Gangtok|Shillong|Itanagar|Shimla|Jammu|Srinagar|Leh|Raipur|Panaji|Thiruvananthapuram|Kochi|Varanasi|Nagpur|Visakhapatnam|Coimbatore|Madurai|Indore|Surat)\b/);
@@ -314,11 +315,12 @@ export default function VoiceTestPage() {
         if (!d.severity) { d.severity = 'LOW'; d.metrics.riskLevel = 'Low'; changed = true; }
       }
 
-      const waterNum = text.match(/([\d]+(?:\.[\d]+)?)\s*(m\b|meter|metre|meters|metres|ft\b|feet|foot|cm\b|centimeter)\s*(?:of\s+)?(?:water|flood|inundation)?/i)
+      const waterNum = text.match(/([\d]+(?:\.[\d]+)?)\s*%\s*(?:of\s+)?(?:login|authentication|identity|requests?|errors?|failures?)/i)
+                    || text.match(/([\d]+(?:\.[\d]+)?)\s*(m\b|meter|metre|meters|metres|ft\b|feet|foot|cm\b|centimeter)\s*(?:of\s+)?(?:water|flood|inundation)?/i)
                     || text.match(/(?:water|flood|river|level|risen?|rise)\s+(?:level\s+)?(?:to|of|by|at|is|around|about|reached?|stands?\s+at)?\s*([\d]+(?:\.[\d]+)?)\s*(m\b|meter|metre|ft\b|feet|cm\b)/i);
       if (waterNum) {
-        const val = waterNum[1], rawUnit = (waterNum[2] || '').toLowerCase();
-        const unit = rawUnit.startsWith('m') ? 'm' : rawUnit.startsWith('f') ? 'ft' : 'cm';
+        const val = waterNum[1], rawUnit = (waterNum[2] || '%').toLowerCase();
+        const unit = rawUnit === '%' ? '%' : rawUnit.startsWith('m') ? 'm' : rawUnit.startsWith('f') ? 'ft' : 'cm';
         if (d.metrics.waterLevel !== val + unit) { d.metrics.waterLevel = val + unit; d.metrics.waterLevelSub = 'Measured level'; changed = true; }
       } else if (has(/water.{0,40}rising/, /flood.{0,20}rising/, /river.{0,20}overflow/, /water.{0,20}overflow/)) {
         if (d.metrics.waterLevel !== 'Rising') { d.metrics.waterLevel = 'Rising'; d.metrics.waterLevelSub = 'Rising rapidly'; changed = true; }
@@ -858,7 +860,7 @@ export default function VoiceTestPage() {
           if (content && content.length > 3) {
             addTranscriptEntryRef.current('AI Agent', content);
             extractIncidentInfo(content, 'ai');
-            const incId = channelName.trim() || 'inc-demo-flood-01';
+            const incId = channelName.trim() || 'inc-demo-identity-outage';
             fetch(`${API_BASE_URL}/api/incidents/${incId}/observations`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -879,7 +881,7 @@ export default function VoiceTestPage() {
             if (text.length < 3) continue;
             addTranscriptEntryRef.current('You', text);
             extractIncidentInfo(text, 'user');
-            const incId = channelName.trim() || 'inc-demo-flood-01';
+            const incId = channelName.trim() || 'inc-demo-identity-outage';
             fetch(`${API_BASE_URL}/api/incidents/${incId}/observations`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -939,7 +941,7 @@ export default function VoiceTestPage() {
     if (!commandInput.trim()) return;
     const text = commandInput.trim();
     addTranscriptEntry('You', text); extractIncidentInfo(text); setCommandInput('');
-    const incId = channelName.trim() || 'inc-demo-flood-01';
+    const incId = channelName.trim() || 'inc-demo-identity-outage';
     fetch(`${API_BASE_URL}/api/incidents/${incId}/observations`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1809,6 +1811,7 @@ export default function VoiceTestPage() {
           .vcc-sys-dot    { animation: none !important; }
           @keyframes vcc-blink {}
         }
+
       `}</style>
 
       <div className="vcc-root">
@@ -1821,7 +1824,7 @@ export default function VoiceTestPage() {
               <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
             </svg>
             TOCSIN
-            <span className="vcc-topbar-badge">Voice Command Center</span>
+            <span className="vcc-topbar-badge">Incident Intelligence</span>
           </div>
 
           <div className="vcc-topbar-center">
@@ -1851,7 +1854,7 @@ export default function VoiceTestPage() {
           {/* ════════════════════ LEFT PANEL ════════════════════ */}
           <aside className="vcc-panel vcc-left">
             <div className="vcc-left-header">
-              <span className="vcc-left-title">AI Response Agent</span>
+              <span className="vcc-left-title">Live Incident Room</span>
               <span className="vcc-conn-badge">
                 <Dot color={connDotColor} />
                 {connectionState === 'CONNECTED' ? 'Connected' :
@@ -1881,7 +1884,7 @@ export default function VoiceTestPage() {
                     </svg>
                     No conversation yet
                     <span style={{ fontSize: 10.5, marginTop: 2 }}>
-                      {isConnected ? 'Speak to begin real-time transcription' : 'Join the emergency channel to begin'}
+                      {isConnected ? 'Speak to begin real-time transcription' : 'Join the incident room to begin'}
                     </span>
                   </div>
                 ) : (
@@ -2124,13 +2127,13 @@ export default function VoiceTestPage() {
                     </div>
                     <div style={{ flex: 1 }}>
                       <div className="vcc-incident-title">
-                        {incidentData?.title ?? 'Awaiting incident information'}
+                        {incidentData?.title ?? 'Customer Login and Identity Outage'}
                       </div>
                       <div className="vcc-incident-loc">
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#9b9b9b" strokeWidth="2.5">
                           <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/>
                         </svg>
-                        {incidentData?.location ?? 'Location not yet determined'}
+                        {incidentData?.location ?? 'Identity service · Multiple regions'}
                       </div>
                       <div className="vcc-incident-id">{incidentData?.incidentId ?? '—'}</div>
                     </div>
@@ -2182,7 +2185,7 @@ export default function VoiceTestPage() {
                   </div>
                   <div className="vcc-metric-grid">
                     <div className="vcc-metric-item">
-                      <div className="vcc-metric-label">People Affected</div>
+                      <div className="vcc-metric-label">Customers Affected</div>
                       <div className={`vcc-metric-value ${!incidentData?.metrics.peopleAffected ? 'placeholder' : ''}`}>
                         {incidentData?.metrics.peopleAffected || '—'}
                       </div>
@@ -2191,12 +2194,12 @@ export default function VoiceTestPage() {
                       </div>
                     </div>
                     <div className="vcc-metric-item">
-                      <div className="vcc-metric-label">Water Level</div>
+                      <div className="vcc-metric-label">Gateway Error Rate</div>
                       <div className={`vcc-metric-value ${!incidentData?.metrics.waterLevel ? 'placeholder' : ''}`} style={{ fontSize: incidentData?.metrics.waterLevel && incidentData.metrics.waterLevel.length > 5 ? 15 : 20 }}>
                         {incidentData?.metrics.waterLevel || '—'}
                       </div>
                       <div className={`vcc-metric-sub ${incidentData?.metrics.waterLevelSub?.includes('Rising') || incidentData?.metrics.waterLevelSub?.includes('Critical') ? 'alert' : ''}`}>
-                        {incidentData?.metrics.waterLevelSub || 'Unconfirmed'}
+                        {incidentData?.metrics.waterLevelSub || 'Awaiting telemetry'}
                       </div>
                     </div>
                     <div className="vcc-metric-item">
@@ -2207,11 +2210,11 @@ export default function VoiceTestPage() {
                       </div>
                     </div>
                     <div className="vcc-metric-item">
-                      <div className="vcc-metric-label">Resources</div>
+                      <div className="vcc-metric-label">Service Health</div>
                       <div className={`vcc-metric-value ${!incidentData?.metrics.resourcesDeployed ? 'placeholder' : ''}`} style={{ fontSize: incidentData?.metrics.resourcesDeployed && incidentData.metrics.resourcesDeployed.length > 4 ? 13 : 20 }}>
                         {incidentData?.metrics.resourcesDeployed || '—'}
                       </div>
-                      <div className="vcc-metric-sub">{incidentData?.metrics.resourcesSub || 'Standby'}</div>
+                      <div className="vcc-metric-sub">{incidentData?.metrics.resourcesSub || 'Awaiting telemetry'}</div>
                     </div>
                   </div>
                 </div>

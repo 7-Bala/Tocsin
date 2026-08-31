@@ -1,12 +1,12 @@
 """
-Payment Outage Demo Scenario End-to-End Test Suite
+Identity Outage Demo Scenario End-to-End Test Suite
 Validates the complete 11-point judge-verifiable demonstration workflow:
-1. Incident creation (CRITICAL Payment Outage)
-2. 4 Participants (Commander, Backend Eng, Support Lead, Biz Lead)
+1. Incident creation (CRITICAL Customer Login and Identity Outage)
+2. 4 Participants (Commander, Engineer, Support, Business Lead)
 3. Transcript observation ingestion
 4. Structured extraction (Facts, Hypotheses, Decisions, Action Items, Risks)
-5. Conflicting claims detection (DB Exhausted vs Normal Metrics)
-6. Missing information detection (PgBouncer socket telemetry)
+5. Conflicting claims detection (DB Overloaded hypothesis vs Normal Metrics)
+6. Missing information detection (pre/post-deployment error rate comparison)
 7. Action item ownership and due time assignment
 8. Real-time timeline logging
 9. Safe action approval with human confirmation
@@ -23,25 +23,25 @@ from app.engine.simulator import simulator
 
 
 @pytest.mark.asyncio
-async def test_payment_outage_scenario_end_to_end():
-    """Run full deterministic Payment Outage scenario and assert all 11 required capabilities."""
+async def test_identity_outage_scenario_end_to_end():
+    """Run full deterministic Identity Outage scenario and assert all 11 required capabilities."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        res = await client.post("/api/demo/payment-outage/run-all")
+        res = await client.post("/api/demo/identity-outage/run-all")
         assert res.status_code == 200
         data = res.json()
 
         assert data["status"] == "success"
         assert data["demo_mode"] is True
-        assert data["scenario"] == "Payment system outage"
+        assert data["scenario"] == "Customer login and identity outage"
         assert len(data["demonstrated_capabilities"]) >= 10
 
         inc_id = data["incident_id"]
-        assert inc_id == "inc-demo-payment-outage"
+        assert inc_id == "inc-demo-identity-outage"
 
         # 1. Incident status and severity
         state = data["state"]
-        assert state["event_type"] == "PAYMENT_OUTAGE"
+        assert state["event_type"] == "TECHNICAL_INCIDENT"
         assert state["severity"] == "CRITICAL"
         assert state["status"] in ("RECOVERING", "RESOLVING")
 
@@ -63,7 +63,7 @@ async def test_payment_outage_scenario_end_to_end():
         assert len(facts) >= 1
         decisions = [c for c in claims if c["claim_type"] == "decision"]
         assert len(decisions) >= 1
-        assert "Stripe" in decisions[0]["value"] or "secondary" in decisions[0]["value"]
+        assert "deployment" in decisions[0]["value"].lower() or "rollback" in decisions[0]["value"].lower()
         assert len(state["unresolved_risks"]) >= 1
 
         # 5. Conflicting claims
@@ -75,7 +75,7 @@ async def test_payment_outage_scenario_end_to_end():
         # 6. Missing information
         missing = state["missing_info"]
         assert len(missing) >= 1
-        assert "pgbouncer" in missing[0]["description"].lower() or "socket" in missing[0]["description"].lower()
+        assert "deployment" in missing[0]["description"].lower() or "error" in missing[0]["description"].lower()
 
         # 7. Action item ownership and due time
         action_items = state["action_items"]
@@ -99,7 +99,7 @@ async def test_payment_outage_scenario_end_to_end():
         actions_taken = state["actions_taken"]
         assert len(actions_taken) >= 1
         assert actions_taken[0]["verified"] is True
-        assert "Payment traffic successfully rerouted" in actions_taken[0]["result_summary"]
+        assert "Identity deployment rollback verified" in actions_taken[0]["result_summary"]
 
         # 10. Human rejection of dangerous action
         proposed = state["proposed_actions"]
@@ -122,16 +122,16 @@ async def test_simulate_transcript_injection():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # First ensure incident exists
-        await client.post("/api/demo/payment-outage/run-all")
+        await client.post("/api/demo/identity-outage/run-all")
 
         # Inject simulated observation
         res = await client.post(
             "/api/demo/simulate-transcript",
             json={
-                "incident_id": "inc-demo-payment-outage",
+                "incident_id": "inc-demo-identity-outage",
                 "speaker": "Priya Sharma",
                 "speaker_role": "SUPPORT",
-                "raw_utterance": "Stripe dashboard confirms 100% of payment retries are succeeding on secondary gateway.",
+                "raw_utterance": "Identity telemetry confirms login errors are dropping after the deployment rollback.",
                 "source": "demo_transcript_simulation",
             },
         )
@@ -147,16 +147,16 @@ async def test_action_item_check_reminders_and_completion_endpoints():
     """Verify manual reminder scan endpoint and manual action completion endpoint."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        await client.post("/api/demo/payment-outage/run-all")
+        await client.post("/api/demo/identity-outage/run-all")
 
         # 1. Trigger reminder check endpoint
-        rem_res = await client.post("/api/incidents/inc-demo-payment-outage/check-reminders")
+        rem_res = await client.post("/api/incidents/inc-demo-identity-outage/check-reminders")
         assert rem_res.status_code == 200
         assert "overdue_reminders_emitted" in rem_res.json()
 
         # 2. Complete action item
         comp_res = await client.post(
-            "/api/incidents/inc-demo-payment-outage/action-items/act-item-demo-1/complete",
+            "/api/incidents/inc-demo-identity-outage/action-items/act-item-demo-1/complete",
             json={"evidence": "PgBouncer proxy restarted and connection pooling normalized"},
         )
         assert comp_res.status_code == 200

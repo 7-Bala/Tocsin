@@ -1,7 +1,7 @@
 """
 Tocsin Deterministic Demo Scenario Router
 Provides reliable, judge-verifiable demonstration workflows that run without external API dependencies.
-Scenario: 'Payment system outage'
+Scenario: 'Customer login and identity outage'
 Clearly marks all generated intelligence as [DEMO MODE - DETERMINISTIC SCENARIO].
 """
 
@@ -55,7 +55,7 @@ from app.models.incident import (
 logger = logging.getLogger("tocsin.api.demo")
 router = APIRouter(prefix="/api/demo", tags=["Demo Mode"])
 
-DEMO_INCIDENT_ID = "inc-demo-payment-outage"
+DEMO_INCIDENT_ID = "inc-demo-identity-outage"
 
 
 class SimulateTranscriptRequest(BaseModel):
@@ -66,11 +66,11 @@ class SimulateTranscriptRequest(BaseModel):
     source: str = Field(default="demo_transcript_simulation")
 
 
-@router.post("/payment-outage/run-all", summary="Run complete Payment Outage Demo Scenario end-to-end")
-async def run_complete_payment_outage_scenario() -> dict[str, Any]:
+@router.post("/identity-outage/run-all", summary="Run complete Identity Outage Demo Scenario end-to-end")
+async def run_complete_identity_outage_scenario() -> dict[str, Any]:
     """
-    Executes the full 11-step Payment System Outage demonstration scenario deterministically:
-    1. Incident creation (CRITICAL Payment Outage)
+    Executes the full identity-service outage demonstration scenario deterministically:
+    1. Incident creation (CRITICAL Identity Outage)
     2. 4 Participants (Commander, Backend Eng, Support Lead, Biz Lead)
     3. Voice transcript ingestion
     4. Extraction into Facts, Hypotheses, Decisions, Action Items, Risks
@@ -84,19 +84,19 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
     """
     # ── Step 1: Create or Reset Incident ──────────────────────────────────
     state = await simulator.create_incident(
-        title="Major Payment Processing & Checkout Outage",
-        event_type=EventType.PAYMENT_OUTAGE,
+        title="Customer Login and Identity Outage",
+        event_type=EventType.TECHNICAL_INCIDENT,
         incident_id=DEMO_INCIDENT_ID,
         initial_symptoms=[
-            "HTTP 500 error surge on /api/v1/checkout across US-East",
-            "Customer transaction success rate dropped from 99.8% to 54.2%",
+            "HTTP 503 error surge on /api/v1/login across multiple regions",
+            "Customer login success rate dropped to 60%",
         ],
     )
     state.status = IncidentStatus.DEGRADING
     state.severity = SeverityLevel.CRITICAL
     state.metrics = IncidentMetrics(
         severity_score=88.0,
-        water_safety_index=12.0,  # Used as general system health index
+        water_safety_index=12.0,  # Used as general service health index
         flood_depth_meters=0.0,
         affected_population=14500,
         infrastructure_integrity_pct=52.0,
@@ -154,13 +154,13 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
         Observation(
             id="obs-demo-1",
             incident_id=state.incident_id,
-            raw_utterance="We are seeing a massive spike in 500 errors on /api/v1/checkout. 45% of incoming customer payments are failing across US-East.",
+            raw_utterance="Customers are unable to log in across multiple regions. The login API is returning HTTP 503 errors for around 40% of requests.",
             speaker="Dave Miller",
             participant_id="part-eng-1",
             source="demo_voice_stream",
             category=ObservationCategory.REPORT,
             status=EvidenceStatus.CONFIRMED,
-            content="Checkout payment failure rate at 45%",
+            content="Login API 503 failure rate at 40%",
             confidence=0.95,
             timestamp=t0,
             extraction_method=ExtractionMethod.MANUAL,
@@ -168,13 +168,13 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
         Observation(
             id="obs-demo-2",
             incident_id=state.incident_id,
-            raw_utterance="Database connection pool on postgres-primary is completely exhausted at 100% capacity with 800 queued queries.",
+            raw_utterance="I suspect the authentication database is overloaded and causing login failures.",
             speaker="Dave Miller",
             participant_id="part-eng-1",
             source="demo_voice_stream",
             category=ObservationCategory.HYPOTHESIS,
             status=EvidenceStatus.CONFLICTED,
-            content="PostgreSQL pool exhausted at 100%",
+            content="Authentication database may be overloaded",
             confidence=0.85,
             timestamp=t1,
             extraction_method=ExtractionMethod.MANUAL,
@@ -182,13 +182,13 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
         Observation(
             id="obs-demo-3",
             incident_id=state.incident_id,
-            raw_utterance="Support is flooded with tickets, but our Datadog metrics show RDS CPU at 22% and connections look normal and healthy at 35 connections.",
+            raw_utterance="SRE reports that database CPU and connection usage look normal and healthy.",
             speaker="Priya Sharma",
             participant_id="part-sup-1",
             source="demo_voice_stream",
             category=ObservationCategory.REPORT,
             status=EvidenceStatus.CONFLICTED,
-            content="RDS metrics show database connections normal at 22% CPU",
+            content="Database CPU and connections look normal",
             confidence=0.90,
             timestamp=t2,
             extraction_method=ExtractionMethod.MANUAL,
@@ -196,13 +196,13 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
         Observation(
             id="obs-demo-4",
             incident_id=state.incident_id,
-            raw_utterance="Decision: Route 100% of new checkout transactions to the secondary Stripe backup gateway immediately.",
+            raw_utterance="Decision: Verify the recent identity-service deployment before rolling it back.",
             speaker="Commander Sarah Chen",
             participant_id="part-ic-1",
             source="demo_voice_stream",
             category=ObservationCategory.DECISION,
             status=EvidenceStatus.CONFIRMED,
-            content="Decision: Failover payment routing to secondary Stripe gateway",
+            content="Decision: Verify deployment impact before rollback",
             confidence=1.0,
             timestamp=t3,
             extraction_method=ExtractionMethod.MANUAL,
@@ -210,13 +210,13 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
         Observation(
             id="obs-demo-5",
             incident_id=state.incident_id,
-            raw_utterance="Action item: Dave, inspect pgbouncer pool socket limits and restart proxy workers within 5 minutes.",
+            raw_utterance="Action item: Dave, compare authentication error rates before and after the latest deployment within 5 minutes.",
             speaker="Commander Sarah Chen",
             participant_id="part-ic-1",
             source="demo_voice_stream",
             category=ObservationCategory.ACTION_ITEM,
             status=EvidenceStatus.REPORTED,
-            content="Inspect pgbouncer pool socket limits and restart proxy workers",
+            content="Compare authentication error rates before and after deployment",
             confidence=0.95,
             timestamp=t4,
             extraction_method=ExtractionMethod.MANUAL,
@@ -224,13 +224,13 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
         Observation(
             id="obs-demo-6",
             incident_id=state.incident_id,
-            raw_utterance="Unresolved risk: Customer checkout abandonment rate is causing an estimated $15,000 revenue loss per minute during flash sale.",
+            raw_utterance="Unresolved risk: A rollback could invalidate active sessions and extend the outage if the deployment is not the cause.",
             speaker="Marcus Vance",
             participant_id="part-biz-1",
             source="demo_voice_stream",
             category=ObservationCategory.RISK,
             status=EvidenceStatus.REPORTED,
-            content="Estimated $15,000/min revenue loss during active flash sale",
+            content="Rollback may invalidate active sessions and extend the outage",
             confidence=0.90,
             timestamp=t5,
             extraction_method=ExtractionMethod.MANUAL,
@@ -246,8 +246,8 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
         observation_id="obs-demo-1",
         incident_id=state.incident_id,
         claim_type=ClaimType.ERROR_RATE,
-        entity="checkout payment api",
-        value="45% failure rate",
+        entity="login api",
+        value="40% 503 failure rate",
         speaker="Dave Miller",
         status=EvidenceStatus.CONFIRMED,
         confidence=0.95,
@@ -259,7 +259,7 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
         incident_id=state.incident_id,
         claim_type=ClaimType.RESOURCE_STATUS,
         entity="database connections",
-        value="exhausted at 100%",
+        value="authentication database may be overloaded",
         speaker="Dave Miller",
         status=EvidenceStatus.CONFLICTED,
         confidence=0.85,
@@ -271,7 +271,7 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
         incident_id=state.incident_id,
         claim_type=ClaimType.METRIC_VALUE,
         entity="database connections",
-        value="normal and healthy (22% CPU)",
+        value="normal and healthy",
         speaker="Priya Sharma",
         status=EvidenceStatus.CONFLICTED,
         confidence=0.90,
@@ -282,8 +282,8 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
         observation_id="obs-demo-4",
         incident_id=state.incident_id,
         claim_type=ClaimType.DECISION,
-        entity="payment gateway routing",
-        value="Route 100% traffic to secondary Stripe backup gateway",
+        entity="identity deployment rollback",
+        value="Verify deployment impact before rollback",
         speaker="Commander Sarah Chen",
         status=EvidenceStatus.CONFIRMED,
         confidence=1.0,
@@ -309,7 +309,7 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
         speaker_a="Dave Miller",
         speaker_b="Priya Sharma",
         status=EvidenceStatus.OPEN if hasattr(EvidenceStatus, "OPEN") else EvidenceStatus.REPORTED,
-        recommended_action="Query pgbouncer proxy telemetry to isolate proxy socket limits vs database engine load.",
+        recommended_action="Compare deployment timestamps with identity-service error-rate telemetry.",
         created_at=t2,
     )
     state.conflicts = [conflict]
@@ -319,8 +319,8 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
     missing = MissingInfo(
         id="mi-demo-1",
         incident_id=state.incident_id,
-        description="PgBouncer connection pooler socket saturation and worker process metrics.",
-        recommended_action="Inspect pgbouncer admin console `SHOW POOLS;` and check connection backlog.",
+        description="Authentication error rates before and after the latest identity-service deployment.",
+        recommended_action="Compare deployment timestamps with login failures and error-rate telemetry.",
         status=EvidenceStatus.OPEN if hasattr(EvidenceStatus, "OPEN") else EvidenceStatus.REPORTED,
         created_at=t2,
     )
@@ -332,13 +332,13 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
     action_item = ActionItem(
         id="act-item-demo-1",
         incident_id=state.incident_id,
-        description="Inspect pgbouncer pool socket limits and restart proxy workers",
+        description="Compare authentication error rates before and after deployment",
         owner_name="Dave Miller",
         owner_participant_id="part-eng-1",
         status="OPEN",
         created_at=t4,
         due_at=due_time,
-        source_utterance="Action item: Dave, inspect pgbouncer pool socket limits and restart proxy workers within 5 minutes.",
+        source_utterance="Action item: Dave, compare authentication error rates before and after the latest deployment within 5 minutes.",
     )
     state.action_items = [action_item]
     await action_item_repo.insert(action_item)
@@ -347,7 +347,7 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
     risk = UnresolvedRisk(
         id="risk-demo-1",
         incident_id=state.incident_id,
-        description="Customer checkout dropoff causing ongoing $15,000/min brand and revenue loss during flash sale.",
+        description="A rollback could invalidate active sessions and extend the outage if the deployment is not the cause.",
         severity=SeverityLevel.CRITICAL,
         status=EvidenceStatus.OPEN if hasattr(EvidenceStatus, "OPEN") else EvidenceStatus.REPORTED,
         created_at=t5,
@@ -359,8 +359,8 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
     state.hypotheses = [
         Hypothesis(
             id="hypo-demo-1",
-            title="PgBouncer Connection Starvation",
-            description="Application connection pooler exhaustion rather than database hardware bottleneck.",
+            title="Identity-Service Deployment Regression",
+            description="The latest identity-service deployment may have introduced the login failures.",
             confidence=0.88,
             status=HypothesisStatus.PROPOSED,
             updated_at=t2,
@@ -370,9 +370,9 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
     # ── Step 9: Propose Safe Action & Approve ────────────────────────────────
     action_safe = ProposedAction(
         action_id="act-safe-failover-01",
-        tool_name="failover_payment_gateway",
-        parameters={"provider": "stripe_secondary", "traffic_percentage": 100},
-        rationale="Reroute transactions to healthy backup payment provider to stop customer 500 errors immediately.",
+        tool_name="rollback_identity_deployment",
+        parameters={"deployment": "identity-service-v2026.08.30", "environment": "production"},
+        rationale="Rollback the latest identity deployment if telemetry confirms it caused the login failures.",
         recovery_duration_seconds=1.5,
         status=ActionApprovalStatus.APPROVED,
         confidence=0.98,
@@ -385,10 +385,10 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
     state.actions_taken.append(
         ActionTaken(
             action_id="act-safe-failover-01",
-            tool_name="failover_payment_gateway",
-            parameters={"provider": "stripe_secondary", "traffic_percentage": 100},
+            tool_name="rollback_identity_deployment",
+            parameters={"deployment": "identity-service-v2026.08.30", "environment": "production"},
             executed_at=t4,
-            result_summary="Payment traffic successfully rerouted to secondary gateway. 500 error rate dropped to 0.1%.",
+            result_summary="Identity deployment rollback verified. Login 503 error rate dropped to 0.2%.",
             verified=True,
         )
     )
@@ -413,31 +413,31 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
         TimelineEntry(
             timestamp=t0,
             event_type="INCIDENT_INITIALIZED",
-            description="Critical payment processing outage initialized with 4 participant roles.",
+            description="Critical identity-service outage initialized with 4 participant roles.",
             actor="SYSTEM",
         ),
         TimelineEntry(
             timestamp=t1,
             event_type="OBSERVATION_INGESTED",
-            description="Dave Miller reported 45% checkout error rate and suspected DB pool exhaustion.",
+            description="Dave Miller reported 40% login API 503 errors and suspected an identity-service issue.",
             actor="Dave Miller",
         ),
         TimelineEntry(
             timestamp=t2,
             event_type="CONFLICT_DETECTED",
-            description="Conflict detected: Dave Miller (100% pool exhaustion) vs Priya Sharma (22% normal RDS metrics).",
+            description="Conflict detected: authentication database overload hypothesis vs normal database telemetry.",
             actor="SYSTEM_DETECTOR",
         ),
         TimelineEntry(
             timestamp=t3,
             event_type="DECISION_RECORDED",
-            description="Decision: Failover 100% payment routing to secondary Stripe gateway.",
+            description="Decision: Verify identity deployment impact before rollback.",
             actor="Commander Sarah Chen",
         ),
         TimelineEntry(
             timestamp=t4,
             event_type="ACTION_APPROVED",
-            description="Commander Sarah Chen approved safe action 'failover_payment_gateway'.",
+            description="Commander Sarah Chen approved safe action 'rollback_identity_deployment'.",
             actor="Commander Sarah Chen",
         ),
         TimelineEntry(
@@ -449,7 +449,7 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
         TimelineEntry(
             timestamp=t5,
             event_type="ACTION_VERIFIED",
-            description="Action 'failover_payment_gateway' verified successful: Checkout error rate normalized to 0.1%.",
+            description="Action 'rollback_identity_deployment' verified successful: Login 503 error rate normalized to 0.2%.",
             actor="SYSTEM",
         ),
     ]
@@ -462,15 +462,15 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
 
     # ── Step 12: Final Summary ──────────────────────────────────────────────
     final_text = (
-        "Incident: Major Payment Processing & Checkout Outage (Status: RESOLVING, Severity: CRITICAL)\n\n"
-        "Confirmed Facts: Checkout API 500 error spike at 45% failure rate in US-East; Payment traffic rerouted to secondary gateway; Error rate reduced to 0.1%.\n\n"
-        "Reported / Unverified Intelligence: PgBouncer proxy socket pool saturated; RDS hardware CPU normal at 22%.\n\n"
-        "Decisions Made: Route 100% of payment traffic to secondary Stripe backup gateway immediately.\n\n"
-        "Completed Actions: failover_payment_gateway (Approved by Commander Sarah Chen, verified recovery).\n\n"
-        "Rejected Dangerous Actions: flush_all_production_databases (Blocked by Commander due to data loss hazard).\n\n"
-        "Open Action Items: Inspect pgbouncer pool socket limits and restart proxy workers (owner: Dave Miller, status: OPEN, due in 5m).\n\n"
-        "Open Conflicts Requiring Verification: database connections: 'exhausted at 100%' vs 'normal and healthy (22% CPU)' (action: Query pgbouncer proxy telemetry to isolate proxy vs database engine).\n\n"
-        "Unresolved Risks: Ongoing brand impact and transaction backlog during active flash sale.\n\n"
+        "Incident: Customer Login and Identity Outage (Status: RESOLVING, Severity: CRITICAL)\n\n"
+        "Confirmed Facts: Login API 503 error spike at 40% across multiple regions; Login error rate reduced to 0.2% after rollback.\n\n"
+        "Reported / Unverified Intelligence: Authentication database may be overloaded; database CPU and connections appear normal; failures began after the latest identity deployment.\n\n"
+        "Decisions Made: Verify identity deployment impact before rollback.\n\n"
+        "Completed Actions: rollback_identity_deployment (Approved by Commander Sarah Chen, verified recovery).\n\n"
+        "Rejected Dangerous Actions: flush_all_production_databases (Blocked by Commander due to irreversible data loss risk).\n\n"
+        "Open Action Items: Compare authentication error rates before and after deployment (owner: Dave Miller, status: OPEN, due in 5m).\n\n"
+        "Open Conflicts Requiring Verification: authentication database overload hypothesis vs normal database telemetry (action: compare deployment timestamps with identity metrics).\n\n"
+        "Unresolved Risks: Rollback may invalidate active sessions and extend the outage if the deployment is not the cause.\n\n"
         "DISCLAIMER: The AI has organized reported evidence and has not independently determined root cause."
     )
     state.final_summary = final_text
@@ -489,17 +489,17 @@ async def run_complete_payment_outage_scenario() -> dict[str, Any]:
     return {
         "status": "success",
         "demo_mode": True,
-        "scenario": "Payment system outage",
+        "scenario": "Customer login and identity outage",
         "incident_id": state.incident_id,
         "demonstrated_capabilities": [
-            "Incident creation (CRITICAL payment outage)",
+            "Incident creation (CRITICAL identity outage)",
             "4 Participant roles (Commander, Backend Eng, Support Lead, Biz Lead)",
             "Ingestion and separation into Confirmed Facts, Hypotheses, Decisions, Actions, Risks",
             "Contradictory claim conflict detection (DB Exhausted vs Normal Metrics)",
             "Missing information identification (PgBouncer proxy socket telemetry)",
             "Action item assignment with due timestamp and owner (Dave Miller)",
             "Real-time operational timeline",
-            "Human confirmation and execution of safe action (Failover gateway)",
+            "Human confirmation and execution of safe action (Identity deployment rollback)",
             "Human rejection of dangerous action (Flush production databases)",
             "Evidence-bounded final summary with explicit AI disclaimer",
         ],

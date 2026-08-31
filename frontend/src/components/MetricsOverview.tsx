@@ -95,7 +95,7 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({
         </div>
       </article>
 
-      {/* 2. Flood Depth */}
+      {/* 2. Login Error Rate */}
       <article
         style={{
           padding: '1.25rem',
@@ -108,27 +108,27 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({
         }}
       >
         <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', letterSpacing: '0.05em' }}>
-          FLOOD DEPTH
+          LOGIN ERROR RATE
         </span>
         <div style={{ margin: '0.75rem 0' }}>
           <span style={{ fontSize: '2.25rem', fontWeight: 800, color: metrics.flood_depth_meters > 0.5 ? '#f85149' : '#58a6ff' }}>
-            {metrics.flood_depth_meters.toFixed(2)}
+            {Math.max(0, 100 - metrics.water_safety_index).toFixed(1)}
           </span>
-          <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginLeft: '0.25rem' }}>meters</span>
+          <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginLeft: '0.25rem' }}>%</span>
         </div>
         <div style={{ width: '100%', height: '6px', backgroundColor: '#21262d', borderRadius: '3px', overflow: 'hidden' }}>
           <div
             style={{
-              width: `${Math.min(100, (metrics.flood_depth_meters / 3.0) * 100)}%`,
+              width: `${Math.min(100, Math.max(0, 100 - metrics.water_safety_index))}%`,
               height: '100%',
-              backgroundColor: metrics.flood_depth_meters > 0.5 ? '#f85149' : '#58a6ff',
+              backgroundColor: '#f85149',
               transition: 'width 0.4s ease-out',
             }}
           />
         </div>
       </article>
 
-      {/* 3. Water Safety Index */}
+      {/* 3. Service Signal */}
       <article
         style={{
           padding: '1.25rem',
@@ -141,19 +141,19 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({
         }}
       >
         <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', letterSpacing: '0.05em' }}>
-          WATER SAFETY INDEX
+          IDENTITY SERVICE SIGNAL
         </span>
         <div style={{ margin: '0.75rem 0' }}>
           <span style={{ fontSize: '2.25rem', fontWeight: 800, color: getWaterSafetyColor(metrics.water_safety_index) }}>
-            {metrics.water_safety_index.toFixed(1)}%
+            {metrics.infrastructure_integrity_pct.toFixed(1)}%
           </span>
         </div>
         <div style={{ width: '100%', height: '6px', backgroundColor: '#21262d', borderRadius: '3px', overflow: 'hidden' }}>
           <div
             style={{
-              width: `${Math.min(100, Math.max(0, metrics.water_safety_index))}%`,
+              width: `${Math.min(100, Math.max(0, metrics.infrastructure_integrity_pct))}%`,
               height: '100%',
-              backgroundColor: getWaterSafetyColor(metrics.water_safety_index),
+              backgroundColor: getIntegrityColor(metrics.infrastructure_integrity_pct),
               transition: 'width 0.4s ease-out',
             }}
           />
@@ -173,16 +173,16 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({
         }}
       >
         <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', letterSpacing: '0.05em' }}>
-          AFFECTED POPULATION
+          CUSTOMERS AFFECTED
         </span>
         <div style={{ margin: '0.75rem 0' }}>
           <span style={{ fontSize: '2.25rem', fontWeight: 800, color: metrics.affected_population > 0 ? '#e3b341' : '#3fb950' }}>
             {metrics.affected_population.toLocaleString()}
           </span>
-          <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginLeft: '0.25rem' }}>people</span>
+          <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginLeft: '0.25rem' }}>customers</span>
         </div>
         <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-          {metrics.affected_population > 0 ? 'Triage & evacuation priority active' : 'No trapped citizens reported'}
+          {metrics.affected_population > 0 ? 'Impact estimate' : 'No impact reported'}
         </div>
       </article>
 
@@ -199,7 +199,7 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({
         }}
       >
         <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', letterSpacing: '0.05em' }}>
-          GRID & LEVEE INTEGRITY
+          IDENTITY SERVICE HEALTH
         </span>
         <div style={{ margin: '0.75rem 0' }}>
           <span style={{ fontSize: '2.25rem', fontWeight: 800, color: getIntegrityColor(metrics.infrastructure_integrity_pct) }}>

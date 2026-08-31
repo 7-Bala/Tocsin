@@ -27,25 +27,24 @@ CHANNEL_NAME_REGEX = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
 # In-memory registry of active agent IDs per channel
 ACTIVE_AGENTS: dict[str, str] = {}
 
+# NOTE on MCP tool wiring (see docs/agora/RESEARCH.md §4): Agora's official release
+# notes document tool-calling as an `llm.mcp_servers` field, not `mllm.mcp_servers`.
+# Agora's dedicated Gemini Live MLLM documentation page makes no mention of tool
+# calling or mcp_servers at all, and MLLM mode is documented to disable the separate
+# llm/asr/tts pipeline that `llm.mcp_servers` belongs to. Wiring mcp_servers under
+# `mllm` below (see `start_conversational_agent`) is therefore UNVERIFIED AGAINST
+# OFFICIAL AGORA DOCS, not a confirmed capability. Until a live, credentialed session
+# demonstrates the agent actually invoking a tool through this path, treat MCP tool
+# execution during a live Gemini Live voice call as MOCK/DEMO ONLY.
 DEFAULT_EMERGENCY_PROMPT = (
   "You are Tocsin, an intelligent AI emergency disaster coordinator and Incident Commander assistant. "
   "You are speaking to field responders, commanders, and citizens in active crisis situations. "
   "Be calm, professional, decisive, and rigorously grounded. Keep spoken responses concise (2-4 sentences). "
-  "You have access to 13 specialized emergency intelligence and response tools via Model Context Protocol (MCP): "
-  "1. get_incident_status (check live incident telemetry, symptoms, and active metrics) "
-  "2. get_weather_risk (check Open-Meteo precipitation, rainfall intensity & flood risk) "
-  "3. get_official_emergency_alerts (retrieve official NOAA NWS or SACHET NDMA India CAP warnings) "
-  "4. search_emergency_infrastructure (search OSM hospitals, fire stations, shelters, flood barriers, helipads) "
-  "5. find_nearby_resource (locate shelters, water suppliers, pumping stations) "
-  "6. calculate_eta (compute OSRM driving distance and route ETA) "
-  "7. get_earthquake_activity (check official USGS seismic events and magnitudes) "
-  "8. get_active_fire_hotspots (query NASA FIRMS satellite thermal anomalies) "
-  "9. get_global_disaster_alerts (query active GDACS international disaster bulletins) "
-  "10. get_air_quality_hazards (check AQI, PM2.5, PM10 & toxic gases via Copernicus CAMS) "
-  "11. propose_incident_action (propose high-impact emergency operations for Incident Commander human sign-off) "
-  "12. dispatch_resolution_action (dispatch emergency teams, evacuations, resources) "
-  "13. notify_stakeholders (broadcast disaster bulletins). "
-  "TOOL SELECTION: Select only tools relevant to the incident. For floods, prioritize get_incident_status, get_weather_risk, get_official_emergency_alerts, search_emergency_infrastructure, find_nearby_resource, calculate_eta. Do not call earthquake, fire, or AQI tools unless relevant. "
+  "You do not have confirmed live access to any external tools in this conversation unless a tool call "
+  "you attempt actually succeeds and returns a result. Never claim to have checked telemetry, weather, "
+  "seismic, fire, alert, or mapping data unless a tool call for it actually executed and returned data in "
+  "this session. If you are unsure whether a tool is available, say so explicitly rather than assuming it "
+  "worked. "
   "CORE EVIDENCE ONTOLOGY & ANTI-HALLUCINATION RULES: "
   "Every factual claim must be traceable to a tool, telemetry, or user statement. If no evidence exists, state 'I don't have enough evidence to verify that.' Never fill gaps with plausible inventions. "
   "Explicitly distinguish the following categories without silently converting one into another: "
@@ -60,6 +59,26 @@ DEFAULT_EMERGENCY_PROMPT = (
   "EVIDENCE CONFLICT RULE: When sources disagree (e.g. user reports flooding while weather model shows LOW rain, SACHET has no active alert, and local telemetry detects overflow), you MUST NOT choose one silently or claim 'no flood'. State the official/model data, state the user report, state the telemetry, explicitly identify the conflict, and explain that localized flash incidents may not yet appear in regional alert products. "
   "ACTION SAFETY PROTOCOL: You must NEVER execute high-impact emergency actions (evacuations, boat dispatches, pump activations) autonomously. State supporting evidence, state uncertainties, state rationale, and call propose_incident_action to queue the action in PENDING_APPROVAL for Incident Commander review. "
   "OPERATIONAL RESPONSE STRUCTURE: When addressing operational questions, internally structure your assessment with: VERIFIED facts, REPORTED user claims, UNCERTAIN gaps, reasoned ASSESSMENT, RECOMMENDATION, and PROPOSED ACTION."
+)
+
+# Appended to the prompt only when an MCP server URL is actually configured for this
+# session (see `start_conversational_agent`). This still cannot promise the tools work
+# — see the UNVERIFIED note above `DEFAULT_EMERGENCY_PROMPT` — so it is written to make
+# the model treat every tool call as attempted, not guaranteed, and to prefer stating
+# that a tool result is unavailable over inventing one.
+MCP_TOOL_ROSTER_NOTICE = (
+  "An MCP tool server has been configured for this session, exposing up to 13 emergency "
+  "intelligence and response tools if the connection succeeds: get_incident_status, "
+  "get_weather_risk, get_official_emergency_alerts, search_emergency_infrastructure, "
+  "find_nearby_resource, calculate_eta, get_earthquake_activity, get_active_fire_hotspots, "
+  "get_global_disaster_alerts, get_air_quality_hazards, propose_incident_action, "
+  "dispatch_resolution_action, notify_stakeholders. Select only tools relevant to the "
+  "incident (e.g. for floods: get_incident_status, get_weather_risk, "
+  "get_official_emergency_alerts, search_emergency_infrastructure, find_nearby_resource, "
+  "calculate_eta). Whether this tool connection is actually usable in a live Gemini Live "
+  "voice session has not been confirmed against official Agora documentation as of this "
+  "build — if a tool call does not return a result, say so plainly rather than assuming "
+  "it executed."
 )
 
 
@@ -310,7 +329,14 @@ async def start_conversational_agent(
     "Content-Type": "application/json",
   }
 
+  # Resolve MCP server config before building the prompt, so the tool roster notice
+  # (see MCP_TOOL_ROSTER_NOTICE) is only appended when a tool server is actually wired.
+  raw_mcp = request.mcp_server_url or os.getenv("MCP_SERVER_PUBLIC_URL") or ""
+  mcp_url = raw_mcp.strip()
+
   prompt = (request.system_prompt or DEFAULT_EMERGENCY_PROMPT).strip()
+  if mcp_url and not request.system_prompt:
+    prompt = f"{prompt}\n\n{MCP_TOOL_ROSTER_NOTICE}"
   gemini_ws_url = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={gemini_key}"
 
   # Official Agora ConvoAI REST v2 Join Schema (Gemini Live MLLM)
@@ -350,17 +376,17 @@ async def start_conversational_agent(
         "input_modalities": ["audio"],
         "output_modalities": ["audio"],
         "greeting_message": (
-          "Tocsin emergency coordinator active with live tools. How can I"
-          " assist?"
+          "Tocsin emergency coordinator active. How can I assist?"
         ),
         "failure_message": "Sorry, I encountered an issue. Please try again.",
       },
     },
   }
 
-  # Wire MCP Servers if public URL is configured
-  raw_mcp = request.mcp_server_url or os.getenv("MCP_SERVER_PUBLIC_URL") or ""
-  mcp_url = raw_mcp.strip()
+  # Wire MCP Servers if public URL is configured. UNVERIFIED AGAINST OFFICIAL AGORA
+  # DOCS for the `mllm` (Gemini Live) pipeline — see the note above DEFAULT_EMERGENCY_PROMPT
+  # and docs/agora/RESEARCH.md §4. Treat this as MOCK/DEMO ONLY until a live session
+  # confirms the agent actually invokes a tool through it.
   if mcp_url:
     sse_endpoint = (
       mcp_url if mcp_url.endswith("/sse") else f"{mcp_url.rstrip('/')}/sse"
@@ -430,6 +456,14 @@ async def start_conversational_agent(
         "voice": request.voice,
         "mcp_enabled": bool(mcp_url),
         "mcp_server_url": sse_endpoint if mcp_url else None,
+        "mcp_tool_calling_status": (
+          "MOCK/DEMO ONLY - UNVERIFIED: mcp_servers was sent under properties.mllm, "
+          "which official Agora docs do not confirm for the Gemini Live pipeline "
+          "(docs describe properties.llm.mcp_servers instead). Live tool invocation "
+          "has not been observed. See docs/agora/RESEARCH.md."
+          if mcp_url
+          else "NOT_CONFIGURED"
+        ),
       }
   except httpx.HTTPError as exc:
     logger.error(f"Network error connecting to Agora ConvoAI REST API: {exc}")
@@ -506,14 +540,30 @@ async def stop_conversational_agent(request: StopAgentRequest) -> dict[str, Any]
 
 
 @router.get(
-  "/agent-status/{channel_name}",
-  summary="Get Active Agent Status",
-  description="Checks whether an active Conversational AI agent is registered for the specified channel.",
+  "/local-agent-session/{channel_name}",
+  summary="Get Locally-Tracked Agent Session State",
+  description=(
+    "Returns Tocsin's own in-memory record of the last agent_id started for this "
+    "channel. This is NOT a live query against Agora's Conversational AI service: "
+    "Agora publishes a real 'Query agent status' REST endpoint "
+    "(docs.agora.io/en/conversational-ai/rest-api/agent/query), but this pass could "
+    "not confirm its exact URL/response schema from official docs, so it is not "
+    "called here. This endpoint can be stale or wrong if the backend process "
+    "restarted (registry is cleared) or if Agora already stopped the agent "
+    "server-side (idle timeout, error) without Tocsin being told."
+  ),
 )
-async def get_agent_status(channel_name: str) -> dict[str, Any]:
+async def get_local_agent_session_state(channel_name: str) -> dict[str, Any]:
+  """Local-only session lookup. Does not call Agora; see docstring above."""
   agent_id = ACTIVE_AGENTS.get(channel_name)
   return {
     "channel_name": channel_name,
-    "has_active_agent": bool(agent_id),
+    "has_local_agent_record": bool(agent_id),
     "agent_id": agent_id,
+    "source": "tocsin_local_in_memory_registry",
+    "live_agora_state_verified": False,
+    "note": (
+      "This reflects Tocsin's local record only, not a live Agora query. See "
+      "docs/agora/RESEARCH.md for details."
+    ),
   }

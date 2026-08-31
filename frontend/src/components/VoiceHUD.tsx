@@ -184,12 +184,16 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
         }
       });
 
-      // Handle real-time speech transcription stream messages from Agora ConvoAI
+      // Handle real-time speech transcription stream messages from Agora ConvoAI.
+      // decodeAgoraStreamMessage's wire format is empirical, not confirmed by official
+      // Agora docs (see docs/agora/RESEARCH.md §5) — it fails safe by returning null
+      // for any unrecognized payload, which we must silently drop here rather than
+      // render partial/garbage text.
       client.on('stream-message', (msgUid: number | string, payload: Uint8Array) => {
         try {
           const decoded = decodeAgoraStreamMessage(msgUid, payload);
           if (!decoded || !decoded.text) {
-            return;
+            return; // Unknown/unverified payload shape: fail safe, drop the frame.
           }
 
           // Ingest event into the ephemeral in-memory aggregator (handles partial streaming vs finalization)

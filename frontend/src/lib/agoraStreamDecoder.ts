@@ -2,7 +2,18 @@
  * Protocol decoder for Agora ConvoAI Stream Messages.
  * Decodes real-time speech transcription payloads from Gemini Live / Agora agents.
  *
- * Agora ConvoAI Stream Message Protocol:
+ * UNVERIFIED AGAINST OFFICIAL AGORA DOCS (see docs/agora/RESEARCH.md §5): the three
+ * frame patterns below were derived from observed traffic, not from a fetched Agora
+ * documentation page. The one official page found that discusses transcript delivery
+ * (docs.agora.io/en/conversational-ai/develop/transcripts) describes transcripts
+ * arriving via "Signaling channel messages" through toolkit callbacks, and explicitly
+ * does not document a raw wire format. Treat the patterns below as best-effort/
+ * empirical, not a documented contract — any frame that doesn't match one of them is
+ * intentionally discarded (returns null) rather than guessed at, and callers (see
+ * VoiceHUD.tsx) must treat a null/empty result as "ignore this frame", never render
+ * partial or garbage output for it.
+ *
+ * Agora ConvoAI Stream Message Protocol (empirical, not doc-confirmed):
  *  - Frame format: `<message_id>|<sequence_no>|<flags_or_total>|<base64_payload>`
  *  - Or direct Base64 JSON: `eyJy...`
  *  - Or direct JSON string: `{"text": "...", ...}`
@@ -12,6 +23,8 @@
  *  2. isFinal accurately differentiates streaming deltas from finalized speech.
  *  3. Only clean, human-readable text is returned.
  *  4. Raw base64, protocol pipes, and binary noise are completely rejected.
+ *  5. Any unrecognized payload shape fails safe: returns null rather than throwing
+ *     or emitting best-guess text.
  */
 
 export interface DecodedStreamEvent {

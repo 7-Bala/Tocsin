@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { runPaymentOutageDemo, simulateTranscript, checkIncidentReminders } from '@/hooks/useIncidentApi';
+import { runIdentityOutageDemo, simulateTranscript, checkIncidentReminders } from '@/hooks/useIncidentApi';
 import { IncidentState } from '@/types/incident';
 
 interface DemoModeControlProps {
@@ -24,11 +24,11 @@ export const DemoModeControl: React.FC<DemoModeControlProps> = ({
   const handleRunDemoScenario = async () => {
     try {
       setIsRunning(true);
-      setStatusMessage('Executing deterministic Payment Outage scenario...');
-      const res = await runPaymentOutageDemo();
+      setStatusMessage('Executing deterministic Identity Outage scenario...');
+      const res = await runIdentityOutageDemo();
       if (res.state) {
         onIncidentUpdated(res.state);
-        setStatusMessage('✅ Payment Outage demo scenario loaded into PostgreSQL & UI!');
+        setStatusMessage('✅ Identity Outage demo scenario loaded into PostgreSQL & UI!');
       }
     } catch (err: any) {
       setStatusMessage(`❌ Demo execution error: ${err.message}`);
@@ -43,7 +43,7 @@ export const DemoModeControl: React.FC<DemoModeControlProps> = ({
 
     try {
       setIsSimulating(true);
-      const incId = activeIncidentId || 'inc-demo-payment-outage';
+      const incId = activeIncidentId || 'inc-demo-identity-outage';
       await simulateTranscript(incId, {
         speaker,
         speaker_role: role,
@@ -61,7 +61,7 @@ export const DemoModeControl: React.FC<DemoModeControlProps> = ({
   const handleCheckReminders = async () => {
     try {
       setIsCheckingReminders(true);
-      const incId = activeIncidentId || 'inc-demo-payment-outage';
+      const incId = activeIncidentId || 'inc-demo-identity-outage';
       const res = await checkIncidentReminders(incId);
       setStatusMessage(`⏰ Overdue scan complete: ${res.overdue_reminders_emitted} reminders emitted.`);
     } catch (err: any) {
@@ -91,7 +91,7 @@ export const DemoModeControl: React.FC<DemoModeControlProps> = ({
           </span>
           <span>•</span>
           <span className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-indigo-400"></span> Gemini Live
+            <span className="w-2 h-2 rounded-full bg-indigo-400"></span> Gemini Optional
           </span>
           <span>•</span>
           <span className="flex items-center gap-1">
@@ -107,7 +107,7 @@ export const DemoModeControl: React.FC<DemoModeControlProps> = ({
           disabled={isRunning}
           className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-semibold text-white shadow transition flex items-center gap-1.5"
         >
-          <span>{isRunning ? '⏳ Executing...' : '⚡ Run Payment Outage Scenario'}</span>
+          <span>{isRunning ? '⏳ Executing...' : '⚡ Run Identity Outage Scenario'}</span>
         </button>
 
         <button

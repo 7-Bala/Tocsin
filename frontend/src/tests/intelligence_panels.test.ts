@@ -22,7 +22,7 @@ test('ConflictsPanel renders active conflicts with opposing claims and recommend
       incident_id: 'inc-1',
       claim_a_id: 'cl-1',
       claim_b_id: 'cl-2',
-      entity: 'payment gateway',
+      entity: 'identity service',
       value_a: 'down',
       value_b: 'healthy',
       source_a: 'frontend_team',
@@ -36,7 +36,7 @@ test('ConflictsPanel renders active conflicts with opposing claims and recommend
   ];
   const html = renderToStaticMarkup(React.createElement(ConflictsPanel, { conflicts: mockConflicts }));
   assert.match(html, /Conflicting Information/);
-  assert.match(html, /payment gateway/);
+  assert.match(html, /identity service/);
   assert.match(html, /down/);
   assert.match(html, /healthy/);
   assert.match(html, /Recommended:/);
@@ -151,7 +151,7 @@ test('DemoModeControl renders demo banner, scenario trigger, and transcript simu
     })
   );
   assert.match(html, /DEMO MODE/);
-  assert.match(html, /Run Payment Outage Scenario/);
+  assert.match(html, /Run Identity Outage Scenario/);
   assert.match(html, /Scan Overdue Action Reminders/);
   assert.match(html, /Simulate Utterance:/);
   assert.match(html, /Dave Miller/);

@@ -10,7 +10,7 @@ Every capability in this repository is classified under one of six explicit stat
 
 | Capability | Status | Description & Verification Evidence |
 |---|---|---|
-| **Deterministic Demo Mode (Payment Outage)** | `VERIFIED LOCALLY` | End-to-end 11-step scenario covering incident creation, 4 roles, fact/hypothesis extraction, conflict detection, action assignment, human approval/rejection, overdue check, and final summary. Verified by `test_demo_scenario.py`. |
+| **Deterministic Demo Mode (Identity Outage)** | `VERIFIED LOCALLY` | End-to-end scenario covering incident creation, 4 roles, fact/hypothesis extraction, conflict detection, action assignment, human approval/rejection, overdue check, and final summary. Verified by `test_demo_scenario.py`. |
 | **PostgreSQL Persistence & Migrations** | `VERIFIED LOCALLY` | Real `postgres:16-alpine` Docker container tested. All 13 schema tables migrated, full entity persistence verified, and multi-process restart survival verified by `test_postgresql_live.py`. |
 | **SQLite Fallback Database** | `VERIFIED LOCALLY` | Isolated local/test database fallback tested with clean fixtures via `test_intelligence.py`. |
 | **Gemini LLM Structured Extraction** | `VERIFIED LIVE` / `VERIFIED LOCALLY` | Uses modern `google-genai` SDK (`gemini-2.5-flash`). Returns `extraction_method: "llm"` when quota is available. Automatically falls back to `extraction_method: "heuristic_fallback"` with status `UNVERIFIED` on 429 quota exhaustion or missing key. Verified by `test_gemini_extraction_live.py`. |
@@ -20,9 +20,10 @@ Every capability in this repository is classified under one of six explicit stat
 | **Overdue Action Follow-up & Reminders** | `VERIFIED LOCALLY` | Action items track `due_at` and `owner_name`. Background in-process scheduler and `/check-reminders` endpoint emit `FOLLOWUP_REMINDER` events with 60-second cooldown spam throttling. |
 | **Evidence-Bounded Final Summary** | `VERIFIED LOCALLY` | Generates structured incident summaries distinguishing confirmed facts from unverified intelligence, with mandatory AI root-cause disclaimer. |
 | **Spoken Audio Summary Broadcast** | `IMPLEMENTED — CREDENTIAL REQUIRED` | Text synthesis is implemented and verified. Live voice broadcasting into active Agora channel requires configured Agora App ID / Certificate credentials and active room session. |
-| **Agora ConvoAI Gemini Live Agent** | `IMPLEMENTED — CREDENTIAL REQUIRED` | Agora RTC token generation and agent start/stop lifecycle implemented (`test_agora_token.py`). Live voice room requires active Agora credentials and microphone access. |
-| **Slack Webhook Integration** | `VERIFIED LOCALLY` (Contract) / `IMPLEMENTED — CREDENTIAL REQUIRED` (Live) | Local HTTP webhook contract tested for 200 delivery (`LIVE_EXTERNAL`), 500 failure handling, timeout handling, and no-credentials mock fallback (`MOCK_FALLBACK`). Live Slack delivery requires `SLACK_WEBHOOK_URL`. |
-| **PagerDuty / Jira / Production Cloud Tooling** | `MOCK/DEMO ONLY` | Simulated emergency MCP tools and mitigation actions for disaster and payment scenarios. |
+| **Agora ConvoAI Gemini Live Agent** | `IMPLEMENTED — CREDENTIAL REQUIRED` | Agora RTC token generation and agent start/stop lifecycle implemented (`test_agora_token.py`). Live voice room requires active Agora credentials and microphone access. Agent status is read from Tocsin's own local session registry (`/api/agora/local-agent-session/{channel}`), not a live Agora query — see `docs/agora/RESEARCH.md`. |
+| **MCP Tool Calling During Live Voice Sessions** | `MOCK/DEMO ONLY` | The 13 emergency-intelligence tools are real and independently callable (`mock-services/server.py`), but wiring them into a live Agora Gemini Live voice agent (`properties.mllm.mcp_servers`) is **not confirmed by official Agora documentation** — Agora's docs describe `properties.llm.mcp_servers` instead, a pipeline MLLM mode disables. No live session has confirmed the voice agent actually invoking a tool this way. See `docs/agora/RESEARCH.md` §4. |
+| **Slack Webhook Integration** | `VERIFIED LOCALLY` (Contract) / `IMPLEMENTED — CREDENTIAL REQUIRED` (Live) | Local HTTP webhook contract tested for 200 delivery (`LIVE_EXTERNAL`), 500 failure handling, timeout handling, and no-credentials mock fallback (`MOCK_FALLBACK`). Live Slack delivery requires `SLACK_WEBHOOK_URL` and has not been exercised against a real Slack workspace in this repository's verified runs. |
+| **PagerDuty / Jira / Production Cloud Tooling** | `MOCK/DEMO ONLY` | Simulated emergency MCP tools and mitigation actions for the identity-outage demo scenario. No live PagerDuty, Jira, or cloud-provider execution exists in this repository. |
 
 ---
 
@@ -51,30 +52,30 @@ Open **`http://localhost:3000`** in your browser.
 ### Demo Step-by-Step Walkthrough
 
 1. **Observe Demo Mode Banner & System Status**:
-   - At the top of the dashboard, notice the `[DEMO MODE]` control banner with live status indicators: **Postgres Ready**, **Gemini Live**, **WebSocket Sync**.
+   - At the top of the dashboard, notice the `[DEMO MODE]` control banner with status indicators: **Postgres Ready**, **Gemini Optional**, **WebSocket Sync**.
 
-2. **Trigger 1-Click Payment Outage Scenario**:
-   - Click the **`⚡ Run Payment Outage Scenario`** button.
+2. **Trigger 1-Click Identity Outage Scenario**:
+   - Click the **`⚡ Run Identity Outage Scenario`** button.
    - **What to Observe**:
-     - Incident updates to `Major Payment Processing & Checkout Outage` (Severity: `CRITICAL`).
+     - Incident updates to `Customer Login and Identity Outage` (Severity: `CRITICAL`).
      - **4 Participants Join**: Commander Sarah Chen (Commander), Dave Miller (Engineer), Priya Sharma (Support), Marcus Vance (Business Lead).
      - **Live Observation Stream** populates with 6 multi-party voice utterances.
-     - **Confirmed Facts**: Shows `checkout payment api: 45% failure rate`.
+     - **Confirmed Facts**: Shows `login api: 40% 503 failure rate`.
      - **Contradictory Claims**: The Conflict Panel immediately flags:
-       > *Dave Miller: "database connections: exhausted at 100%"*
+       > *Dave Miller: "authentication database may be overloaded"*
        > vs
-       > *Priya Sharma: "database connections: normal and healthy (22% CPU)"*
-       > *Recommended Action: Query pgbouncer proxy telemetry.*
-     - **Missing Information**: Flags `PgBouncer connection pooler socket saturation`.
-     - **Action Items**: Displays `Inspect pgbouncer pool socket limits` assigned to **Dave Miller** with 5-minute due timer.
+       > *Priya Sharma: "database connections: normal and healthy"*
+       > *Recommended Action: Compare deployment timestamps with identity-service telemetry.*
+     - **Missing Information**: Flags `Authentication error rates before and after the latest deployment`.
+     - **Action Items**: Displays `Compare authentication error rates before and after deployment` assigned to **Dave Miller** with 5-minute due timer.
      - **Human Approval Demonstration**:
-       - Safe Action `failover_payment_gateway` approved and verified.
+       - Safe Action `rollback_identity_deployment` approved and verified.
        - Dangerous Action `flush_all_production_databases` rejected by Commander (terminal, blocked from execution).
      - **Final Summary Report**: Synthesizes facts, decisions, actions, and unresolved risks with the mandatory AI disclaimer.
 
 3. **Simulate Live Transcript Injection**:
    - In the **Simulate Utterance** form, select `Dave Miller (Engineer)`.
-   - Type: *"Connection pool proxy workers have been restarted and latency is sub-10ms."*
+   - Type: *"Identity login errors are dropping after the deployment rollback."*
    - Click **`Inject Observation`**.
    - **What to Observe**:
      - The utterance is ingested into the backend observation pipeline, persisted to PostgreSQL, and broadcast over WebSockets to the Live Observation Stream.
@@ -99,7 +100,7 @@ source ../.venv/bin/activate
 python -m pytest tests/ -v
 ```
 **Test Coverage**:
-- `test_demo_scenario.py`: Payment Outage scenario end-to-end, transcript simulation, reminder endpoints.
+- `test_demo_scenario.py`: Identity Outage scenario end-to-end, transcript simulation, reminder endpoints.
 - `test_postgresql_live.py`: Real Docker PostgreSQL migrations, health check, entity persistence, multi-process restart survival.
 - `test_gemini_extraction_live.py`: Live Gemini structured extraction & graceful quota fallback.
 - `test_slack_integration.py`: Webhook HTTP contract tests (200, 500, timeout, mock fallback).
@@ -123,3 +124,21 @@ npm run build
 1. **Human Confirmation Mandate**: Critical recovery operations cannot execute autonomously. All emergency actions require explicit Incident Commander approval with `TOCSIN_COMMANDER_KEY` (HTTP 503 returned if unconfigured).
 2. **Canonical Extraction Flow**: Browser voice transcripts post directly to `/api/incidents/{id}/observations`. Intelligence is extracted and persisted on the backend before broadcasting via WebSockets.
 3. **No Phantom Integrations**: Fallbacks, simulated tools, and mock endpoints are transparently labeled with their exact operational classification.
+
+---
+
+## ⚠️ Honest Capability Status
+
+Tocsin is **a reliable, evidence-bounded prototype with a production-oriented
+architecture** — not a production-ready system. Nothing in this README should be read
+as a production-readiness claim. In particular:
+
+- Live MCP tool execution during an active Agora Gemini Live voice call is
+  **unverified against official Agora documentation** and is labeled `MOCK/DEMO ONLY`
+  above until a real, credentialed session demonstrates it working.
+- Live Slack, PagerDuty, and Jira delivery require real external credentials that have
+  not been exercised in this repository's verified test runs; treat those integrations
+  as contract-tested or mock, not production-proven.
+- See `docs/agora/RESEARCH.md` for the full Agora-specific research, including which
+  parts of the ConvoAI/Gemini Live integration match official documentation and which
+  do not.

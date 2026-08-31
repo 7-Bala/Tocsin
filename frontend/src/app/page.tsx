@@ -29,28 +29,30 @@ export default function IncidentCommandDashboard() {
       try {
         setIsLoading(true);
         let list = await fetchIncidents();
-        if (list.length === 0) {
-          // Initialize default payment outage incident for immediate demo readiness
+        const identityIncident = list.find((incident) => incident.incident_id === 'inc-demo-identity-outage');
+        if (!identityIncident) {
+          // Initialize default identity outage incident for immediate demo readiness
           const defaultInc = await createIncident({
-            title: 'Major Payment Processing & Checkout Outage',
-            event_type: 'PAYMENT_OUTAGE',
-            incident_id: 'inc-demo-payment-outage',
+            title: 'Customer Login and Identity Outage',
+            event_type: 'TECHNICAL_INCIDENT',
+            incident_id: 'inc-demo-identity-outage',
             initial_symptoms: [
-              'HTTP 500 error surge on /api/v1/checkout across US-East',
-              'Customer transaction success rate dropped to 54.2%',
+              'HTTP 503 error surge on /api/v1/login across multiple regions',
+              'Customer login success rate dropped to 60%',
             ],
           });
-          list = [defaultInc];
+          list = [defaultInc, ...list];
         }
         setIncidentsList(list);
-        setSelectedIncidentId(list[0].incident_id);
-        setIncidentState(() => list[0]);
+        const selected = list.find((incident) => incident.incident_id === 'inc-demo-identity-outage') || list[0];
+        setSelectedIncidentId(selected.incident_id);
+        setIncidentState(() => selected);
       } catch {
         // Fallback demo state if backend connection fails on initial render
         const fallback: IncidentState = {
-          incident_id: 'inc-demo-payment-outage',
-          title: 'Major Payment Processing & Checkout Outage',
-          event_type: 'PAYMENT_OUTAGE',
+          incident_id: 'inc-demo-identity-outage',
+          title: 'Customer Login and Identity Outage',
+          event_type: 'TECHNICAL_INCIDENT',
           status: 'IDLE',
           severity: 'HIGH',
           metrics: {
@@ -63,7 +65,7 @@ export default function IncidentCommandDashboard() {
           symptoms: [
             {
               id: 'sym-1',
-              description: 'Initial alert: 500 errors on checkout API',
+              description: 'Initial alert: 503 errors on login API',
               severity: 'HIGH',
               reported_at: new Date().toISOString(),
             },
@@ -72,7 +74,7 @@ export default function IncidentCommandDashboard() {
             {
               timestamp: new Date().toISOString(),
               event_type: 'INCIDENT_INITIALIZED',
-              description: 'Payment outage incident initialized in standby mode.',
+              description: 'Identity outage incident initialized in standby mode.',
               actor: 'SYSTEM',
             },
           ],
@@ -196,7 +198,7 @@ export default function IncidentCommandDashboard() {
         {/* Right Column: Voice AI Radio HUD & Operational Timeline */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
           <VoiceHUD
-            channelName={activeIncident?.incident_id || 'inc-demo-payment-outage'}
+          channelName={activeIncident?.incident_id || 'inc-demo-identity-outage'}
             incidentId={activeIncident?.incident_id}
           />
           <TimelineFeed
@@ -221,7 +223,7 @@ export default function IncidentCommandDashboard() {
         }}
       >
         <span>
-          🚨 <b>TOCSIN Crisis Coordination Engine</b> • Multi-Party Voice AI & Emergency MCP
+          🚨 <b>TOCSIN Crisis Coordination Engine</b> • Multi-Party Voice AI & Incident Intelligence
         </span>
         <span>
           Active Incident: <code>{activeIncident?.incident_id || '---'}</code> • Status: <b>{activeIncident?.status || 'IDLE'}</b> • Severity: <b>{activeIncident?.severity || 'LOW'}</b>

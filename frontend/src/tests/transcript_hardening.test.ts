@@ -108,6 +108,61 @@ describe('1. Agora Stream Decoder Hardening Tests', () => {
   });
 });
 
+describe('1b. Unverified-format fail-safe tests (see docs/agora/RESEARCH.md §5)', () => {
+  // These formats are NOT confirmed by official Agora documentation. The decoder must
+  // fail safe (return null, never throw, never emit guessed text) whenever a payload
+  // does not match one of its three known-empirical patterns.
+
+  test('fails safe on a well-formed JSON object with no recognizable text field', () => {
+    // A plausible alternate vendor/version shape with fields the decoder does not know.
+    const unknownShape = JSON.stringify({
+      event: 'partial_result',
+      confidence: 0.87,
+      alternatives: ['hello world'],
+    });
+    const payload = new Uint8Array(Buffer.from(unknownShape));
+    assert.strictEqual(decodeAgoraStreamMessage(4242, payload), null);
+  });
+
+  test('fails safe on random binary (non-UTF8, non-JSON) frame without throwing', () => {
+    const garbage = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x00, 0x01]);
+    assert.doesNotThrow(() => decodeAgoraStreamMessage(4243, garbage));
+    assert.strictEqual(decodeAgoraStreamMessage(4243, garbage), null);
+  });
+
+  test('fails safe on a deeply nested/unexpected JSON shape (array instead of object)', () => {
+    const arrayPayload = JSON.stringify([{ text: 'should not be read from an array root' }]);
+    const payload = new Uint8Array(Buffer.from(arrayPayload));
+    assert.strictEqual(decodeAgoraStreamMessage(4244, payload), null);
+  });
+
+  test('fails safe on pipe-delimited frame whose base64 segment decodes to non-JSON text', () => {
+    const notJson = Buffer.from('this is not json').toString('base64');
+    const rawFrame = `chunk_999|9|0|${notJson}`;
+    const payload = new Uint8Array(Buffer.from(rawFrame));
+    assert.strictEqual(decodeAgoraStreamMessage(4245, payload), null);
+  });
+
+  test('accepts a plausible search-derived field shape (turn_id/stream_id/words) without asserting it is officially confirmed', () => {
+    // Field names (turn_id, stream_id, message_id, words[]) come from web-search summaries
+    // of Agora's transcript structure, not a directly fetched/confirmed doc page. This
+    // test only documents that the decoder's existing field fallbacks happen to cover
+    // this shape - it is not proof the shape is correct on the wire.
+    const searchDerivedShape = JSON.stringify({
+      turn_id: 7,
+      stream_id: 'stream_abc',
+      message_id: 'msg_abc',
+      words: [{ word: 'evacuate' }, { word: 'sector' }, { word: '4' }],
+      final: true,
+    });
+    const payload = new Uint8Array(Buffer.from(searchDerivedShape));
+    const result = decodeAgoraStreamMessage(1234, payload);
+    assert.ok(result !== null);
+    assert.strictEqual(result.text, 'evacuate sector 4');
+    assert.strictEqual(result.isFinal, true);
+  });
+});
+
 describe('2. Utterance Aggregator & Streaming Invariant Tests', () => {
   test('streaming partial sequence updates activePartial in place and does not append to finalized list', () => {
     const aggregator = new UtteranceAggregator();
