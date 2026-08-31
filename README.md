@@ -4,6 +4,29 @@ Tocsin is a real-time AI Incident Commander platform designed for live incident 
 
 ---
 
+## Current status
+
+The root `/` dashboard (evidence record, conflict resolution, provenance, handoff
+briefs, human approval workflow) is verified locally and, per the capability matrix
+below, mostly `VERIFIED LOCALLY` or `VERIFIED LIVE`. It is the primary way to see
+Tocsin actually work.
+
+`/voice-test` (the standalone voice-room chat interface) has real, diagnosed gaps as
+of 2026-08-31 live browser testing — typed messages don't currently produce a visible
+Tocsin reply, and its right-hand "Incident Command" tiles are driven by a client-side
+simulator disconnected from the real backend. These are **not fixed yet**. Full detail,
+root cause, and fix plan for every open item live in **[`TODO.md`](TODO.md)** — that
+file is the single source of truth for pending work and is kept up to date after every
+work session, so check it rather than assuming this README's capability matrix implies
+everything is wired end-to-end.
+
+Additional research and strategy docs, also kept current:
+- [`docs/agora/RESEARCH.md`](docs/agora/RESEARCH.md) — what's confirmed vs. unverified against official Agora docs.
+- [`docs/strategy/PRODUCT_STRATEGY.md`](docs/strategy/PRODUCT_STRATEGY.md) — problem-statement coverage matrix.
+- [`docs/strategy/COMPETITIVE_ANALYSIS.md`](docs/strategy/COMPETITIVE_ANALYSIS.md) / [`INNOVATION_ROADMAP.md`](docs/strategy/INNOVATION_ROADMAP.md) — positioning and what to build next.
+
+---
+
 ## 🎯 Capability Verification Matrix
 
 Every capability in this repository is classified under one of six explicit statuses:
@@ -13,15 +36,18 @@ Every capability in this repository is classified under one of six explicit stat
 | **Deterministic Demo Mode (Identity Outage)** | `VERIFIED LOCALLY` | End-to-end scenario covering incident creation, 4 roles, fact/hypothesis extraction, conflict detection, action assignment, human approval/rejection, overdue check, and final summary. Verified by `test_demo_scenario.py`. |
 | **PostgreSQL Persistence & Migrations** | `VERIFIED LOCALLY` | Real `postgres:16-alpine` Docker container tested. All 13 schema tables migrated, full entity persistence verified, and multi-process restart survival verified by `test_postgresql_live.py`. |
 | **SQLite Fallback Database** | `VERIFIED LOCALLY` | Isolated local/test database fallback tested with clean fixtures via `test_intelligence.py`. |
-| **Gemini LLM Structured Extraction** | `VERIFIED LIVE` / `VERIFIED LOCALLY` | Uses modern `google-genai` SDK (`gemini-2.5-flash`). Returns `extraction_method: "llm"` when quota is available. Automatically falls back to `extraction_method: "heuristic_fallback"` with status `UNVERIFIED` on 429 quota exhaustion or missing key. Verified by `test_gemini_extraction_live.py`. |
-| **Canonical Voice Ingestion Pipeline** | `VERIFIED LOCALLY` | Agora & Web Speech transcripts post to `/api/incidents/{id}/observations` → structured extraction → PostgreSQL persistence → WebSocket broadcast → UI panels. |
-| **Contradictory Claim Conflict Detection** | `VERIFIED LOCALLY` | Semantic entity matching and polarity/numeric divergence engine flags opposing statements (e.g., "100% pool exhaustion" vs "normal 22% CPU") and generates recommended verification actions. |
+| **Gemini LLM Structured Extraction** | `VERIFIED LIVE` | Uses `google-genai` SDK. Model ID is configurable via `GEMINI_EXTRACTION_MODEL` (default `gemini-3.7-flash`, released 2026-08-13) — Google retires model IDs on its own schedule, and a retired ID 404s into the heuristic fallback silently. `gemini-2.5-flash` was found retired live 2026-08-31; `gemini-3.6-flash` worked, then hit a 429 quota exhaustion the same day; `gemini-3.7-flash` is the current live-verified default. Verified live: `"I think the authentication database might be overloaded, but I have not confirmed that yet"` → `extraction_method: "llm"`, category `HYPOTHESIS`, evidence status `ASSUMED`. Falls back to `heuristic_fallback` (always `UNVERIFIED`, never `CONFIRMED`) on quota exhaustion, missing key, or model retirement. |
+| **Canonical Voice Ingestion Pipeline (`/` dashboard)** | `VERIFIED LOCALLY` | Transcripts posted to `/api/incidents/{id}/observations` → structured extraction → PostgreSQL persistence → WebSocket broadcast → UI panels. This is the real pipeline and is what the root `/` dashboard uses. **`/voice-test`'s own text command box does not reliably reach this pipeline yet — see `TODO.md` items 1–3.** |
+| **Contradictory Claim Conflict Detection** | `VERIFIED LOCALLY` | Flags opposing health polarity or numeric divergence >20% on the same entity, and generates a recommended verification action. Deliberately conservative: complementary detail about one entity ("returning 503" + "elevated latency") is **not** reported as a contradiction. 7 precision unit tests in `test_evidence_lifecycle.py`. |
+| **Evidence Resolution Lifecycle** | `VERIFIED LOCALLY` | Contradictions, information gaps, and risks are closable by a named human with stated evidence (`POST .../conflicts/{id}/resolve`, `.../missing-info/{id}/resolve`, `.../risks/{id}/resolve`). Resolution is terminal (409 on re-resolve) and requires both `resolved_by` and `resolution_notes`. Tocsin records *that* a human settled a contradiction — never *which side was right*. `test_evidence_lifecycle.py`. |
+| **Claim Provenance Trace** | `VERIFIED LOCALLY` | `GET .../claims/{id}/provenance` returns claim → originating observation → raw utterance → speaker → role and whether that role was declared or inferred → extraction method + caveat → related conflicts. Answers "why do we believe this?" without re-reading the transcript. |
+| **Shift Handoff Brief** | `VERIFIED LOCALLY` | `GET .../handoff` produces a written record and a spoken script from the same evidence, ordered by what an incoming commander needs: confirmed, reported-only, unresolved contradictions, open questions, ownership (overdue flagged), remaining risks, plus disclosure of what share of the record came from heuristic fallback. Text only — **not broadcast as audio**. |
 | **Human Approval & Action Safety** | `VERIFIED LOCALLY` | Strict state machine: `PENDING_APPROVAL` → `APPROVED` (requires `TOCSIN_COMMANDER_KEY`, HTTP 503 if missing). Rejections are terminal (`REJECTED`). Duplicate approvals return HTTP 409 Conflict. `/resolve` is auth-gated. |
 | **Overdue Action Follow-up & Reminders** | `VERIFIED LOCALLY` | Action items track `due_at` and `owner_name`. Background in-process scheduler and `/check-reminders` endpoint emit `FOLLOWUP_REMINDER` events with 60-second cooldown spam throttling. |
 | **Evidence-Bounded Final Summary** | `VERIFIED LOCALLY` | Generates structured incident summaries distinguishing confirmed facts from unverified intelligence, with mandatory AI root-cause disclaimer. |
-| **Spoken Audio Summary Broadcast** | `IMPLEMENTED — CREDENTIAL REQUIRED` | Text synthesis is implemented and verified. Live voice broadcasting into active Agora channel requires configured Agora App ID / Certificate credentials and active room session. |
+| **Spoken Audio Summary Broadcast** | `NOT IMPLEMENTED` (text only) | Summary and handoff **text** is generated from persisted state and marked ready for TTS. Tocsin does **not** speak it into the room: Agora's `/speak` broadcast endpoint exists but is not called by this build. Previously labeled "credential required"; that overstated it — the audio path is not wired at all. See `docs/strategy/INNOVATION_ROADMAP.md` §2.1. |
 | **Agora ConvoAI Gemini Live Agent** | `IMPLEMENTED — CREDENTIAL REQUIRED` | Agora RTC token generation and agent start/stop lifecycle implemented (`test_agora_token.py`). Live voice room requires active Agora credentials and microphone access. Agent status is read from Tocsin's own local session registry (`/api/agora/local-agent-session/{channel}`), not a live Agora query — see `docs/agora/RESEARCH.md`. |
-| **MCP Tool Calling During Live Voice Sessions** | `MOCK/DEMO ONLY` | The 13 emergency-intelligence tools are real and independently callable (`mock-services/server.py`), but wiring them into a live Agora Gemini Live voice agent (`properties.mllm.mcp_servers`) is **not confirmed by official Agora documentation** — Agora's docs describe `properties.llm.mcp_servers` instead, a pipeline MLLM mode disables. No live session has confirmed the voice agent actually invoking a tool this way. See `docs/agora/RESEARCH.md` §4. |
+| **MCP Tool Calling During Live Voice Sessions** | `NOT IMPLEMENTED` (confirmed unsupported) | The 13 emergency-intelligence tools are real and independently callable (`mock-services/server.py`). But Agora's official release notes state `mcp_servers` is supported **only under `llm`, not under `mllm`** — and Tocsin uses the `mllm` (Gemini Live) pipeline. The field Tocsin sends is not a supported field, so the voice agent cannot invoke these tools mid-call. Enabling this requires migrating to the `llm` pipeline. See `docs/agora/RESEARCH.md` §4. |
 | **Slack Webhook Integration** | `VERIFIED LOCALLY` (Contract) / `IMPLEMENTED — CREDENTIAL REQUIRED` (Live) | Local HTTP webhook contract tested for 200 delivery (`LIVE_EXTERNAL`), 500 failure handling, timeout handling, and no-credentials mock fallback (`MOCK_FALLBACK`). Live Slack delivery requires `SLACK_WEBHOOK_URL` and has not been exercised against a real Slack workspace in this repository's verified runs. |
 | **PagerDuty / Jira / Production Cloud Tooling** | `MOCK/DEMO ONLY` | Simulated emergency MCP tools and mitigation actions for the identity-outage demo scenario. No live PagerDuty, Jira, or cloud-provider execution exists in this repository. |
 

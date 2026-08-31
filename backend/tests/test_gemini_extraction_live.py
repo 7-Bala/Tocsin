@@ -18,12 +18,12 @@ from app.engine.extraction import extract_intelligence
 @pytest.mark.asyncio
 async def test_live_gemini_extraction_or_graceful_quota_fallback():
     """Live test calling Gemini API: validates LLM extraction if quota available, or fallback if 429/empty."""
-    utterance = "Ravi reports that the payment gateway is returning 500 errors to 30% of users, and I will verify database connection pools within 10 minutes."
+    utterance = "Ravi reports that the identity service is returning 500 errors to 30% of users, and I will verify database connection pools within 10 minutes."
     claim_set = await extract_intelligence(utterance, speaker="Ravi")
 
     assert claim_set.extraction_method in ("llm", "heuristic_fallback")
     assert len(claim_set.claims) >= 1
-    assert any("payment" in c.entity.lower() or "gateway" in c.entity.lower() for c in claim_set.claims)
+    assert any("identity" in c.entity.lower() or "service" in c.entity.lower() for c in claim_set.claims)
 
     if claim_set.extraction_method == "llm":
         # Full LLM extraction verification

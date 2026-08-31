@@ -13,8 +13,7 @@ export type EventType =
   | 'STRANDED_GROUP'
   | 'POWER_FAILURE'
   | 'STRUCTURAL_HAZARD'
-  | 'TECHNICAL_INCIDENT'
-  | 'PAYMENT_OUTAGE';
+  | 'TECHNICAL_INCIDENT';
 
 export type HypothesisStatus = 'PROPOSED' | 'CONFIRMED' | 'DISPROVEN';
 
@@ -184,6 +183,7 @@ export interface ConflictRecord {
   recommended_action?: string | null;
   created_at: string;
   resolved_at?: string | null;
+  resolved_by?: string | null;
   resolution_notes?: string | null;
 }
 
@@ -194,6 +194,9 @@ export interface MissingInfo {
   recommended_action?: string | null;
   status: EvidenceStatus | string;
   created_at: string;
+  resolved_at?: string | null;
+  resolved_by?: string | null;
+  resolution_notes?: string | null;
 }
 
 export interface UnresolvedRisk {
@@ -203,6 +206,9 @@ export interface UnresolvedRisk {
   severity?: SeverityLevel;
   status: EvidenceStatus | string;
   created_at: string;
+  resolved_at?: string | null;
+  resolved_by?: string | null;
+  resolution_notes?: string | null;
 }
 
 export interface IncidentMetrics {

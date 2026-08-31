@@ -26,6 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 from app.api.agora import router as agora_router
 from app.api.demo import router as demo_router
+from app.api.evidence import router as evidence_router
 from app.api.incidents import router as incidents_router
 from app.api.observations import router as observations_router
 from app.api.participants import router as participants_router
@@ -125,6 +126,7 @@ app.include_router(agora_router)
 app.include_router(observations_router)
 app.include_router(participants_router)
 app.include_router(summaries_router)
+app.include_router(evidence_router)
 
 
 @app.get("/", tags=["General"])

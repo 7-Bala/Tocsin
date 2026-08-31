@@ -38,7 +38,10 @@ class EventType(str, Enum):
     POWER_FAILURE = "POWER_FAILURE"
     STRUCTURAL_HAZARD = "STRUCTURAL_HAZARD"
     TECHNICAL_INCIDENT = "TECHNICAL_INCIDENT"
-    PAYMENT_OUTAGE = "PAYMENT_OUTAGE"
+    # NOTE: PAYMENT_OUTAGE was removed deliberately. The presentation scenario is a
+    # customer login / identity outage; a payment-gateway type in the enum invites
+    # stale scenario labels back into the UI. Technical incidents use
+    # TECHNICAL_INCIDENT.
 
 
 # ─── Action Approval State Machine ──────────────────────────────────────────
@@ -194,7 +197,10 @@ class ConflictRecord(BaseModel):
     status: EvidenceStatus = EvidenceStatus.OPEN
     recommended_action: str | None = None
     created_at: str = Field(default_factory=get_utc_now)
+    # Resolution is human-attributed. Tocsin detects contradictions; it never decides
+    # which side was right. RESOLVED is terminal — see resolve_conflict in incidents.py.
     resolved_at: str | None = None
+    resolved_by: str | None = None
     resolution_notes: str | None = None
 
 
@@ -206,6 +212,9 @@ class MissingInfo(BaseModel):
     recommended_action: str | None = None
     status: EvidenceStatus = EvidenceStatus.OPEN
     created_at: str = Field(default_factory=get_utc_now)
+    resolved_at: str | None = None
+    resolved_by: str | None = None
+    resolution_notes: str | None = None
 
 
 class UnresolvedRisk(BaseModel):
@@ -216,6 +225,30 @@ class UnresolvedRisk(BaseModel):
     severity: SeverityLevel = SeverityLevel.MEDIUM
     status: EvidenceStatus = EvidenceStatus.OPEN
     created_at: str = Field(default_factory=get_utc_now)
+    resolved_at: str | None = None
+    resolved_by: str | None = None
+    resolution_notes: str | None = None
+
+
+class ResolveEvidenceRequest(BaseModel):
+    """
+    Close an open evidence item (conflict, information gap, or risk).
+
+    `resolved_by` and `resolution_notes` are both required: an evidence record that
+    records *that* something was settled without recording *who* settled it and on
+    *what basis* is not an audit trail. This mirrors the commander-attribution
+    requirement on critical action approval.
+    """
+    resolved_by: str = Field(
+        min_length=2,
+        max_length=64,
+        description="Name or ID of the human who resolved this item.",
+    )
+    resolution_notes: str = Field(
+        min_length=3,
+        max_length=1024,
+        description="The evidence or reasoning that settled this item.",
+    )
 
 
 class ActionItem(BaseModel):

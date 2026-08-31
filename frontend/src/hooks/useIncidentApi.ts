@@ -269,3 +269,54 @@ export async function completeActionItem(
   }
   return res.json();
 }
+
+// ── Evidence lifecycle ────────────────────────────────────────────────────────
+// Closing an evidence item always requires WHO settled it and ON WHAT BASIS.
+// Resolution is terminal server-side; a second attempt returns HTTP 409.
+
+export type EvidenceKind = 'conflicts' | 'missing-info' | 'risks';
+
+export async function resolveEvidenceItem(
+  incidentId: string,
+  kind: EvidenceKind,
+  itemId: string,
+  resolvedBy: string,
+  resolutionNotes: string
+): Promise<any> {
+  const res = await fetch(
+    `${API_BASE_URL}/api/incidents/${incidentId}/${kind}/${itemId}/resolve`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resolved_by: resolvedBy, resolution_notes: resolutionNotes }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to resolve evidence item (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
+export async function fetchClaimProvenance(
+  incidentId: string,
+  claimId: string
+): Promise<any> {
+  const res = await fetch(
+    `${API_BASE_URL}/api/incidents/${incidentId}/claims/${claimId}/provenance`
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to load provenance (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
+export async function fetchHandoffBrief(incidentId: string): Promise<any> {
+  const res = await fetch(`${API_BASE_URL}/api/incidents/${incidentId}/handoff`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to generate handoff brief (HTTP ${res.status})`);
+  }
+  return res.json();
+}

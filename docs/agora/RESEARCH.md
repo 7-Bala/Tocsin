@@ -147,19 +147,60 @@ specifically inside the `mllm` (Gemini Live) object.
   `mllm.enable` is true, **it is not confirmed that `mllm.mcp_servers` is a real,
   functioning field at all** for the Gemini Live path Tocsin uses.
 
-**Conclusion: `NOT CONFIRMED BY OFFICIAL DOCS — flagged for the user.`** This is the
-single most important finding in this pass. It does not mean MCP tool-calling is
-broken — Agora's docs may simply not have caught up with a newer `mllm.mcp_servers`
-capability, or the field may be silently ignored by Agora's backend without erroring.
-But right now there is no official documentation confirming that wiring MCP tools
-under `mllm` (as opposed to the documented `llm`) does anything for a Gemini Live
-agent. This can only be resolved with a live, credentialed `/start-agent` call against
-real Agora + Gemini credentials while watching whether the agent actually invokes the
-13 MCP tools listed in `DEFAULT_EMERGENCY_PROMPT` — that test was not run in this pass
-and requires `AGORA_APP_ID`, `AGORA_APP_CERTIFICATE`, `AGORA_CUSTOMER_ID`,
-`AGORA_CUSTOMER_SECRET`, `GEMINI_API_KEY`, and a reachable `MCP_SERVER_PUBLIC_URL`, all
-of which are `IMPLEMENTED — CREDENTIAL REQUIRED` per the project README's existing
-convention, not verified here.
+### UPDATE 2026-08-31 — now CONFIRMED NEGATIVE by official docs
+
+A second research pass against the official Conversational AI release notes
+(`docs.agora.io/en/conversational-ai/overview/release-notes`, fetched) resolved this
+question. The release-note feature matrix states directly:
+
+> `mcp_servers` is supported only under `llm`, not under `mllm` (introduced in v2.4
+> for LLM integration).
+
+Combined with Agora's separately-documented statement that enabling MLLM disables the
+ASR/LLM/TTS pipeline, the conclusion is no longer ambiguous:
+
+**`properties.mllm.mcp_servers` is not a supported field. Tocsin's MCP tools cannot be
+invoked by the Gemini Live voice agent through the current wiring.** Status:
+`UNVERIFIED` upgraded to **`NOT SUPPORTED — CONFIRMED BY OFFICIAL DOCS`**.
+
+Consequences, all acted on in the code:
+
+- The live voice prompt no longer tells the model it has 13 tools available. It is now
+  instructed to only claim a tool result when a call actually returned one.
+- `/start-agent` returns `mcp_tool_calling_status` labeling this MOCK/DEMO ONLY.
+- README lists in-call MCP tool execution as `MOCK/DEMO ONLY`.
+
+**The MCP tools themselves are not wasted work.** They are real code calling real
+public APIs and remain callable directly and from `mock-services/server.py`. What is
+not available is *the voice agent invoking them mid-call over Gemini Live*.
+
+**Path to actually enabling in-call tools (not implemented):** switch from the `mllm`
+(Gemini Live end-to-end) pipeline to the `llm` pipeline (separate ASR + LLM + TTS),
+where `llm.mcp_servers` + `advanced_features.enable_tools` are documented and
+supported. That is a material architecture change — it trades Gemini Live's
+low-latency end-to-end audio for a composed pipeline — and should not be attempted
+without a live credentialed session to verify against.
+
+### Other findings from the 2026-08-31 release-notes pass
+
+Current latest version: **v2.11 (2026-08-11)**. Relevant capabilities Tocsin does not
+yet use, all `OFFICIAL DOCS ONLY` (documented, not exercised here):
+
+| Capability | Version | Relevance to Tocsin |
+|---|---|---|
+| Transcripts delivered as **RTM messages** | v2.9 | **Important.** Tocsin reads transcripts from the RTC `stream-message` event. Agora now documents agent state and transcript delivery over RTM. The current decoder may be reading a legacy path — this may explain why its wire format could not be found in current docs (§5). |
+| "Send a custom instruction" (`/think`) | v2.6 | Would let Tocsin push evidence-record context into the live agent mid-conversation. |
+| "Broadcast a message using TTS" (`/speak`) | — | **Directly closes problem-statement item 11** (spoken summaries). Tocsin currently generates summary text but never speaks it into the room. Endpoint exists in the docs index; exact schema could not be extracted via WebFetch. |
+| Paginated conversation-turn / history API | v2.5, v2.7 | A server-side transcript source that does not depend on the empirical client decoder. |
+| Agent state callbacks (listening/thinking/speaking) | v2.6, v2.9 | Honest UI state instead of inferred activity. |
+| `opt_out` session data retention control | v2.8 | Relevant to the privacy/consent obligations noted in the project brief. |
+| Avatars, filler phrases, presets | v2.5–v2.10 | Deliberately **NOT USED** — cosmetic for an incident-response tool. |
+
+Original pre-update analysis is preserved below for provenance.
+
+**Superseded conclusion (2026-08-30):** at that time this was recorded as
+`NOT CONFIRMED BY OFFICIAL DOCS` with the note that Agora's docs might simply not have
+caught up. The release-note matrix has since settled it in the negative.
 
 ## 5. Frontend Web SDK usage (`agora-rtc-sdk-ng@4.24.7`)
 
@@ -285,7 +326,10 @@ carries that status, because no live credentialed run was performed in this pass
 | Local agent session lookup (`/api/agora/local-agent-session`) | `VERIFIED IN CODE` | This one only claims to be local bookkeeping (an in-memory dict read), which was exercised indirectly by the existing mocked `/start-agent` and `/stop-agent` tests that populate/clear `ACTIVE_AGENTS`. It makes no live Agora claim, so there is nothing further to verify. |
 | Real Agora "Query agent status" REST endpoint | `NOT USED` | Its existence is referenced in Agora's own docs (search-result title only); its exact URL/schema could not be confirmed via `WebFetch` in this pass, and per project policy it was not implemented against a guessed contract. Not called anywhere in this codebase. |
 | Gemini Live `mllm` params, voice enum, `agora_vad` turn detection | `OFFICIAL DOCS ONLY` | Confirmed to match `docs.agora.io/en/conversational-ai/models/mllm/gemini` field-for-field. Not run against a live Gemini Live session in this pass. |
-| `mllm.mcp_servers` tool-calling wiring | `UNVERIFIED` | Official docs describe `llm.mcp_servers`, not `mllm.mcp_servers`; the Gemini Live doc page does not mention tool-calling at all. Now explicitly labeled MOCK/DEMO ONLY in the prompt, API response, and README. Only a live session can resolve this either way. |
+| `mllm.mcp_servers` tool-calling wiring | `NOT USED` (confirmed unsupported) | **Resolved 2026-08-31**: official release notes state `mcp_servers` is supported only under `llm`, not `mllm`. The field Tocsin sends is not a supported field. Labeled MOCK/DEMO ONLY in prompt, API response, and README. Enabling real in-call tools requires migrating to the `llm` pipeline. |
+| Agora `/speak` TTS broadcast (spoken summaries) | `OFFICIAL DOCS ONLY` | Endpoint documented; not called by Tocsin. Closing this would complete problem-statement item 11. |
+| Agora `/think` custom instruction | `OFFICIAL DOCS ONLY` | Documented; not called by Tocsin. |
+| Transcript delivery over RTM (v2.9) | `OFFICIAL DOCS ONLY` | Documented; Tocsin still reads the RTC `stream-message` path. |
 | Emergency-intelligence MCP tool server (`mock-services/server.py`, 13 tools) | `CREDENTIAL REQUIRED` | The tool implementations themselves are real code calling real public APIs (USGS, NASA FIRMS, NOAA, OSM, Open-Meteo, GDACS, Copernicus CAMS) and a real/mock Slack path — this is independent of whether Agora ever invokes them via MCP. Live behavior for external-API-backed tools depends on those APIs; `notify_stakeholders` specifically requires `SLACK_WEBHOOK_URL` for live delivery. |
 | Web SDK `stream-message` event subscription | `OFFICIAL DOCS ONLY` | The event itself is documented on Agora's Web SDK API reference. Confirmed present in code; not exercised against a live stream in this pass. |
 | `agoraStreamDecoder.ts` wire-format parsing (pipe/base64/JSON patterns) | `UNVERIFIED` | No official Agora page confirms this exact wire format. Now covered by fixture tests (`transcript_hardening.test.ts`) proving deterministic, fail-safe (`null`) behavior on anything that doesn't match, but the format itself remains empirical. |

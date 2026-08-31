@@ -32,7 +32,7 @@ async def test_observation_ingestion_and_claim_extraction():
         # Create incident
         inc_res = await client.post(
             "/api/incidents",
-            json={"title": "Payment Degradation Incident", "event_type": "TECHNICAL_INCIDENT"},
+            json={"title": "Identity Service Degradation Incident", "event_type": "TECHNICAL_INCIDENT"},
         )
         assert inc_res.status_code == 201
         inc_id = inc_res.json()["incident_id"]
@@ -41,7 +41,7 @@ async def test_observation_ingestion_and_claim_extraction():
         obs_res = await client.post(
             f"/api/incidents/{inc_id}/observations",
             json={
-                "raw_utterance": "Ravi says the payment gateway is returning 500 errors to 30% of users.",
+                "raw_utterance": "Ravi says the identity service is returning 500 errors to 30% of users.",
                 "speaker": "Ravi",
                 "source": "voice_transcript",
             },
@@ -75,7 +75,7 @@ async def test_conflict_detection_opposing_claims():
         await client.post(
             f"/api/incidents/{inc_id}/observations",
             json={
-                "raw_utterance": "Frontend engineer reports the payment gateway is down and failing.",
+                "raw_utterance": "Frontend engineer reports the identity service is down and failing.",
                 "speaker": "Alice",
                 "source": "voice_transcript_alice",
             },
@@ -85,7 +85,7 @@ async def test_conflict_detection_opposing_claims():
         obs_2 = await client.post(
             f"/api/incidents/{inc_id}/observations",
             json={
-                "raw_utterance": "Database engineer says the payment gateway is up and healthy in logs.",
+                "raw_utterance": "Database engineer says the identity service is up and healthy in logs.",
                 "speaker": "Bob",
                 "source": "voice_transcript_bob",
             },

@@ -59,6 +59,45 @@ def _json_loads_safe(val: Any) -> Any:
         return val
 
 
+# Tables whose rows may be closed via the shared evidence-resolution helper.
+# Whitelisted because the table name is interpolated into SQL: only these three
+# constants may ever reach that interpolation, never caller-supplied input.
+_RESOLVABLE_EVIDENCE_TABLES = frozenset({"missing_info", "unresolved_risks"})
+
+
+async def _resolve_evidence_row(
+    table: str, row_id: str, resolved_by: str, resolution_notes: str, resolved_at: str
+) -> None:
+    """
+    Mark an evidence row RESOLVED with human attribution.
+
+    Shared by MissingInfoRepository and UnresolvedRiskRepository, which have identical
+    resolution columns (added in migration 002). ConflictRepository has its own copy
+    because its 001 schema already carried resolved_at/resolution_notes.
+    """
+    if table not in _RESOLVABLE_EVIDENCE_TABLES:
+        raise ValueError(f"Refusing to resolve rows in non-whitelisted table: {table!r}")
+
+    if get_db_type() == "postgresql":
+        await execute(
+            f"""
+            UPDATE {table}
+            SET status = 'RESOLVED', resolved_by = $2, resolution_notes = $3, resolved_at = $4
+            WHERE id = $1
+            """,
+            row_id, resolved_by, resolution_notes, _to_dt(resolved_at),
+        )
+    else:
+        await execute(
+            f"""
+            UPDATE {table}
+            SET status = 'RESOLVED', resolved_by = ?, resolution_notes = ?, resolved_at = ?
+            WHERE id = ?
+            """,
+            resolved_by, resolution_notes, resolved_at, row_id,
+        )
+
+
 # ─── Incident Repository ─────────────────────────────────────────────────────
 
 class IncidentRepository:
@@ -373,6 +412,29 @@ class ConflictRepository:
                 conflict.recommended_action, conflict.created_at,
             )
 
+    async def resolve(
+        self, conflict_id: str, resolved_by: str, resolution_notes: str, resolved_at: str
+    ) -> None:
+        """Close a conflict with human attribution. Tocsin never self-resolves."""
+        if get_db_type() == "postgresql":
+            await execute(
+                """
+                UPDATE conflicts
+                SET status = 'RESOLVED', resolved_by = $2, resolution_notes = $3, resolved_at = $4
+                WHERE id = $1
+                """,
+                conflict_id, resolved_by, resolution_notes, _to_dt(resolved_at),
+            )
+        else:
+            await execute(
+                """
+                UPDATE conflicts
+                SET status = 'RESOLVED', resolved_by = ?, resolution_notes = ?, resolved_at = ?
+                WHERE id = ?
+                """,
+                resolved_by, resolution_notes, resolved_at, conflict_id,
+            )
+
 
 # ─── ActionItem Repository ────────────────────────────────────────────────────
 
@@ -489,6 +551,12 @@ class MissingInfoRepository:
                 item.created_at,
             )
 
+    async def resolve(
+        self, info_id: str, resolved_by: str, resolution_notes: str, resolved_at: str
+    ) -> None:
+        """Close an information gap with the answer and who supplied it."""
+        await _resolve_evidence_row("missing_info", info_id, resolved_by, resolution_notes, resolved_at)
+
 
 # ─── UnresolvedRisk Repository ────────────────────────────────────────────────
 
@@ -518,6 +586,12 @@ class UnresolvedRiskRepository:
                 item.status.value if hasattr(item.status, "value") else str(item.status),
                 item.created_at,
             )
+
+    async def resolve(
+        self, risk_id: str, resolved_by: str, resolution_notes: str, resolved_at: str
+    ) -> None:
+        """Close a risk with the mitigation or reasoning that retired it."""
+        await _resolve_evidence_row("unresolved_risks", risk_id, resolved_by, resolution_notes, resolved_at)
 
 
 # ─── Summary Repository ───────────────────────────────────────────────────────

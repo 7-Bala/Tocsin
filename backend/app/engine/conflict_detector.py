@@ -10,9 +10,10 @@ a verification step for the Incident Commander to assess.
 """
 
 import logging
+import re
 from typing import Any
 
-from app.engine.extraction import HEALTHY_VALUES, UNHEALTHY_VALUES, normalize_value
+from app.engine.extraction import normalize_value
 
 logger = logging.getLogger("tocsin.conflict_detector")
 
@@ -30,11 +31,39 @@ def _entities_match(ent_a: str, ent_b: str) -> bool:
     return False
 
 
+NUMERIC_DIVERGENCE_THRESHOLD = 0.2
+
+
 def _values_conflict(val_a: str, val_b: str) -> bool:
     """
     Return True if two claim values for the same entity are semantically opposing.
-    Uses structured semantic normalization (synonym groups), not regex heuristics.
+
+    Deliberately CONSERVATIVE: two statements about the same entity are usually
+    complementary, not contradictory. During a live incident, several people describe
+    the same component from different angles ("login api returning 503" and
+    "login api at 40% error rate" are the same investigation, not a disagreement).
+
+    A conflict is raised ONLY on positive evidence of contradiction:
+      1. Opposing health polarity (healthy vs unhealthy), or
+      2. Numeric divergence beyond NUMERIC_DIVERGENCE_THRESHOLD on comparable numbers.
+
+    Anything else returns False. Raising a conflict is an interrupt aimed at the
+    Incident Commander; a detector that cries wolf destroys trust in the whole
+    evidence record, which is precisely what Tocsin exists to protect.
     """
+    # Measurement comparison runs FIRST, before normalization. A number is more
+    # specific evidence than the fuzzy healthy/unhealthy bucket, and normalization
+    # would destroy it: "40% error rate" and "5% error rate" both collapse to
+    # "unhealthy" (both contain "error"), so any polarity-first ordering would call
+    # them equal and silently miss a real quantitative disagreement.
+    a_num = _extract_measurement(val_a)
+    b_num = _extract_measurement(val_b)
+    if a_num is not None and b_num is not None:
+        max_val = max(abs(a_num), abs(b_num))
+        if max_val == 0:
+            return False
+        return abs(a_num - b_num) / max_val > NUMERIC_DIVERGENCE_THRESHOLD
+
     norm_a = normalize_value(val_a)
     norm_b = normalize_value(val_b)
 
@@ -42,38 +71,45 @@ def _values_conflict(val_a: str, val_b: str) -> bool:
     if norm_a == norm_b:
         return False
 
-    # Both in same polarity group → no conflict
-    if norm_a in HEALTHY_VALUES and norm_b in HEALTHY_VALUES:
-        return False
-    if norm_a in UNHEALTHY_VALUES and norm_b in UNHEALTHY_VALUES:
-        return False
+    a_healthy = norm_a == "healthy"
+    b_healthy = norm_b == "healthy"
+    a_unhealthy = norm_a == "unhealthy"
+    b_unhealthy = norm_b == "unhealthy"
 
-    # Opposing polarity groups → conflict
-    if (norm_a in HEALTHY_VALUES and norm_b in UNHEALTHY_VALUES) or \
-       (norm_a in UNHEALTHY_VALUES and norm_b in HEALTHY_VALUES):
+    # Opposing polarity groups → genuine contradiction
+    if (a_healthy and b_unhealthy) or (a_unhealthy and b_healthy):
         return True
 
-    # Numeric comparison for metric values (e.g., "40%" vs "5%")
-    a_num = _extract_number(val_a)
-    b_num = _extract_number(val_b)
-    if a_num is not None and b_num is not None:
-        max_val = max(abs(a_num), abs(b_num))
-        if max_val > 0 and abs(a_num - b_num) / max_val > 0.2:
-            return True
-
-    # Values are clearly different strings → flag as potential conflict
-    if norm_a != norm_b and len(norm_a) > 0 and len(norm_b) > 0:
-        return True
-
+    # No positive evidence of contradiction → treat as complementary evidence.
+    # (Previously this fell through to "different strings ⇒ conflict", which made
+    # every additional detail about an entity look like a disagreement.)
     return False
 
 
-def _extract_number(val: str) -> float | None:
-    """Extract a numeric value from a claim value string."""
-    import re
-    m = re.search(r"(\d+(?:\.\d+)?)", val)
+# A number is treated as a MEASUREMENT only when it stands alone as a quantity —
+# optionally followed by a unit. Digits welded into an identifier ("us-east-1", "s3",
+# "http/2", "v2") are names, not measurements, and comparing them produces nonsense
+# conflicts like "us-east-1 contradicts eu-west-2".
+_MEASUREMENT_RE = re.compile(
+    r"(?<![\w./-])(\d+(?:\.\d+)?)\s*(%|percent|ms|s\b|sec|secs|seconds|min|mins|minutes|"
+    r"rps|qps|gb|mb|kb|connections?|requests?|errors?|users?|nodes?|pods?|replicas?)?"
+    r"(?![\w.-]*[a-z])",
+    re.IGNORECASE,
+)
+
+
+def _extract_measurement(val: str) -> float | None:
+    """
+    Extract a comparable measurement from a claim value, or None if the string holds
+    no standalone quantity. Returning None means "not numerically comparable" — the
+    caller then falls back to polarity comparison rather than inventing a comparison.
+    """
+    m = _MEASUREMENT_RE.search(val)
     if m:
-        return float(m.group(1))
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
     return None
 
 

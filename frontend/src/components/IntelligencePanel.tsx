@@ -6,8 +6,18 @@ import { ConflictsPanel } from './ConflictsPanel';
 import { ActionItemsPanel } from './ActionItemsPanel';
 import { ParticipantsPanel } from './ParticipantsPanel';
 import { FinalSummaryPanel } from './FinalSummaryPanel';
+import { HandoffPanel } from './HandoffPanel';
 
-export const IntelligencePanel: React.FC<{ incident: IncidentState | null }> = ({ incident }) => {
+interface IntelligencePanelProps {
+  incident: IncidentState | null;
+  /** Called after an evidence item is resolved so the parent can refetch state. */
+  onEvidenceResolved?: () => void;
+}
+
+export const IntelligencePanel: React.FC<IntelligencePanelProps> = ({
+  incident,
+  onEvidenceResolved,
+}) => {
   const [activeTab, setActiveTab] = useState<'all' | 'conflicts' | 'actions' | 'facts' | 'summary'>('all');
 
   if (!incident) return null;
@@ -178,7 +188,13 @@ export const IntelligencePanel: React.FC<{ incident: IncidentState | null }> = (
       {/* ── Specialized Intelligence Panels Grid ── */}
       {(activeTab === 'all' || activeTab === 'conflicts' || activeTab === 'actions') && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {(activeTab === 'all' || activeTab === 'conflicts') && <ConflictsPanel conflicts={conflicts} />}
+          {(activeTab === 'all' || activeTab === 'conflicts') && (
+            <ConflictsPanel
+              conflicts={conflicts}
+              incidentId={incident.incident_id}
+              onResolved={onEvidenceResolved}
+            />
+          )}
           {(activeTab === 'all' || activeTab === 'actions') && <ActionItemsPanel actionItems={actionItems} />}
         </div>
       )}
@@ -224,10 +240,13 @@ export const IntelligencePanel: React.FC<{ incident: IncidentState | null }> = (
 
       {/* ── Participants & Final Summary ── */}
       {(activeTab === 'all' || activeTab === 'summary') && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <ParticipantsPanel participants={participants} />
-          <FinalSummaryPanel incidentId={incident.incident_id} initialSummary={incident.final_summary} />
-        </div>
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <ParticipantsPanel participants={participants} />
+            <FinalSummaryPanel incidentId={incident.incident_id} initialSummary={incident.final_summary} />
+          </div>
+          <HandoffPanel incidentId={incident.incident_id} />
+        </>
       )}
     </section>
   );

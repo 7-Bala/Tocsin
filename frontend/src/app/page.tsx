@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { IncidentState } from '@/types/incident';
-import { createIncident, fetchIncidents } from '@/hooks/useIncidentApi';
+import { createIncident, fetchIncident, fetchIncidents } from '@/hooks/useIncidentApi';
 import { useIncidentWebSocket } from '@/hooks/useIncidentWebSocket';
 import { IncidentHeader } from '@/components/IncidentHeader';
 import { MetricsOverview } from '@/components/MetricsOverview';
@@ -17,7 +17,13 @@ export default function IncidentCommandDashboard() {
   const [incidentsList, setIncidentsList] = useState<IncidentState[]>([]);
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [lastUpdated, setLastUpdated] = useState<string>(new Date().toISOString());
+  // Lazily-initialized (not `new Date()` inline): evaluating a timestamp during the
+  // initializer runs it once on the server during SSR and again on the client during
+  // hydration, producing two different values for the same render and triggering a
+  // React hydration mismatch (errors #418/#425). Starting null and setting the real
+  // value in the mount effect keeps the very first client render identical to the
+  // server-rendered HTML.
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
   // WebSocket real-time subscription
   const { incidentState: wsIncident, status: wsStatus, setIncidentState } =
@@ -116,6 +122,18 @@ export default function IncidentCommandDashboard() {
     [setIncidentState]
   );
 
+  // Resolving an evidence item mutates server-side state; refetch so the panels
+  // reflect the new open/settled split even if the WebSocket update is delayed.
+  const refreshActiveIncident = useCallback(async () => {
+    if (!selectedIncidentId) return;
+    try {
+      const fresh = await fetchIncident(selectedIncidentId);
+      handleIncidentUpdated(fresh);
+    } catch {
+      // Non-fatal: the WebSocket broadcast is the primary update path.
+    }
+  }, [selectedIncidentId, handleIncidentUpdated]);
+
   const handleSelectIncident = (id: string) => {
     setSelectedIncidentId(id);
     const target = incidentsList.find((i) => i.incident_id === id);
@@ -161,7 +179,7 @@ export default function IncidentCommandDashboard() {
           </span>
         </div>
         <span className="text-[11px] font-mono text-zinc-400 whitespace-nowrap">
-          Last Synced: {new Date(lastUpdated).toLocaleTimeString()}
+          Last Synced: {lastUpdated ? new Date(lastUpdated).toLocaleTimeString() : '—'}
         </span>
       </div>
 
@@ -172,7 +190,10 @@ export default function IncidentCommandDashboard() {
       />
 
       {/* Shared Intelligence Record */}
-      <IntelligencePanel incident={activeIncident} />
+      <IntelligencePanel
+        incident={activeIncident}
+        onEvidenceResolved={refreshActiveIncident}
+      />
 
       {/* 2-Column Responsive Operation Grid */}
       <div

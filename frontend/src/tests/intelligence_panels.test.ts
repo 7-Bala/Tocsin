@@ -12,7 +12,7 @@ import { IncidentState, ConflictRecord, ActionItem, Participant } from '../types
 
 test('ConflictsPanel renders empty state when no conflicts exist', () => {
   const html = renderToStaticMarkup(React.createElement(ConflictsPanel, { conflicts: [] }));
-  assert.match(html, /No active conflicts detected/);
+  assert.match(html, /No contradictions detected/);
 });
 
 test('ConflictsPanel renders active conflicts with opposing claims and recommendations', () => {
@@ -35,7 +35,7 @@ test('ConflictsPanel renders active conflicts with opposing claims and recommend
     },
   ];
   const html = renderToStaticMarkup(React.createElement(ConflictsPanel, { conflicts: mockConflicts }));
-  assert.match(html, /Conflicting Information/);
+  assert.match(html, /Contradictions/);
   assert.match(html, /identity service/);
   assert.match(html, /down/);
   assert.match(html, /healthy/);
@@ -142,11 +142,12 @@ test('IntelligencePanel renders full state suite', () => {
 });
 
 import { DemoModeControl } from '../components/DemoModeControl';
+import { HandoffPanel } from '../components/HandoffPanel';
 
 test('DemoModeControl renders demo banner, scenario trigger, and transcript simulator', () => {
   const html = renderToStaticMarkup(
     React.createElement(DemoModeControl, {
-      activeIncidentId: 'inc-demo-payment-outage',
+      activeIncidentId: 'inc-demo-identity-outage',
       onIncidentUpdated: () => {},
     })
   );
@@ -155,4 +156,78 @@ test('DemoModeControl renders demo banner, scenario trigger, and transcript simu
   assert.match(html, /Scan Overdue Action Reminders/);
   assert.match(html, /Simulate Utterance:/);
   assert.match(html, /Dave Miller/);
+});
+
+
+// ── Evidence lifecycle: resolution surface ───────────────────────────────────
+
+test('ConflictsPanel offers a resolution affordance only when an incidentId is supplied', () => {
+  const conflict: ConflictRecord = {
+    id: 'cfl-res-1',
+    incident_id: 'inc-1',
+    claim_a_id: 'cl-1',
+    claim_b_id: 'cl-2',
+    entity: 'authentication database',
+    value_a: 'overloaded',
+    value_b: 'healthy',
+    source_a: 'voice_dave',
+    source_b: 'voice_priya',
+    speaker_a: 'Dave Miller',
+    speaker_b: 'Priya Sharma',
+    status: 'OPEN',
+    recommended_action: 'Check authoritative telemetry',
+    created_at: new Date().toISOString(),
+  };
+
+  // Read-only render (no incidentId): no resolve control.
+  const readOnly = renderToStaticMarkup(
+    React.createElement(ConflictsPanel, { conflicts: [conflict] })
+  );
+  assert.doesNotMatch(readOnly, /Resolve this contradiction/);
+
+  // Interactive render: resolve control present.
+  const interactive = renderToStaticMarkup(
+    React.createElement(ConflictsPanel, { conflicts: [conflict], incidentId: 'inc-1' })
+  );
+  assert.match(interactive, /Resolve this contradiction/);
+  assert.match(interactive, /Needs human resolution/);
+});
+
+test('ConflictsPanel separates settled contradictions and shows who resolved them', () => {
+  const settled: ConflictRecord = {
+    id: 'cfl-settled-1',
+    incident_id: 'inc-1',
+    claim_a_id: 'cl-1',
+    claim_b_id: 'cl-2',
+    entity: 'authentication database',
+    value_a: 'overloaded',
+    value_b: 'healthy',
+    source_a: 'voice_dave',
+    source_b: 'voice_priya',
+    speaker_a: 'Dave Miller',
+    speaker_b: 'Priya Sharma',
+    status: 'RESOLVED',
+    created_at: new Date().toISOString(),
+    resolved_by: 'Commander Sarah Chen',
+    resolution_notes: 'Dashboard shows connection pool at 22%.',
+  };
+
+  const html = renderToStaticMarkup(
+    React.createElement(ConflictsPanel, { conflicts: [settled], incidentId: 'inc-1' })
+  );
+  // Zero open, so the panel must say so rather than implying unresolved work.
+  assert.match(html, /All detected contradictions have been resolved/);
+  assert.match(html, /Settled contradictions \(1\)/);
+  assert.match(html, /Commander Sarah Chen/);
+  assert.match(html, /connection pool at 22%/);
+});
+
+test('HandoffPanel renders idle state without claiming an audio broadcast', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(HandoffPanel, { incidentId: 'inc-1' })
+  );
+  assert.match(html, /Shift Handoff Brief/);
+  assert.match(html, /Generate handoff/);
+  // Honesty invariant: never imply audio was broadcast.
+  assert.doesNotMatch(html, /broadcast(ing)? (the )?summary/i);
 });

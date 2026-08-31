@@ -63,7 +63,7 @@ EXTRACTION_SCHEMA = {
                             "escalation", "status", "other"
                         ]
                     },
-                    "entity": {"type": "string", "description": "The specific component or entity being described (e.g. 'payment gateway', 'water supply')"},
+                    "entity": {"type": "string", "description": "The specific component or entity being described (e.g. 'identity service', 'authentication database', 'water supply')"},
                     "value": {"type": "string", "description": "The claimed state or value (e.g. 'healthy', 'failing', 'down')"},
                     "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0}
                 },
@@ -139,7 +139,7 @@ Your role is to parse a single voice utterance from an incident participant and 
 
 Rules:
 - Extract claims only from what is EXPLICITLY STATED — do not infer or speculate beyond the utterance.
-- Isolate the ENTITY cleanly (e.g., 'payment gateway', 'sector 4 culvert', 'auxiliary pump') without conversational filler.
+- Isolate the ENTITY cleanly (e.g., 'identity service', 'authentication database', 'sector 4 culvert') without conversational filler.
 - If the speaker provides a value or status, it is REPORTED (not CONFIRMED) unless they cite an authoritative monitoring source.
 - If the speaker says "I think", "probably", "maybe", "might be" — mark as ASSUMED.
 - If the speaker says "we confirmed" or "verified" or "the monitoring system shows" — mark as CONFIRMED.
@@ -177,8 +177,21 @@ async def extract_with_gemini(
             temperature=0.1,
         )
 
+        # Model is configurable: Google retires model IDs on their own schedule, and a
+        # retired ID returns 404, which this module correctly but *silently* degrades
+        # into the labeled heuristic fallback. Observed 2026-08-31: gemini-2.5-flash
+        # returned "no longer available to new users … use models/gemini-3.6-flash".
+        # gemini-3.6-flash was then live-verified working, then later the same day hit
+        # 429 RESOURCE_EXHAUSTED (per-model quota, not a global outage). Re-verified
+        # live against gemini-3.7-flash (released 2026-08-13) — 200 OK — and switched
+        # the default to it. Keeping this in an env var means a future retirement or
+        # quota exhaustion is a config change, not a code change — but check the logs
+        # for repeated fallback, because a dead/exhausted model looks exactly like a
+        # working product with weak extraction.
+        model_name = os.getenv("GEMINI_EXTRACTION_MODEL", "gemini-3.7-flash").strip()
+
         response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=model_name,
             contents=prompt,
             config=config,
         )
