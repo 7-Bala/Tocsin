@@ -28,6 +28,11 @@ export const ActionItemsPanel: React.FC<ActionItemsPanelProps> = ({ actionItems 
         {actionItems.map((item) => {
           const isOverdue = item.status === 'OVERDUE';
           const isComplete = item.status === 'COMPLETE';
+          // An action item nobody owns is a silent accountability gap — it should
+          // never read the same as one that's simply assigned. Flagged distinctly
+          // (amber) rather than folded into the neutral "Owner: X" line, and doesn't
+          // wait for the item to also go overdue before it becomes visible.
+          const isUnowned = !item.owner_name && !isComplete;
 
           return (
             <div
@@ -37,13 +42,24 @@ export const ActionItemsPanel: React.FC<ActionItemsPanelProps> = ({ actionItems 
                   ? 'border-rose-500/40 bg-rose-950/20 text-rose-200'
                   : isComplete
                   ? 'border-emerald-500/20 bg-emerald-950/10 text-zinc-400 line-through'
+                  : isUnowned
+                  ? 'border-amber-500/40 bg-amber-950/20 text-zinc-200'
                   : 'border-zinc-800 bg-zinc-900/80 text-zinc-200'
               }`}
             >
               <div className="space-y-1 flex-1 min-w-0">
                 <p className="font-medium truncate">{item.description}</p>
                 <div className="flex items-center gap-3 text-[11px] text-zinc-400">
-                  <span>👤 Owner: <span className="text-zinc-200 font-semibold">{item.owner_name || 'Unassigned'}</span></span>
+                  <span>
+                    👤 Owner:{' '}
+                    {isUnowned ? (
+                      <span className="text-amber-300 font-semibold" title="No owner assigned — nobody is accountable for this item">
+                        ⚠ Unassigned
+                      </span>
+                    ) : (
+                      <span className="text-zinc-200 font-semibold">{item.owner_name || 'Unassigned'}</span>
+                    )}
+                  </span>
                   {item.due_at && (
                     <span>⏰ Due: {new Date(item.due_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                   )}

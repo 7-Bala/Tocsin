@@ -61,6 +61,40 @@ test('ActionItemsPanel renders overdue tasks and assigned owner', () => {
   assert.match(html, /OVERDUE/);
 });
 
+test('ActionItemsPanel flags an unowned open item distinctly, not as plain "Unassigned"', () => {
+  const mockTasks: ActionItem[] = [
+    {
+      id: 'act-unowned-1',
+      incident_id: 'inc-1',
+      description: 'Confirm auth DB connection pool size',
+      owner_name: null,
+      status: 'OPEN',
+      created_at: new Date().toISOString(),
+    },
+  ];
+  const html = renderToStaticMarkup(React.createElement(ActionItemsPanel, { actionItems: mockTasks }));
+  assert.match(html, /Confirm auth DB connection pool size/);
+  // Must be visually flagged (a warning marker), not the old plain "Unassigned" text.
+  assert.match(html, /⚠ Unassigned/);
+});
+
+test('ActionItemsPanel does not flag a COMPLETE item with no recorded owner as an accountability gap', () => {
+  const mockTasks: ActionItem[] = [
+    {
+      id: 'act-complete-unowned-1',
+      incident_id: 'inc-1',
+      description: 'Old task nobody claimed, later completed',
+      owner_name: null,
+      status: 'COMPLETE',
+      created_at: new Date().toISOString(),
+    },
+  ];
+  const html = renderToStaticMarkup(React.createElement(ActionItemsPanel, { actionItems: mockTasks }));
+  // Completed work isn't an open accountability gap — plain "Unassigned", no warning icon.
+  assert.match(html, /Unassigned/);
+  assert.doesNotMatch(html, /⚠ Unassigned/);
+});
+
 test('ParticipantsPanel renders declared vs inferred role metrics', () => {
   const mockParticipants: Participant[] = [
     {

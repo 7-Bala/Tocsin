@@ -48,46 +48,76 @@ regional API routing, a Google-side incident, or something about this project's 
 tier — `GEMINI_EXTRACTION_TIMEOUT_SECONDS` can be raised if 12s turns out too
 aggressive for a consistently-slower-but-still-working backend.
 
-### 8. `onKeyDown={e => e.key === 'Enter' && handleCommandSubmit()}` did not fire during automated browser testing
-**Status:** observed, not confirmed as a real bug.
-Pressing Return via the browser automation tool did not submit the `/voice-test`
-command input twice in a row, while clicking the send button worked reliably both
-times. The code itself is correctly wired (`frontend/src/app/voice-test/page.tsx`
-~line 2107). This may be a synthetic-keyboard-event quirk of the automation tool
-(CDP-dispatched keydown not always reaching React's synthetic event system) rather than
-an app bug — needs a human to actually press Enter in a real browser to confirm either
-way before spending time "fixing" something that might not be broken.
-
-### 9. Demo incident's timeline unexpectedly reset around a backend restart (2026-08-31, cause unconfirmed)
-**Status:** observed once, root cause not found — flagged rather than silently ignored.
-While verifying the `FOLLOWUP_REMINDER` dedup fix (item above), `inc-demo-identity-outage`'s
-timeline dropped from 132 events to 7 (matching the base identity-outage demo scenario's
-seed shape), and the one action item's `due_at` was set to exactly 5 minutes after the
-reset timestamp — the signature of `/api/demo/identity-outage/run-all` being called
-fresh. This happened right around a `docker compose up -d --build backend` restart, but
-nothing in `main.py`'s lifespan shutdown/startup or `simulator.shutdown()` re-seeds
-data, and no deliberate call to that endpoint was made in that turn. Not chased further
-since it didn't block the actual fix being verified (all tests independent of it) and
-Postgres data itself was not wiped (74 other incidents survived). Possible causes not
-ruled out: a stale browser tab from earlier in the session reconnecting and triggering
-something on the frontend, or a manual re-run the user or another process performed
-outside this conversation. Watch for recurrence.
+### 8. Demo incident's `/run-all` reset has happened at least twice with no traceable cause
+**Status:** not resolved — see the detailed investigation note in "Recently completed"
+below (dated 2026-08-31) for everything ruled out (no frontend auto-trigger, no
+backend startup auto-call, reminder-worker upsert doesn't explain content reverting).
+**Mitigation shipped, root cause still open:** `run_complete_identity_outage_scenario()`
+in `backend/app/api/demo.py` now logs a prominent `WARNING` every time it's invoked,
+naming exactly what it's about to discard. If this recurs, check `docker compose logs
+backend | grep "RESET triggered"` *before* the container is next rebuilt — a rebuild
+discards the log that would show whether it was an HTTP call (and from where) or
+something else entirely. Low priority: doesn't corrupt data, doesn't block any other
+work, and the endpoint's reset behavior is intentional by design — the only question
+is what's calling it unexpectedly, if anything really is.
 
 ---
 
 ## P2 — Smaller, cheap, queued
 
-### 9. Unowned action items are not surfaced as a distinct alert
-From `docs/strategy/INNOVATION_ROADMAP.md` §3.3. Cheap, high value — action items with
-`owner_name = None` should raise a visible flag, not just render "unassigned" quietly.
-
-### 10. Decisions have no rationale/supersession model
+### 9. Decisions have no rationale/supersession model
 From `docs/strategy/INNOVATION_ROADMAP.md` §3.1. Decisions are currently plain claims;
 a real incident needs "we decided X because Y, superseded by Z at T2."
 
 ---
 
 ## Recently completed (kept briefly for context, then deleted next pass)
+
+- ✅ **Unowned action items now surfaced as a distinct alert, not silent "Unassigned"**
+  (2026-08-31). Backend (`evidence.py`): added an `unowned` boolean per item in the
+  handoff's `ownership` section, an `unowned_actions` count in `open_item_counts`, and
+  a dedicated spoken-brief line for items that are unowned but *not yet* overdue
+  (items that are both get folded into the existing overdue line's "owned by nobody"
+  rather than announced twice — covered by a dedicated regression test). Frontend:
+  `ActionItemsPanel` gives an unowned, non-complete item a distinct amber border and an
+  "⚠ Unassigned" marker instead of the same neutral gray text every other owner gets; a
+  *completed* item with no recorded owner deliberately does NOT get the warning (it's
+  not an open accountability gap). `HandoffPanel` adds an "Unowned" count tile and
+  flags unowned entries in the "Who owes what" list the same way. 4 new tests (2
+  backend, 2 frontend) covering: the flag appears, the count is right, the
+  unowned+overdue case isn't double-announced, and the completed-unowned case is
+  correctly NOT flagged. 59/59 backend tests, 45/45 frontend tests, tsc clean, build
+  succeeds, verified live against the real backend (`open_item_counts.unowned_actions`
+  correctly `0` for the demo incident, whose one action item has an owner).
+
+- ✅ **Enter-key submission confirmed working — not a bug** (2026-08-31). Retested in
+  real Chrome (not the sandboxed pane) with a careful, isolated sequence: click the
+  input, type, screenshot to confirm the text actually landed, *then* press Return.
+  It worked cleanly both times — `handleCommandSubmit` fired, the "TOCSIN is
+  processing…" indicator appeared, and a real reply came back
+  ("FIELD OPERATOR: Second enter test" → "TOCSIN: Logged as REPORT (UNVERIFIED)...").
+  The original "failure" was a race in the earlier test sequence (click immediately
+  followed by type immediately followed by Return, with no verification in between) —
+  not an app bug. No code change needed.
+- 🔶 **Demo-incident reset investigated further — partially explained, correcting an
+  earlier over-confident conclusion** (2026-08-31). First pass concluded "probably one
+  of my own earlier `curl .../run-all` calls" and marked this resolved. That was
+  premature: a later occurrence was checked more rigorously and the backend
+  container's own access log had **zero HTTP requests logged for `/run-all` during its
+  entire lifetime**, yet the demo incident was already back to its exact original seed
+  conflict wording ("exhausted at 100%" / "normal and healthy (22% CPU)") the moment
+  that container loaded it from Postgres at startup. Ruled out as causes: no frontend
+  code path calls `run-all` except the explicit dashboard button (confirmed by reading
+  every call site); no backend startup/lifespan code calls the handler function
+  directly (confirmed by grepping the whole backend for its name — only test files
+  reference it); the reminder background worker's routine `upsert()` explains a
+  `updated_at` timestamp bump shortly after startup but does not explain the conflict
+  *content* reverting to original wording, since that worker only ever appends
+  reminders, never rewrites conflict records. **Genuine conclusion: if a reset
+  happened, it happened during an earlier backend container's lifetime, and that
+  container's logs no longer exist to check** (Docker Compose does not persist logs
+  across a container recreate). Cannot be conclusively resolved with the evidence
+  available now. Re-added to the open list below rather than left incorrectly closed.
 
 - ✅ **`FOLLOWUP_REMINDER` timeline duplication fixed and live-verified** (2026-08-31).
   Root cause: `check_and_remind_overdue_actions()` (`backend/app/engine/simulator.py`)

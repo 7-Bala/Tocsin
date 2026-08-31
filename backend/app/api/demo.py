@@ -82,6 +82,18 @@ async def run_complete_identity_outage_scenario() -> dict[str, Any]:
     10. Dangerous action rejection (Flush DB) -> REJECTED (terminal)
     11. Final summary with explicit AI disclaimer
     """
+    # This endpoint fully overwrites the demo incident's state_json (any human
+    # resolutions, live-test data, or accumulated conversation are discarded) — that is
+    # its intended, documented behavior. Logged prominently at WARNING so a call that
+    # wasn't expected (e.g. an accidental hit against the shared dev instance) leaves a
+    # clear trace instead of silently discarding state. See TODO.md: a prior reset of
+    # this exact incident could not be conclusively traced because the container whose
+    # logs would have shown it had already been recreated by the time it was noticed.
+    logger.warning(
+        f"Identity-outage demo scenario RESET triggered for '{DEMO_INCIDENT_ID}' — "
+        "this discards any existing conflicts/resolutions/timeline for that incident."
+    )
+
     # ── Step 1: Create or Reset Incident ──────────────────────────────────
     state = await simulator.create_incident(
         title="Customer Login and Identity Outage",

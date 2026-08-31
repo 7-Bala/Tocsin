@@ -14,7 +14,9 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.engine.conflict_detector import _values_conflict, detect_conflicts
+from app.engine.simulator import simulator
 from app.main import app
+from app.models.incident import ActionItem
 
 
 # ─── 1. Conflict detector precision ──────────────────────────────────────────
@@ -391,3 +393,94 @@ async def test_handoff_discloses_heuristic_fallback_share():
         assert "heuristic_fallback_claims" in rq
         assert rq["caveat"]
         assert rq["heuristic_fallback_claims"] <= rq["total_claims"]
+
+
+@pytest.mark.asyncio
+async def test_handoff_surfaces_unowned_action_items():
+    """
+    An action item with no owner is a silent accountability gap. It must be visible in
+    the handoff — as a distinct ownership['unowned'] flag, in open_item_counts, and in
+    the spoken brief — even before it happens to also go overdue (which would otherwise
+    be the only path that currently made the gap visible via "owned by nobody").
+    """
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        inc = await client.post(
+            "/api/incidents",
+            json={"title": "Unowned Action Item Test", "event_type": "TECHNICAL_INCIDENT"},
+        )
+        inc_id = inc.json()["incident_id"]
+
+        state = await simulator.get_incident(inc_id)
+        assert state is not None
+
+        owned = ActionItem(
+            id="act-owned-1",
+            incident_id=inc_id,
+            description="Verify rollback impact",
+            owner_name="Dave Miller",
+            status="OPEN",
+        )
+        unowned = ActionItem(
+            id="act-unowned-1",
+            incident_id=inc_id,
+            description="Confirm auth DB connection pool size",
+            owner_name=None,
+            status="OPEN",
+        )
+        state.action_items.extend([owned, unowned])
+
+        body = (await client.get(f"/api/incidents/{inc_id}/handoff")).json()
+
+        ownership = {a["action_item_id"]: a for a in body["sections"]["ownership"]}
+        assert ownership["act-owned-1"]["unowned"] is False
+        assert ownership["act-unowned-1"]["unowned"] is True
+        assert ownership["act-unowned-1"]["owner"] == "UNASSIGNED"
+
+        assert body["open_item_counts"]["unowned_actions"] == 1
+        assert "no owner assigned" in body["spoken_brief"]
+        assert "Confirm auth DB connection pool size" in body["spoken_brief"]
+
+
+@pytest.mark.asyncio
+async def test_handoff_unowned_and_overdue_action_item_not_double_announced():
+    """
+    An item that is BOTH unowned and overdue is already covered by the overdue line
+    ("owned by nobody"). It must still count toward unowned_actions and carry the
+    unowned flag, but must not ALSO appear a second time in the "no owner assigned"
+    spoken line — that would be double-announcing the same gap.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        inc = await client.post(
+            "/api/incidents",
+            json={"title": "Unowned Overdue Test", "event_type": "TECHNICAL_INCIDENT"},
+        )
+        inc_id = inc.json()["incident_id"]
+
+        state = await simulator.get_incident(inc_id)
+        assert state is not None
+
+        item = ActionItem(
+            id="act-unowned-overdue-1",
+            incident_id=inc_id,
+            description="Patch the vulnerable dependency",
+            owner_name=None,
+            status="OVERDUE",
+            due_at=(datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
+        )
+        state.action_items.append(item)
+
+        body = (await client.get(f"/api/incidents/{inc_id}/handoff")).json()
+
+        assert body["open_item_counts"]["unowned_actions"] == 1
+        assert body["open_item_counts"]["overdue_actions"] == 1
+        ownership = {a["action_item_id"]: a for a in body["sections"]["ownership"]}
+        assert ownership["act-unowned-overdue-1"]["unowned"] is True
+        assert ownership["act-unowned-overdue-1"]["overdue"] is True
+
+        # Covered by the overdue line ("owned by nobody"), not the separate unowned line.
+        assert "no owner assigned" not in body["spoken_brief"]
+        assert "owned by nobody" in body["spoken_brief"]

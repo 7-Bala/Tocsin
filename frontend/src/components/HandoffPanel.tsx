@@ -12,6 +12,7 @@ interface HandoffCounts {
   questions: number;
   actions: number;
   overdue_actions: number;
+  unowned_actions: number;
   risks: number;
 }
 
@@ -97,7 +98,7 @@ export const HandoffPanel: React.FC<HandoffPanelProps> = ({ incidentId }) => {
       {brief && counts && (
         <div className="space-y-3">
           {/* Open-item counts: what the incoming shift owns */}
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-6 gap-2">
             {/* Tone classes are written out in full: Tailwind cannot resolve
                 dynamically-constructed class names like `text-${tone}-400`. */}
             {[
@@ -105,6 +106,7 @@ export const HandoffPanel: React.FC<HandoffPanelProps> = ({ incidentId }) => {
               { label: 'Open questions', value: counts.questions, tone: 'text-amber-400' },
               { label: 'Open actions', value: counts.actions, tone: 'text-sky-400' },
               { label: 'Overdue', value: counts.overdue_actions, tone: 'text-rose-400' },
+              { label: 'Unowned', value: counts.unowned_actions, tone: 'text-amber-400' },
               { label: 'Risks', value: counts.risks, tone: 'text-amber-400' },
             ].map((c) => (
               <div
@@ -186,10 +188,10 @@ export const HandoffPanel: React.FC<HandoffPanelProps> = ({ incidentId }) => {
                   <span className="text-zinc-200">{a.description}</span>
                   <span
                     className={`font-mono whitespace-nowrap ${
-                      a.overdue ? 'text-rose-400' : 'text-zinc-400'
+                      a.overdue ? 'text-rose-400' : a.unowned ? 'text-amber-400' : 'text-zinc-400'
                     }`}
                   >
-                    {a.owner}
+                    {a.unowned ? '⚠ UNASSIGNED' : a.owner}
                     {a.overdue ? ' · OVERDUE' : ''}
                   </span>
                 </div>

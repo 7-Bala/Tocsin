@@ -411,6 +411,11 @@ def _build_handoff(state) -> dict[str, Any]:
 
     open_actions = [a for a in (state.action_items or []) if a.status != "COMPLETE"]
     overdue_actions = [a for a in open_actions if a.status == "OVERDUE"]
+    # An action item with no owner is a silent gap: nobody is accountable for it until
+    # it happens to also go overdue, at which point the overdue line already mentions
+    # "owned by nobody". Tracked separately here so a not-yet-overdue unowned item is
+    # visible too, instead of only becoming visible once it's already late.
+    unowned_actions = [a for a in open_actions if not a.owner_name]
 
     heuristic_claims = [c for c in claims if c.extraction_method.value == "heuristic_fallback"]
 
@@ -469,6 +474,7 @@ def _build_handoff(state) -> dict[str, Any]:
                 "status": a.status,
                 "due_at": a.due_at,
                 "overdue": a.status == "OVERDUE",
+                "unowned": not a.owner_name,
             }
             for a in open_actions
         ],
@@ -528,6 +534,18 @@ def _build_handoff(state) -> dict[str, Any]:
         spoken_lines.append(
             f"{len(open_actions)} open action{'s' if len(open_actions) != 1 else ''}, none overdue."
         )
+    # Unowned-but-not-yet-overdue items aren't covered by the overdue line above (which
+    # already says "owned by nobody" for ones that are both overdue and unowned) — call
+    # them out separately so an accountability gap doesn't stay invisible until it's
+    # already late.
+    not_yet_overdue_unowned = [a for a in unowned_actions if a.status != "OVERDUE"]
+    if not_yet_overdue_unowned:
+        spoken_lines.append(
+            f"{len(not_yet_overdue_unowned)} open action"
+            f"{'s have' if len(not_yet_overdue_unowned) != 1 else ' has'} no owner assigned: "
+            + "; ".join(a.description for a in not_yet_overdue_unowned[:3])
+            + "."
+        )
     if open_risks:
         spoken_lines.append(
             f"Still at risk: {'; '.join(r.description for r in open_risks[:3])}."
@@ -545,6 +563,7 @@ def _build_handoff(state) -> dict[str, Any]:
             "questions": len(open_gaps),
             "actions": len(open_actions),
             "overdue_actions": len(overdue_actions),
+            "unowned_actions": len(unowned_actions),
             "risks": len(open_risks),
         },
     }
