@@ -12,22 +12,24 @@ Last updated: 2026-08-31 (implemented + live-verified Tocsin chat replies).
 ## P0 — Breaks the demo / actively misleading
 
 ### 1. `/voice-test` right-side "INCIDENT COMMAND" panel is a disconnected client-side simulator
-**Status:** diagnosed, not fixed. This is now the single biggest remaining integrity
-gap on this page.
-The tiles ("Customers Affected", "Gateway Error Rate", "Risk Level", "Service Health")
-are populated entirely by `extractIncidentInfo()`, a ~200-line regex NLP function that
-runs **only in the browser**, has zero connection to the real backend evidence engine
-(`backend/app/engine/extraction.py` + `conflict_detector.py`), and still carries
-leftover flood/fire/earthquake/cyclone disaster-response regex patterns from before
-the identity-outage pivot (`frontend/src/app/voice-test/page.tsx` ~line 240 onward).
-It "updates in realtime" but from fabricated client-side pattern matching, not from
-Tocsin's actual intelligence pipeline — this directly risks the CLAUDE.md rule
-"Never show stale flood or payment labels in the identity scenario," because the
-underlying detector still contains those patterns and could surface them if triggered.
-**Fix:** replace `extractIncidentInfo` + local `incidentData` state with the same
-`IncidentState` the `/` dashboard already gets from `useIncidentWebSocket` /
-`fetchIncident`. This is a real architecture change to a 2341-line file — needs its
-own session, not a quick patch. Do NOT attempt as a drive-by edit.
+**Status:** fully planned, not yet implemented. Full design in
+[`docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md`](docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md)
+— architecture diagram, sequence diagram, tile-shape decision flowchart, tile-lifecycle
+state diagram, an explicit fail-proof requirement + test per failure mode (backend
+down, WS drop, empty claims, heuristic fallback, malformed claim, tile overflow,
+rapid updates, conflicts), file-by-file component plan, and a 6-step rollout sequence.
+Read that file before starting — do not re-derive the design from scratch.
+Summary of the problem it solves: the tiles ("Customers Affected", "Gateway Error
+Rate", "Risk Level", "Service Health") are populated entirely by `extractIncidentInfo()`,
+a ~200-line regex NLP function that runs **only in the browser**, has zero connection
+to the real backend evidence engine, and still carries leftover flood/fire/earthquake
+regex patterns from before the identity-outage pivot. The plan's core fix: tiles must
+be *derived* from whatever claims actually exist for the current incident (dynamic,
+not a fixed 4-field template), sourced from the same `IncidentState` the `/` dashboard
+already gets — not a second, drifting implementation.
+Rollout is staged (extract shared hook → pure tile-derivation function + tests →
+dark-launch alongside old panel → swap → delete old code → live verify) specifically
+so this is not attempted as one large edit to a 2341-line file. Needs its own session.
 
 ### 2. Database has 149+ (now 185+) accumulated test/demo incidents
 **Status:** diagnosed, not fixed, growing every test run.
