@@ -5,7 +5,7 @@ Auto-maintained by Claude: an entry is added when work is identified, and delete
 it's done. Do not treat an entry's presence here as "not started"; check the note for
 current state. This file is the resume point after any session/context reset.
 
-Last updated: 2026-08-31 (implemented + live-verified Tocsin chat replies).
+Last updated: 2026-08-31 (fixed test-isolation leak + PAYMENT_OUTAGE deserialization; starting item 1's staged rollout).
 
 ---
 
@@ -31,35 +31,6 @@ Rollout is staged (extract shared hook → pure tile-derivation function + tests
 dark-launch alongside old panel → swap → delete old code → live verify) specifically
 so this is not attempted as one large edit to a 2341-line file. Needs its own session.
 
-### 2. Database has 149+ (now 185+) accumulated test/demo incidents
-**Status:** diagnosed, not fixed, growing every test run.
-`GET /api/incidents` returns 185 rows against the dev Postgres instance as of
-2026-08-31 (was 149 earlier the same day), including dozens of `test-inc-*` and
-`inc-proc-restart-*` rows clearly left over from repeated pytest runs against a real
-(not ephemeral) database. Not dangerous, but pollutes any "list all incidents" UI and
-makes manual testing confusing.
-**Fix:** either point the test suite at a dedicated test database/schema, or add a
-teardown that deletes rows it created, or add a `docker compose` reset script. Flagged
-in `CLAUDE.md`'s existing "Remove generated local database files from version control"
-item — this is the live-database analogue of the same hygiene issue.
-
-### 3. One persisted incident row cannot be deserialized (data regression from removing PAYMENT_OUTAGE)
-**Status:** newly found 2026-08-31, not fixed.
-Backend logs on every startup:
-```
-ERROR tocsin.repositories - Failed to deserialize incident row: 1 validation error for IncidentState
-event_type: Input should be 'WATER_CONTAMINATION', ... [type=enum, input_value='PAYMENT_OUTAGE', ...]
-```
-A prior session removed `PAYMENT_OUTAGE` from the `EventType` enum (correctly, per the
-project's scenario rules) but did not account for an already-persisted row in the dev
-database still carrying that value. That row is silently dropped from
-`Loaded N persisted incidents` on every boot — it's not corrupting anything else, but
-it is now permanently unreachable through the API until fixed, and the failure is only
-visible in backend logs, not surfaced anywhere a developer would normally look.
-**Fix:** either (a) add a data migration that remaps any `PAYMENT_OUTAGE` rows to
-`TECHNICAL_INCIDENT` before the enum validation runs, or (b) since this is dev/demo
-data with no production stakes, just delete that one row. (a) is more correct if this
-pattern could recur with other enum changes.
 
 ---
 
@@ -121,6 +92,45 @@ a real incident needs "we decided X because Y, superseded by Z at T2."
 ---
 
 ## Recently completed (kept briefly for context, then deleted next pass)
+
+- ✅ **Root cause of the database-pollution item found and fixed: test isolation was
+  silently broken, not merely "missing cleanup"** (2026-08-31). `conftest.py`'s
+  autouse fixture intended to isolate every test to a temp SQLite file via
+  `os.environ["USE_SQLITE_FALLBACK"] = os.getenv("USE_SQLITE_FALLBACK", "true")`. But
+  `app/main.py` calls `load_dotenv()` at import time, loading `backend/.env` (real dev
+  config: `USE_SQLITE_FALLBACK=false`) *before* the fixture ever runs — `os.getenv`
+  with a default only fills in an *unset* var, so it silently preserved "false" instead
+  of forcing isolation. Every local pytest run was hitting the real dev Postgres
+  database directly. Confirmed live: incident count grew 149 → 185 → 222 across a
+  handful of runs this session alone. Fixed by forcing
+  `os.environ["USE_SQLITE_FALLBACK"] = "true"` unconditionally in the fixture.
+  `test_postgresql_live.py` (which genuinely needs real Postgres) is unaffected — it
+  has its own autouse fixture that runs after and re-forces Postgres explicitly.
+  Verified live: a full 56-test run now adds ~22 rows (only from the 4 tests that are
+  *supposed* to hit real Postgres) instead of ~70+ from the whole suite, and completes
+  in ~19s instead of 2+ minutes.
+- ✅ **One-time cleanup of the accumulated pollution** (2026-08-31): added
+  `backend/scripts/cleanup_test_incidents.sql` (manual, not auto-run by anything —
+  deleting incident data should never be a side effect of an automated process) and
+  ran it once against the dev database. 222 rows → 1 (the canonical demo incident).
+  Confirmed live after a backend restart (the in-memory `simulator._incidents` cache
+  needed reloading — a direct SQL delete doesn't invalidate it) that `/api/incidents`
+  correctly shows just `inc-demo-identity-outage`, and that its full evidence record
+  (9 claims, 1 conflict) survived untouched.
+- ✅ **Fixed: one persisted incident row could not be deserialized** (2026-08-31, found
+  and closed same day). Root cause confirmed: `inc-demo-payment-outage` (title "Major
+  Payment Processing & Checkout Outage") — the pre-pivot demo scenario — was still in
+  the database with `event_type='PAYMENT_OUTAGE'`, a value removed from the enum in an
+  earlier session. Every backend boot logged
+  `ERROR tocsin.repositories - Failed to deserialize incident row` and silently
+  dropped that row from the loaded set. Fixed with a proper migration
+  (`003_remove_payment_outage_data.sql`) that deletes the row and all its dependent
+  rows (conflicts, claims, observations, etc., in FK-safe order — no `ON DELETE
+  CASCADE` is defined in the schema) rather than remapping its `event_type`, since the
+  row's *title* is itself payment-outage content and CLAUDE.md prohibits that content
+  existing anywhere, not just under a technically-different enum tag. Verified live:
+  backend startup log no longer shows the deserialize error; `Loaded N persisted
+  incidents` count matches the actual row count with zero silently dropped.
 
 - ✅ **Tocsin now replies in the `/voice-test` chat, live-verified end-to-end**
   (2026-08-31): `handleCommandSubmit` now awaits the real

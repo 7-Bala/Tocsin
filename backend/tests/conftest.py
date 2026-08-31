@@ -17,7 +17,18 @@ async def setup_test_env():
     temp_db.close()
 
     os.environ["SQLITE_DB_PATH"] = temp_db_path
-    os.environ["USE_SQLITE_FALLBACK"] = os.getenv("USE_SQLITE_FALLBACK", "true")
+    # Force SQLite isolation unconditionally — do NOT fall back to whatever the
+    # environment already has. `app/main.py` calls load_dotenv() at import time, which
+    # loads backend/.env (real dev config: USE_SQLITE_FALLBACK=false, DATABASE_URL
+    # pointing at the real Postgres instance) *before* this fixture ever runs. The
+    # previous `os.getenv("USE_SQLITE_FALLBACK", "true")` only supplies "true" when the
+    # var is unset — it silently preserved the dotenv-loaded "false" instead, so every
+    # local test run was actually hitting the real shared database. This was confirmed
+    # live 2026-08-31: the incident count in dev Postgres grew from 149 to 222 rows
+    # across a handful of local pytest runs. Tests that genuinely need real Postgres
+    # (test_postgresql_live.py) already force it back via their own autouse fixture,
+    # which runs after this one and is unaffected by this change.
+    os.environ["USE_SQLITE_FALLBACK"] = "true"
     os.environ["TOCSIN_COMMANDER_KEY"] = os.getenv("TOCSIN_COMMANDER_KEY", "tocsin-commander-key")
 
     try:
