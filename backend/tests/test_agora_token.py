@@ -376,6 +376,11 @@ async def test_composed_tools_pipeline_wires_mcp_servers_under_llm(monkeypatch):
 
             assert props["asr"]["vendor"] == "deepgram"
             assert props["asr"]["credential_mode"] == "managed"
+            # Confirmed against a live HTTP 400 from Agora's real join API on
+            # 2026-08-31 ("Invalid value at properties.asr.params.url: required
+            # field is missing") -- managed credential_mode does not imply the
+            # endpoint URL is implied, only that Agora supplies the API key.
+            assert props["asr"]["params"]["url"] == "wss://api.deepgram.com/v1/listen"
 
             assert props["llm"]["vendor"] == "custom"
             assert props["llm"]["style"] == "gemini"
@@ -390,6 +395,9 @@ async def test_composed_tools_pipeline_wires_mcp_servers_under_llm(monkeypatch):
 
             assert props["tts"]["vendor"] == "minimax"
             assert props["tts"]["credential_mode"] == "managed"
+            # Same finding as the asr assertion above, confirmed against a live
+            # HTTP 400 for properties.tts.params.url on the same live test.
+            assert props["tts"]["params"]["url"] == "wss://api.minimax.io/ws/v1/t2a_v2"
 
             assert props["advanced_features"]["enable_tools"] is True
             assert props["advanced_features"]["enable_rtm"] is True

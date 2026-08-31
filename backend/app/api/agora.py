@@ -583,7 +583,17 @@ async def start_conversational_agent(
         "asr": {
           "credential_mode": "managed",
           "vendor": "deepgram",
-          "params": {"model": "nova-3", "language": "en"},
+          # `url` is required even in managed-credential mode -- confirmed against a
+          # live HTTP 400 from Agora's real join API ("Invalid value at
+          # properties.asr.params.url: required field is missing") and against
+          # docs.agora.io/en/conversational-ai/models/asr/overview, which gives this
+          # exact literal value for Deepgram. `credential_mode: "managed"` only means
+          # Agora supplies the API key/auth, not that the endpoint URL is implied.
+          "params": {
+            "url": "wss://api.deepgram.com/v1/listen",
+            "model": "nova-3",
+            "language": "en",
+          },
         },
         "llm": {
           # Gemini is not in Agora's documented `vendor` enum for the llm block
@@ -604,7 +614,12 @@ async def start_conversational_agent(
         "tts": {
           "credential_mode": "managed",
           "vendor": "minimax",
+          # `url` is required even in managed mode -- same finding as the asr block
+          # above, confirmed against a live HTTP 400 from Agora's real join API and
+          # against docs.agora.io/en/conversational-ai/models/tts/minimax's managed
+          # example (this is the managed-mode URL; BYOK uses a different host).
           "params": {
+            "url": "wss://api.minimax.io/ws/v1/t2a_v2",
             "model": "speech-2.8-turbo",
             "voice_setting": {"voice_id": "English_captivating_female1", "speed": 1.0},
             "audio_setting": {"sample_rate": 44100},

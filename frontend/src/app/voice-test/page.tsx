@@ -183,6 +183,10 @@ export default function VoiceTestPage() {
   const addLog = useCallback((msg: string) => {
     const ts = new Date().toLocaleTimeString();
     setLogs(prev => [`[${ts}] ${msg}`, ...prev.slice(0, 49)]);
+    // `logs` state has no visible panel on this page today -- mirror to console so
+    // live-session diagnosis (RTM login/subscribe/decoder errors) doesn't require
+    // reading React state through the DOM.
+    console.log(`[voice-test] ${msg}`);
   }, []);
 
   // ── Transcript entry ───────────────────────────────────────────────────
