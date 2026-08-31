@@ -23,7 +23,7 @@ import time
 from typing import Any, Literal
 
 import httpx
-from agora_token_builder import RtcTokenBuilder  # type: ignore[import-untyped]
+from agora_token_builder import RtcTokenBuilder, RtmTokenBuilder  # type: ignore[import-untyped]
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
@@ -123,6 +123,31 @@ class TokenResponse(BaseModel):
   app_id: str
   channel_name: str
   uid: int | str
+  expires_in_seconds: int
+
+
+class GenerateRtmTokenRequest(BaseModel):
+  user_account: str = Field(
+    min_length=1,
+    max_length=64,
+    description=(
+      "RTM user account (string identity, distinct from the numeric RTC uid) "
+      "used to log into the Agora Signaling (RTM) service."
+    ),
+    examples=["tocsin-viewer-1"],
+  )
+  expire_seconds: int = Field(
+    default=3600,
+    ge=60,
+    le=86400,
+    description="Token expiration duration in seconds",
+  )
+
+
+class RtmTokenResponse(BaseModel):
+  token: str
+  app_id: str
+  user_account: str
   expires_in_seconds: int
 
 
@@ -297,6 +322,59 @@ async def generate_rtc_token(request: GenerateTokenRequest) -> TokenResponse:
 
 
 @router.post(
+  "/rtm-token",
+  response_model=RtmTokenResponse,
+  summary="Generate Agora RTM (Signaling) Token",
+  description=(
+    "Generates a short-lived Agora RTM token, required to receive live transcript "
+    "events. Per Agora's Conversational AI docs "
+    "(docs.agora.io/en/conversational-ai/develop/transcripts), transcript delivery "
+    "is a Signaling (RTM) channel message, not an RTC event — the browser needs a "
+    "separate RTM login alongside its RTC connection to receive it. See "
+    "docs/agora/RESEARCH.md §5 for the full research trail."
+  ),
+)
+async def generate_rtm_token(request: GenerateRtmTokenRequest) -> RtmTokenResponse:
+  """Generate short-lived Agora RTM token for the Conversational AI transcript path."""
+  app_id = os.getenv("AGORA_APP_ID", "").strip()
+  app_certificate = os.getenv("AGORA_APP_CERTIFICATE", "").strip()
+
+  if not app_id or not app_certificate:
+    logger.error(
+      "Agora App ID or Certificate is missing from server configuration."
+    )
+    raise HTTPException(
+      status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+      detail="Agora credentials not configured on backend server.",
+    )
+
+  current_timestamp = int(time.time())
+  privilege_expired_ts = current_timestamp + request.expire_seconds
+
+  try:
+    token = RtmTokenBuilder.buildToken(
+      app_id,
+      app_certificate,
+      request.user_account,
+      1,  # Role_Rtm_User
+      privilege_expired_ts,
+    )
+    logger.info(f"Generated RTM token for user_account '{request.user_account}'")
+    return RtmTokenResponse(
+      token=token,
+      app_id=app_id,
+      user_account=request.user_account,
+      expires_in_seconds=request.expire_seconds,
+    )
+  except (ValueError, TypeError, KeyError, RuntimeError) as exc:
+    logger.error(f"Failed to generate RTM token: {exc}")
+    raise HTTPException(
+      status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+      detail="Failed to generate RTM token.",
+    )
+
+
+@router.post(
   "/start-agent",
   summary="Start Agora Conversational AI Agent",
   description=(
@@ -401,6 +479,8 @@ async def start_conversational_agent(
         "remote_rtc_uids": ["*"],
         "enable_string_uid": False,
         "idle_timeout": 120,
+        "advanced_features": {"enable_rtm": True},
+        "parameters": {"data_channel": "rtm"},
         "mllm": {
           "enable": True,
           "vendor": "gemini",
@@ -463,6 +543,8 @@ async def start_conversational_agent(
         "remote_rtc_uids": ["*"],
         "enable_string_uid": False,
         "idle_timeout": 120,
+        "advanced_features": {"enable_rtm": True},
+        "parameters": {"data_channel": "rtm"},
         "asr": {
           "credential_mode": "managed",
           "vendor": "deepgram",
@@ -504,7 +586,7 @@ async def start_conversational_agent(
           "transport": "sse",
         }
       ]
-      payload["properties"]["advanced_features"] = {"enable_tools": True}
+      payload["properties"]["advanced_features"]["enable_tools"] = True
       logger.info(f"Configured MCP server for agent: {sse_endpoint} (transport: sse)")
 
   agora_url = (

@@ -39,6 +39,41 @@ async def test_generate_agora_rtc_token_numeric_uid(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_generate_agora_rtm_token(monkeypatch):
+    """RTM token endpoint (see docs/agora/RESEARCH.md §5) issues a token distinct
+    from the RTC one, scoped to a user_account rather than a channel+uid."""
+    monkeypatch.setenv("AGORA_APP_ID", "mock_app_id_for_testing_00000000")
+    monkeypatch.setenv("AGORA_APP_CERTIFICATE", "mock_certificate_for_testing_0000")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/agora/rtm-token",
+            json={"user_account": "tocsin-viewer-1", "expire_seconds": 1800},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "token" in data
+        assert data["app_id"] == "mock_app_id_for_testing_00000000"
+        assert data["user_account"] == "tocsin-viewer-1"
+        assert data["expires_in_seconds"] == 1800
+
+
+@pytest.mark.asyncio
+async def test_generate_agora_rtm_token_blocked_when_credentials_missing(monkeypatch):
+    monkeypatch.delenv("AGORA_APP_ID", raising=False)
+    monkeypatch.delenv("AGORA_APP_CERTIFICATE", raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/agora/rtm-token",
+            json={"user_account": "tocsin-viewer-1"},
+        )
+        assert resp.status_code == 500
+
+
+@pytest.mark.asyncio
 async def test_generate_agora_rtc_token_string_account(monkeypatch):
     """Test generating a valid Agora RTC token for string account."""
     monkeypatch.setenv("AGORA_APP_ID", "mock_app_id_for_testing_00000000")
@@ -222,6 +257,11 @@ async def test_gemini_live_pipeline_never_sends_mcp_servers_even_when_requested(
             assert "llm" not in sent_payload["properties"]
             assert "asr" not in sent_payload["properties"]
             assert "tts" not in sent_payload["properties"]
+            # RTM transcript delivery (see docs/agora/RESEARCH.md §5) is wired on
+            # every pipeline, gemini_live included -- it is the transport, not a
+            # pipeline-specific feature.
+            assert sent_payload["properties"]["advanced_features"]["enable_rtm"] is True
+            assert sent_payload["properties"]["parameters"] == {"data_channel": "rtm"}
 
 
 @pytest.mark.asyncio
@@ -284,7 +324,9 @@ async def test_composed_tools_pipeline_wires_mcp_servers_under_llm(monkeypatch):
             assert props["tts"]["vendor"] == "minimax"
             assert props["tts"]["credential_mode"] == "managed"
 
-            assert props["advanced_features"] == {"enable_tools": True}
+            assert props["advanced_features"]["enable_tools"] is True
+            assert props["advanced_features"]["enable_rtm"] is True
+            assert props["parameters"] == {"data_channel": "rtm"}
 
             # No secrets leaked into the app's own logs via sanitize_payload.
             from app.api.agora import sanitize_payload
@@ -327,4 +369,8 @@ async def test_composed_tools_without_mcp_url_omits_mcp_servers(monkeypatch):
 
             sent_payload = mock_client_instance.post.call_args.kwargs["json"]
             assert "mcp_servers" not in sent_payload["properties"]["llm"]
-            assert "advanced_features" not in sent_payload["properties"]
+            assert "enable_tools" not in sent_payload["properties"]["advanced_features"]
+            # RTM transcript delivery is unconditional (see docs/agora/RESEARCH.md §5),
+            # independent of whether MCP tools were requested.
+            assert sent_payload["properties"]["advanced_features"]["enable_rtm"] is True
+            assert sent_payload["properties"]["parameters"] == {"data_channel": "rtm"}

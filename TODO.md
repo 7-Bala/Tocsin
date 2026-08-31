@@ -5,7 +5,7 @@ Auto-maintained by Claude: an entry is added when work is identified, and delete
 it's done. Do not treat an entry's presence here as "not started"; check the note for
 current state. This file is the resume point after any session/context reset.
 
-Last updated: 2026-08-31 (real-Chrome mic/tile verification; timeline-spam bug found, fixed, and live-verified).
+Last updated: 2026-08-31 (RTM transcript transport implemented for real; live-agent verification still pending).
 
 ---
 
@@ -24,11 +24,15 @@ handoff briefs exist; nothing makes Tocsin actually speak them into a live room.
 Blocked on live Agora session + exact request schema (WebFetch couldn't extract it
 last research pass — retry or find via SDK source).
 
-### 5. Transcript ingestion may be reading a legacy Agora path
-**Status:** documented (`docs/agora/RESEARCH.md`), not implemented.
-Agora v2.9 moved transcript/agent-state delivery to RTM messages. Tocsin still reads
-the RTC `stream-message` event with an empirical, doc-unconfirmed wire format. Migrate
-and capture one real payload as a test fixture.
+### 5. RTM transcript delivery — implemented, needs a live test
+**Status:** implemented 2026-08-31 (see "Recently completed" for detail); **the one
+remaining step is a live credentialed verification — does a real speaking agent's
+transcript actually arrive in the assumed shape — which needs an active paid Agora
+ConvoAI + Gemini Live session, same billed-action category held off on elsewhere in
+this file.** RTM token issuance and the RTM login/subscribe/parse wiring are verified
+against real Agora credentials (token endpoint curl-verified, real-browser RTC+RTM
+join observed with zero errors); actual transcript delivery from a live agent is not
+yet observed. See `docs/agora/RESEARCH.md` §9.
 
 ### 6. MCP tool-calling via the composed pipeline — implemented, needs a live test
 **Status:** implemented and unit-tested 2026-08-31 (see "Recently completed" for
@@ -81,6 +85,45 @@ a real incident needs "we decided X because Y, superseded by Z at T2."
 ---
 
 ## Recently completed (kept briefly for context, then deleted next pass)
+
+- ✅ **RTM transcript transport implemented for real, replacing the empirical RTC
+  `stream-message` path** (2026-08-31). Research revealed a larger scope than the
+  item's original wording suggested: official docs confirm transcripts are
+  delivered over Agora Signaling (RTM), not RTC, and require `enable_rtm`/
+  `data_channel: "rtm"` on agent-join to actually select that transport — meaning
+  this wasn't just "migrate the decoder," it was a new transport end-to-end.
+  Agora's own reference implementation (the "ConversationalAIAPI toolkit") turned
+  out not to be an npm package at all — its docs say to copy its ~2,700-line
+  source into your project, and that source itself depends on an internal
+  `@agora-js/report` package and a demo-app-specific file, i.e. it isn't cleanly
+  vendorable. Reading that source directly (not running it) confirmed the real
+  wire format: plain JSON RTM messages, `object: "user.transcription"` /
+  `"assistant.transcription"`, no chunking/base64 — exactly what
+  `agoraStreamDecoder.ts`'s existing "direct JSON" pattern already parses. Built
+  a small first-party RTM transport (`frontend/src/lib/agoraRtmTranscripts.ts`)
+  using the real `agora-rtm@2.3.0` npm package directly instead of vendoring the
+  toolkit, reusing the existing decoder as the parser. Backend: new
+  `POST /api/agora/rtm-token` (using `RtmTokenBuilder`, already present in the
+  installed `agora-token-builder` package — no new Python dependency);
+  `advanced_features.enable_rtm`/`parameters.data_channel: "rtm"` now sent on
+  every `/start-agent` call for both pipelines. Frontend: wired into **both**
+  `VoiceHUD.tsx` (used on `/`) **and** `voice-test/page.tsx`'s separate inline
+  Agora client (used on `/voice-test` — discovered mid-implementation that these
+  are two independent implementations, not shared code; both needed the change or
+  `/voice-test`'s agent transcript would have silently gone dark once
+  `data_channel: "rtm"` took effect). Old RTC `stream-message` listeners kept in
+  both files as inert fallbacks. 3 new backend tests (RTM token issuance, missing-
+  credential rejection, `enable_rtm`/`data_channel` present on payloads) — 64/64
+  backend tests pass. Frontend build and all 45 tests pass. **Live-verified
+  without a paid agent session:** `/api/agora/rtm-token` curl-verified against
+  real Agora credentials (HTTP 200, well-formed token); in a real browser
+  (sandboxed pane, real Agora RTC/RTM servers, no mic permission available there)
+  RTC join succeeded against the live gateway
+  (`Joining channel success: channel: inc-demo-identity-outage, uid: 9971`), the
+  RTM token request returned HTTP 200, and RTM login/subscribe produced zero
+  console errors before the sandbox's expected mic-permission denial. **Not yet
+  verified:** whether a real speaking agent's transcript actually arrives in the
+  assumed JSON shape — tracked as the live-test step in the P1 item above.
 
 - ✅ **MCP tool-calling wired for real via a new opt-in `composed_tools` pipeline**
   (2026-08-31). Root research finding that made this possible: the join-API reference

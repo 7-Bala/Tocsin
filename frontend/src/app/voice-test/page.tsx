@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useIncidentState } from '@/hooks/useIncidentState';
 import { DynamicSituationTiles } from '@/components/DynamicSituationTiles';
+import { startRtmTranscriptSession, RtmTranscriptSession } from '@/lib/agoraRtmTranscripts';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -121,6 +122,7 @@ export default function VoiceTestPage() {
   const localAudioTrackRef = useRef<any>(null);
   const vadInstanceRef     = useRef<any>(null);
   const isMutedRef         = useRef<boolean>(false);
+  const rtmSessionRef      = useRef<RtmTranscriptSession | null>(null);
 
   // ── Robust Speech Detection Gate refs ──────────────────────────────────
   const noiseFloorRef      = useRef<number>(0.006);
@@ -216,6 +218,7 @@ export default function VoiceTestPage() {
 
   // ── handleLeave ────────────────────────────────────────────────────────
   const handleLeave = useCallback(async () => {
+    if (rtmSessionRef.current) { await rtmSessionRef.current.stop(); rtmSessionRef.current = null; }
     if (aiSpeakingTimerRef.current) { clearTimeout(aiSpeakingTimerRef.current); aiSpeakingTimerRef.current = null; }
     speechRecognitionActiveRef.current = false;
     if (speechRecognitionRef.current) { try { speechRecognitionRef.current.stop(); } catch {} speechRecognitionRef.current = null; }
@@ -636,6 +639,41 @@ export default function VoiceTestPage() {
       setConnectionState('CONNECTED');
       setWaveStartedAt(Date.now());
 
+      // Primary transcript transport: Agora Signaling (RTM). See
+      // docs/agora/RESEARCH.md §5 — backend/app/api/agora.py now sends
+      // parameters.data_channel: "rtm" on agent-join, which is what actually
+      // selects the transcript transport. Login failure here does not block the
+      // voice call; only the "AI Agent" transcript lines below depend on it.
+      try {
+        const rtmUserAccount = `tocsin-voicetest-${uid}`;
+        const rtmTokenRes = await fetch(`${API_BASE_URL}/api/agora/rtm-token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_account: rtmUserAccount, expire_seconds: 3600 }),
+        });
+        if (!rtmTokenRes.ok) throw new Error('RTM token request failed');
+        const { token: rtmToken } = await rtmTokenRes.json();
+        rtmSessionRef.current = await startRtmTranscriptSession({
+          appId: app_id,
+          rtmToken,
+          userAccount: rtmUserAccount,
+          channelName,
+          onEvent: (decoded) => {
+            if (decoded.speaker !== 'TOCSIN' || !decoded.isFinal) return;
+            addTranscriptEntryRef.current('AI Agent', decoded.text);
+            const incId = channelName.trim() || 'inc-demo-identity-outage';
+            fetch(`${API_BASE_URL}/api/incidents/${incId}/observations`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ raw_utterance: decoded.text, speaker: 'AI Agent', source: 'agora_voice_agent' }),
+            }).catch(() => {});
+          },
+          onLog: addLog,
+        });
+      } catch (rtmErr: any) {
+        addLog(`⚠️ RTM transcript session failed to start: ${rtmErr?.message || rtmErr} (voice call continues; AI transcript text may not appear)`);
+      }
+
       client.enableAudioVolumeIndicator();
       client.on('volume-indicator', (volumes: any[]) => {
         let aiVol = 0;
@@ -688,6 +726,8 @@ export default function VoiceTestPage() {
       });
       vadInstanceRef.current = myVad; setVadStatus('READY');
 
+      // Legacy/fallback transport — primary transcript delivery is now RTM (above).
+      // Kept in case Agora ever delivers over RTC stream-message again.
       client.on('stream-message', (uid: number, data: Uint8Array) => {
         const raw = new TextDecoder('utf-8').decode(data);
         try {

@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { LiveTranscriptPanel } from '@/components/LiveTranscriptPanel';
 import { decodeAgoraStreamMessage } from '@/lib/agoraStreamDecoder';
+import { startRtmTranscriptSession, RtmTranscriptSession } from '@/lib/agoraRtmTranscripts';
 import {
   UtteranceAggregator,
   FinalizedUtterance,
@@ -56,6 +57,7 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
   const vadInstanceRef = useRef<any>(null);
   const isMutedRef = useRef<boolean>(false);
   const ampIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const rtmSessionRef = useRef<RtmTranscriptSession | null>(null);
 
   const addLog = useCallback(
     (msg: string) => {
@@ -67,10 +69,40 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
     [onVoiceLog]
   );
 
+  const handleDecodedTranscriptEvent = useCallback(
+    (decoded: ReturnType<typeof decodeAgoraStreamMessage>, msgUid: number | string) => {
+      if (!decoded || !decoded.text) return;
+
+      const { finalized, partial } = utteranceAggregatorRef.current.ingest(decoded);
+      setFinalizedUtterances(finalized);
+      setActivePartial(partial);
+
+      if (decoded.isFinal) {
+        addLog(
+          `📡 [Transcript] Finalized frame from '${msgUid}' (id: ${decoded.utteranceId})`
+        );
+        if (incidentId) {
+          void ingestObservation(incidentId, {
+            raw_utterance: decoded.text,
+            speaker: decoded.speaker === 'TOCSIN' ? 'Tocsin AI' : undefined,
+            agora_uid: String(msgUid),
+            source: decoded.speaker === 'TOCSIN' ? 'agora_agent_transcript' : 'agora_user_transcript',
+          }).catch((err: Error) => addLog(`⚠️ Observation ingestion failed: ${err.message}`));
+        }
+      }
+    },
+    [addLog, incidentId]
+  );
+
   const handleLeave = useCallback(async () => {
     if (ampIntervalRef.current) {
       clearInterval(ampIntervalRef.current);
       ampIntervalRef.current = null;
+    }
+
+    if (rtmSessionRef.current) {
+      await rtmSessionRef.current.stop();
+      rtmSessionRef.current = null;
     }
 
     if (vadInstanceRef.current) {
@@ -189,30 +221,15 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
       // Agora docs (see docs/agora/RESEARCH.md §5) — it fails safe by returning null
       // for any unrecognized payload, which we must silently drop here rather than
       // render partial/garbage text.
+      // Legacy/fallback transport: kept in case Agora ever delivers transcripts over
+      // RTC stream-message again. The primary transport is now RTM (see below) —
+      // backend/app/api/agora.py sends parameters.data_channel: "rtm" on agent-join,
+      // which per official Agora docs is what actually selects the transcript
+      // transport. This listener fails safe (drops unrecognized frames) either way.
       client.on('stream-message', (msgUid: number | string, payload: Uint8Array) => {
         try {
           const decoded = decodeAgoraStreamMessage(msgUid, payload);
-          if (!decoded || !decoded.text) {
-            return; // Unknown/unverified payload shape: fail safe, drop the frame.
-          }
-
-          // Ingest event into the ephemeral in-memory aggregator (handles partial streaming vs finalization)
-          const { finalized, partial } = utteranceAggregatorRef.current.ingest(decoded);
-          setFinalizedUtterances(finalized);
-          setActivePartial(partial);
-
-          // Technical metadata ONLY in Live Diagnostic Logs (Zero transcript text, zero base64)
-          if (decoded.isFinal) {
-            addLog(`📡 [Stream Frame] Finalized frame from UID ${msgUid} (bytes: ${payload.byteLength}, id: ${decoded.utteranceId})`);
-            if (incidentId) {
-              void ingestObservation(incidentId, {
-                raw_utterance: decoded.text,
-                speaker: decoded.speaker === 'TOCSIN' ? 'Tocsin AI' : undefined,
-                agora_uid: String(msgUid),
-                source: decoded.speaker === 'TOCSIN' ? 'agora_agent_transcript' : 'agora_user_transcript',
-              }).catch((err: Error) => addLog(`⚠️ Observation ingestion failed: ${err.message}`));
-            }
-          }
+          handleDecodedTranscriptEvent(decoded, msgUid);
         } catch (err: any) {
           addLog(`⚠️ [Stream Decoder Error] ${err?.message || 'Frame decoding issue'}`);
         }
@@ -220,6 +237,35 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
 
       await client.join(app_id, channel_name, token, uid);
       addLog(`Joined voice room as UID ${uid}`);
+
+      // Primary transcript transport: Agora Signaling (RTM), per official docs
+      // (docs.agora.io/en/conversational-ai/develop/transcripts) and the
+      // parameters.data_channel: "rtm" now sent on agent-join. Login failure here
+      // does not tear down the voice call — voice audio still works either way,
+      // only live transcript rendering/observation-ingestion depends on this.
+      try {
+        const rtmUserAccount = `tocsin-viewer-${uid}`;
+        const rtmTokenRes = await fetch(`${API_BASE_URL}/api/agora/rtm-token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_account: rtmUserAccount, expire_seconds: 3600 }),
+        });
+        if (!rtmTokenRes.ok) {
+          const errData = await rtmTokenRes.json().catch(() => ({}));
+          throw new Error(errData.detail || `RTM token request failed HTTP ${rtmTokenRes.status}`);
+        }
+        const rtmTokenData = await rtmTokenRes.json();
+        rtmSessionRef.current = await startRtmTranscriptSession({
+          appId: app_id,
+          rtmToken: rtmTokenData.token,
+          userAccount: rtmUserAccount,
+          channelName: channel_name,
+          onEvent: (decoded) => handleDecodedTranscriptEvent(decoded, decoded.speaker === 'TOCSIN' ? 'agora_rtm_agent' : 'agora_rtm_user'),
+          onLog: addLog,
+        });
+      } catch (rtmErr: any) {
+        addLog(`⚠️ RTM transcript session failed to start: ${rtmErr?.message || rtmErr} (voice call continues; transcripts may not appear)`);
+      }
 
       const localAudioTrack = await AgoraRTC.createMicrophoneAudioTrack({
         encoderConfig: 'speech_standard',
