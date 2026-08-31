@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { fetchHandoffBrief } from '@/hooks/useIncidentApi';
+import { fetchHandoffBrief, speakIntoChannel } from '@/hooks/useIncidentApi';
 
 interface HandoffPanelProps {
   incidentId?: string | null;
@@ -24,14 +24,21 @@ interface HandoffCounts {
  * acknowledged. Both forms are generated from the same evidence record here so they
  * cannot drift apart.
  *
- * The spoken script is prepared text only. This panel does not claim it was broadcast;
- * live audio delivery into an Agora channel is not wired in this build.
+ * The spoken script is prepared text. "Broadcast" below calls Agora's documented
+ * /speak endpoint (see docs/agora/RESEARCH.md §4/§9) to have an already-running
+ * ConvoAI agent read it aloud into the live voice channel — it requires an agent
+ * already started via VoiceHUD's "Dispatch AI" for this incident's channel, and
+ * fails with a clear error (not a silent no-op) if none is running. This wiring is
+ * CREDENTIAL REQUIRED / NOT YET LIVE-VERIFIED: request-building matches Agora's
+ * documented schema, but no live session has confirmed audio is actually heard.
  */
 export const HandoffPanel: React.FC<HandoffPanelProps> = ({ incidentId }) => {
   const [brief, setBrief] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [broadcasting, setBroadcasting] = useState(false);
+  const [broadcastResult, setBroadcastResult] = useState<string | null>(null);
 
   const generate = async () => {
     if (!incidentId) return;
@@ -54,6 +61,22 @@ export const HandoffPanel: React.FC<HandoffPanelProps> = ({ incidentId }) => {
       setTimeout(() => setCopied(false), 2000);
     } catch {
       setError('Clipboard unavailable in this browser context.');
+    }
+  };
+
+  const broadcastSpoken = async () => {
+    if (!brief?.spoken_brief || !incidentId) return;
+    setBroadcasting(true);
+    setBroadcastResult(null);
+    try {
+      await speakIntoChannel(incidentId, brief.spoken_brief);
+      setBroadcastResult('✅ Sent to the live agent — audio delivery not independently confirmed by this UI.');
+    } catch (e) {
+      setBroadcastResult(
+        `⚠️ ${e instanceof Error ? e.message : 'Broadcast failed.'} (Requires an agent already running for this incident’s voice channel — start one via "Dispatch AI" first.)`
+      );
+    } finally {
+      setBroadcasting(false);
     }
   };
 
@@ -131,17 +154,30 @@ export const HandoffPanel: React.FC<HandoffPanelProps> = ({ incidentId }) => {
               <span className="text-[11px] font-semibold uppercase tracking-wide text-indigo-400">
                 🎙 Read this onto the bridge
               </span>
-              <button
-                onClick={copySpoken}
-                className="text-[11px] px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition"
-              >
-                {copied ? 'Copied' : 'Copy'}
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={copySpoken}
+                  className="text-[11px] px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition"
+                >
+                  {copied ? 'Copied' : 'Copy'}
+                </button>
+                <button
+                  onClick={broadcastSpoken}
+                  disabled={broadcasting}
+                  className="text-[11px] px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:bg-zinc-800 disabled:text-zinc-500 text-white border border-indigo-600 disabled:border-zinc-700 transition"
+                >
+                  {broadcasting ? 'Broadcasting…' : '🔊 Broadcast'}
+                </button>
+              </div>
             </div>
             <p className="text-xs text-zinc-200 leading-relaxed">{brief.spoken_brief}</p>
-            <p className="text-[10px] text-zinc-500">
-              Prepared text — not broadcast as audio by this build.
-            </p>
+            {broadcastResult ? (
+              <p className="text-[10px] text-zinc-400">{broadcastResult}</p>
+            ) : (
+              <p className="text-[10px] text-zinc-500">
+                Broadcast requires an agent already running for this incident&apos;s voice channel.
+              </p>
+            )}
           </div>
 
           {/* Record quality disclosure */}

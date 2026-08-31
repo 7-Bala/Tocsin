@@ -202,6 +202,41 @@ class StartAgentRequest(BaseModel):
   )
 
 
+class SpeakRequest(BaseModel):
+  channel_name: str = Field(
+    min_length=1,
+    max_length=64,
+    description="Target Agora voice channel whose active agent should speak",
+    examples=["tocsin-emergency-room"],
+  )
+  text: str = Field(
+    min_length=1,
+    max_length=512,
+    description=(
+      "Text to synthesize and broadcast. Agora's documented limit is 512 bytes; "
+      "this is enforced as 512 characters here as a conservative proxy (a UTF-8 "
+      "string with multi-byte characters could exceed 512 bytes at fewer than 512 "
+      "characters — Agora's own API is the final authority and will reject an "
+      "oversized request)."
+    ),
+    examples=["Handoff brief: two open action items, one overdue."],
+  )
+  priority: Literal["INTERRUPT", "APPEND", "IGNORE"] = Field(
+    default="INTERRUPT",
+    description=(
+      "How this broadcast interacts with the agent's current speech, per official "
+      "Agora docs (docs.agora.io/en/api-reference/api-ref/conversational-ai/speak): "
+      "INTERRUPT stops current speech and speaks immediately (default); APPEND "
+      "queues after current speech finishes; IGNORE drops the request if the agent "
+      "is already speaking."
+    ),
+  )
+  interruptable: bool = Field(
+    default=True,
+    description="Whether this broadcast can itself be interrupted by the next event.",
+  )
+
+
 class StopAgentRequest(BaseModel):
   channel_name: str = Field(
     min_length=1,
@@ -737,6 +772,106 @@ async def stop_conversational_agent(request: StopAgentRequest) -> dict[str, Any]
       "agent_id": agent_id,
       "warning": str(exc),
     }
+
+
+@router.post(
+  "/speak",
+  summary="Broadcast a text message via the active agent's TTS (spoken summary delivery)",
+  description=(
+    "Calls Agora's documented POST /v2/projects/{appid}/agents/{agentId}/speak "
+    "endpoint to have the currently-running Conversational AI agent speak text into "
+    "its voice channel — the mechanism for delivering Tocsin's written summaries "
+    "(e.g. GET /api/incidents/{id}/handoff's spoken_brief) as live audio. Requires "
+    "an agent already running in the target channel (started via /start-agent); "
+    "returns 404 if none is tracked. See docs/agora/RESEARCH.md §4/§9 for the "
+    "research trail — this endpoint is CREDENTIAL REQUIRED / NOT YET LIVE-VERIFIED "
+    "until a real credentialed session confirms Agora accepts the call and audio is "
+    "actually heard in the channel."
+  ),
+)
+async def speak_into_channel(request: SpeakRequest) -> dict[str, Any]:
+  """Broadcast text as spoken audio through the active agent in a channel."""
+  channel_name = request.channel_name.strip()
+  agent_id = ACTIVE_AGENTS.get(channel_name)
+
+  if not agent_id:
+    raise HTTPException(
+      status_code=status.HTTP_404_NOT_FOUND,
+      detail=(
+        f"No active agent tracked for channel '{channel_name}'. Start one via "
+        "/api/agora/start-agent first — this endpoint speaks through an existing "
+        "agent session, it does not create one."
+      ),
+    )
+
+  app_id = os.getenv("AGORA_APP_ID", "").strip()
+  customer_id = os.getenv("AGORA_CUSTOMER_ID", "").strip()
+  customer_secret = os.getenv("AGORA_CUSTOMER_SECRET", "").strip()
+
+  if not app_id or not customer_id or not customer_secret:
+    raise HTTPException(
+      status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+      detail=(
+        "AGORA_APP_ID, AGORA_CUSTOMER_ID, and AGORA_CUSTOMER_SECRET are not "
+        "configured on the backend server."
+      ),
+    )
+
+  auth_str = f"{customer_id}:{customer_secret}"
+  b64_auth = base64.b64encode(auth_str.encode("utf-8")).decode("utf-8")
+  headers = {
+    "Authorization": f"Basic {b64_auth}",
+    "Content-Type": "application/json",
+  }
+
+  payload = {
+    "text": request.text,
+    "priority": request.priority,
+    "interruptable": request.interruptable,
+  }
+
+  agora_url = (
+    f"https://api.agora.io/api/conversational-ai-agent/v2/projects/{app_id}"
+    f"/agents/{agent_id}/speak"
+  )
+
+  logger.info(
+    f"Outgoing speak request to Agora URL: {agora_url} for channel"
+    f" '{channel_name}' (agent_id: {agent_id}, priority: {request.priority},"
+    f" text_length: {len(request.text)})"
+  )
+
+  try:
+    async with httpx.AsyncClient(timeout=12.0) as client:
+      resp = await client.post(agora_url, json=payload, headers=headers)
+      logger.info(f"Agora speak response HTTP {resp.status_code}: {resp.text}")
+
+      if resp.status_code not in (200, 201):
+        err_msg = resp.text
+        logger.error(f"Agora speak request failed (HTTP {resp.status_code}): {err_msg}")
+        raise HTTPException(
+          status_code=status.HTTP_502_BAD_GATEWAY,
+          detail=(
+            f"Agora Conversational AI speak error (HTTP {resp.status_code}):"
+            f" {err_msg}"
+          ),
+        )
+
+      data = resp.json() if resp.text else {}
+      return {
+        "status": "spoken",
+        "channel_name": channel_name,
+        "agent_id": agent_id,
+        "text_length": len(request.text),
+        "priority": request.priority,
+        "agora_response": data,
+      }
+  except httpx.HTTPError as exc:
+    logger.error(f"Network error connecting to Agora speak REST API: {exc}")
+    raise HTTPException(
+      status_code=status.HTTP_502_BAD_GATEWAY,
+      detail=f"Network error communicating with Agora REST API: {exc}",
+    )
 
 
 @router.get(

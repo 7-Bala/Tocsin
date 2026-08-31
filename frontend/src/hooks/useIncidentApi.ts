@@ -320,3 +320,19 @@ export async function fetchHandoffBrief(incidentId: string): Promise<any> {
   }
   return res.json();
 }
+
+export async function speakIntoChannel(
+  channelName: string,
+  text: string
+): Promise<any> {
+  const res = await fetch(`${API_BASE_URL}/api/agora/speak`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channel_name: channelName, text }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to broadcast into voice channel (HTTP ${res.status})`);
+  }
+  return res.json();
+}

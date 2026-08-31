@@ -5,7 +5,7 @@ Auto-maintained by Claude: an entry is added when work is identified, and delete
 it's done. Do not treat an entry's presence here as "not started"; check the note for
 current state. This file is the resume point after any session/context reset.
 
-Last updated: 2026-08-31 (RTM transcript transport implemented for real; live-agent verification still pending).
+Last updated: 2026-08-31 (spoken /speak broadcast implemented for real; live-agent verification for items 4/5/6 still pending).
 
 ---
 
@@ -17,12 +17,16 @@ None open right now.
 
 ## P1 — Real but narrower
 
-### 4. Spoken/audio summary broadcast not wired
-**Status:** documented (`docs/strategy/INNOVATION_ROADMAP.md` §2.1), not implemented.
-Agora's `/speak` REST endpoint is documented but never called. Text summaries and
-handoff briefs exist; nothing makes Tocsin actually speak them into a live room.
-Blocked on live Agora session + exact request schema (WebFetch couldn't extract it
-last research pass — retry or find via SDK source).
+### 4. Spoken/audio summary broadcast — implemented, needs a live test
+**Status:** implemented 2026-08-31 (see "Recently completed" for detail); **the one
+remaining step is a live credentialed verification — does Agora's /speak endpoint
+actually make the agent audibly speak the text — which needs an active paid Agora
+ConvoAI session, same billed-action category as items 5/6 below.** `POST
+/api/agora/speak` request-building matches the documented schema (found this pass
+via the `.md`-suffixed doc URL, after earlier WebFetch attempts on the same page
+returned only a nav index) and is curl-verified against real credentials for the
+404 (no-agent) path; live audio delivery is not yet observed. See
+`docs/agora/RESEARCH.md` §10.
 
 ### 5. RTM transcript delivery — implemented, needs a live test
 **Status:** implemented 2026-08-31 (see "Recently completed" for detail); **the one
@@ -85,6 +89,27 @@ a real incident needs "we decided X because Y, superseded by Z at T2."
 ---
 
 ## Recently completed (kept briefly for context, then deleted next pass)
+
+- ✅ **Spoken audio summary broadcast implemented for real** (2026-08-31). Earlier
+  research passes couldn't extract the `/speak` endpoint's request schema via
+  WebFetch (it kept returning a docs nav/index page instead of content); this pass
+  found the working pattern — appending `.md` to the doc URL
+  (`.../conversational-ai/speak.md`) returns the actual page content. Confirmed
+  schema: `POST /v2/projects/{appid}/agents/{agentId}/speak`, body
+  `{text, priority, interruptable}`, same Basic-auth scheme as `/join`/`/leave`.
+  New `POST /api/agora/speak` (`backend/app/api/agora.py`) looks up the agent_id
+  already tracked for a channel (404, not silent no-op, if none is running) and
+  calls Agora's endpoint with the exact documented field names. Wired into a new
+  "🔊 Broadcast" button on `HandoffPanel.tsx`'s spoken-script section, sending the
+  same `spoken_brief` text the written and spoken handoff forms already share — so
+  they still cannot drift apart, and the spoken form can now actually reach the
+  room instead of only being copy-pasted. 2 new backend regression tests (outbound
+  URL/JSON match the documented schema exactly; 404 when no agent is tracked) —
+  66/66 backend tests pass. Frontend build and all 45 tests pass. Curl-verified
+  against the real running backend and real Agora credentials: correct 404 for a
+  channel with no active agent. **Not yet verified:** whether Agora's real
+  endpoint accepts the call and audio is actually heard — requires an active
+  agent (billed live session), tracked as the live-test step in the P1 item above.
 
 - ✅ **RTM transcript transport implemented for real, replacing the empirical RTC
   `stream-message` path** (2026-08-31). Research revealed a larger scope than the
