@@ -12,24 +12,34 @@ Last updated: 2026-08-31 (fixed test-isolation leak + PAYMENT_OUTAGE deserializa
 ## P0 — Breaks the demo / actively misleading
 
 ### 1. `/voice-test` right-side "INCIDENT COMMAND" panel is a disconnected client-side simulator
-**Status:** fully planned, not yet implemented. Full design in
+**Status:** in progress — rollout steps 1 and 2 of 6 done and verified, steps 3–6 remain.
+Full design in
 [`docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md`](docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md)
 — architecture diagram, sequence diagram, tile-shape decision flowchart, tile-lifecycle
-state diagram, an explicit fail-proof requirement + test per failure mode (backend
-down, WS drop, empty claims, heuristic fallback, malformed claim, tile overflow,
-rapid updates, conflicts), file-by-file component plan, and a 6-step rollout sequence.
-Read that file before starting — do not re-derive the design from scratch.
-Summary of the problem it solves: the tiles ("Customers Affected", "Gateway Error
-Rate", "Risk Level", "Service Health") are populated entirely by `extractIncidentInfo()`,
-a ~200-line regex NLP function that runs **only in the browser**, has zero connection
-to the real backend evidence engine, and still carries leftover flood/fire/earthquake
-regex patterns from before the identity-outage pivot. The plan's core fix: tiles must
-be *derived* from whatever claims actually exist for the current incident (dynamic,
-not a fixed 4-field template), sourced from the same `IncidentState` the `/` dashboard
-already gets — not a second, drifting implementation.
-Rollout is staged (extract shared hook → pure tile-derivation function + tests →
-dark-launch alongside old panel → swap → delete old code → live verify) specifically
-so this is not attempted as one large edit to a 2341-line file. Needs its own session.
+state diagram, an explicit fail-proof requirement + test per failure mode, file-by-file
+component plan, and the 6-step rollout sequence. Read that file before continuing.
+
+**Done:**
+- Step 1 — `frontend/src/hooks/useIncidentState.ts` extracted from `/` (`page.tsx`),
+  zero behavior change. `/` verified live: identical rendering, `Telemetry: CONNECTED`,
+  real metrics, zero new console errors.
+- Step 2 — `frontend/src/lib/deriveDynamicTiles.ts` (pure function) +
+  `frontend/src/tests/deriveDynamicTiles.test.ts` (19 tests, one per fail-proof
+  requirement + shape classification + priority ordering from the plan). All pass.
+  Not wired into any UI yet — exists in isolation per the staged plan, so it could be
+  exhaustively tested before touching the 2341-line `voice-test/page.tsx` at all.
+
+**Still to do (do not skip ahead — each step depends on the last actually being verified):**
+- Step 3 — add `DynamicSituationTiles` component (reusing `useIncidentState` +
+  `deriveDynamicTiles`), rendered *alongside* the existing panel in `voice-test/page.tsx`
+  (both visible, or behind a query param) — verify output against the real running
+  backend without removing anything yet.
+- Step 4 — swap the visible panel to the new component; delete `extractIncidentInfo()`
+  and the old `incidentData` metrics state in the same change (~200 lines, including
+  every flood/fire/earthquake/cyclone regex pattern).
+- Step 5 — full live verification per the plan's §8 (fresh incident, demo scenario,
+  genuine conflict, backend-down, conflict-resolution reflecting live).
+- Step 6 — update `TODO.md` (delete this item) and `README.md`'s capability matrix.
 
 
 ---
