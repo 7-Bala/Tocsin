@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { DynamicSituationTiles } from '@/components/DynamicSituationTiles';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -97,6 +98,13 @@ export default function VoiceTestPage() {
   const [commandInput, setCommandInput] = useState('');
   const [isAwaitingReply, setIsAwaitingReply] = useState(false);
   const [isMounted,    setIsMounted]    = useState(false);
+  // Dark-launch flag for the new dynamic-tiles panel (item 1, step 3 of
+  // docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md). Read from window.location rather
+  // than Next's useSearchParams() to avoid both a Suspense-boundary requirement and
+  // any risk of reintroducing the SSR/hydration mismatch fixed elsewhere this session
+  // — starts false on every render (server and first client paint match), flips true
+  // only after mount, same pattern as `isMounted` above.
+  const [showDynamicTiles, setShowDynamicTiles] = useState(false);
   const [currentTime,  setCurrentTime]  = useState<Date | null>(null);
   const [waveStartedAt, setWaveStartedAt] = useState<number | null>(null);
 
@@ -437,6 +445,11 @@ export default function VoiceTestPage() {
     setIsMounted(true);
     setCurrentTime(new Date());
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    try {
+      setShowDynamicTiles(new URLSearchParams(window.location.search).get('debug_tiles') === '1');
+    } catch {
+      // Non-fatal: dark-launch flag simply stays off.
+    }
     addLog('Voice Command Center ready.');
     return () => { clearInterval(timer); handleLeave(); };
   }, [addLog, handleLeave]);
@@ -2356,6 +2369,29 @@ export default function VoiceTestPage() {
                     </div>
                   </div>
                 </div>
+
+                {/* ── Dynamic Situation Tiles (dark-launch, item 1 step 3) ──
+                    Rendered ONLY behind ?debug_tiles=1, alongside the panel above,
+                    not replacing it. See docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md
+                    §9 step 3: verify against the real running backend before step 4
+                    swaps the visible panel over and deletes extractIncidentInfo(). */}
+                {isMounted && showDynamicTiles && (
+                  <div>
+                    <div
+                      style={{
+                        fontSize: 9,
+                        color: '#a78bfa',
+                        fontWeight: 700,
+                        letterSpacing: '0.06em',
+                        textTransform: 'uppercase',
+                        marginBottom: 6,
+                      }}
+                    >
+                      ⚙ Debug: Dynamic Tiles (real backend data)
+                    </div>
+                    <DynamicSituationTiles />
+                  </div>
+                )}
 
                 {/* ── Possible Causes ── */}
                 {(incidentData?.causes?.length ?? 0) > 0 && (

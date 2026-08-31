@@ -12,33 +12,45 @@ Last updated: 2026-08-31 (fixed test-isolation leak + PAYMENT_OUTAGE deserializa
 ## P0 — Breaks the demo / actively misleading
 
 ### 1. `/voice-test` right-side "INCIDENT COMMAND" panel is a disconnected client-side simulator
-**Status:** in progress — rollout steps 1 and 2 of 6 done and verified, steps 3–6 remain.
+**Status:** in progress — rollout steps 1–3 of 6 done and verified, steps 4–6 remain.
 Full design in
-[`docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md`](docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md)
-— architecture diagram, sequence diagram, tile-shape decision flowchart, tile-lifecycle
-state diagram, an explicit fail-proof requirement + test per failure mode, file-by-file
-component plan, and the 6-step rollout sequence. Read that file before continuing.
+[`docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md`](docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md).
+Read that file before continuing.
 
 **Done:**
 - Step 1 — `frontend/src/hooks/useIncidentState.ts` extracted from `/` (`page.tsx`),
-  zero behavior change. `/` verified live: identical rendering, `Telemetry: CONNECTED`,
-  real metrics, zero new console errors.
-- Step 2 — `frontend/src/lib/deriveDynamicTiles.ts` (pure function) +
-  `frontend/src/tests/deriveDynamicTiles.test.ts` (19 tests, one per fail-proof
-  requirement + shape classification + priority ordering from the plan). All pass.
-  Not wired into any UI yet — exists in isolation per the staged plan, so it could be
-  exhaustively tested before touching the 2341-line `voice-test/page.tsx` at all.
+  zero behavior change. Verified live.
+- Step 2 — `frontend/src/lib/deriveDynamicTiles.ts` (pure function) + 19 unit tests.
+  Verified via test suite, not yet wired to any UI at that point.
+- Step 3 — `frontend/src/components/DynamicSituationTiles.tsx` added, dark-launched
+  behind `?debug_tiles=1` in `voice-test/page.tsx` (default page unaffected — confirmed
+  pixel-identical live screenshot vs. before). **Live-verified against the real running
+  backend, including the one scenario that matters most:** created a fresh, genuinely
+  unresolved conflict via two contradicting observations
+  ("identity service is down and unresponsive" vs. "identity service is up and running
+  fine now") and confirmed the conflicted entity's tile jumped to top priority with red
+  "Contradicted — needs resolution" styling, exactly per the plan's §5 fail-proof
+  requirement. Also confirmed live: real numeric tiles (`Login Api: 40%`), heuristic
+  extraction correctly flagged amber ("Unverified (heuristic)"), and — importantly —
+  a claim from an *already-resolved* conflict correctly showed no conflict styling
+  (confirms the resolved/open distinction from step 2's unit tests holds end-to-end,
+  not just in isolation). Test conflict cleaned up via the resolve endpoint afterward.
+  **One real limitation found and accepted, not yet fixed:** tile entity grouping is
+  exact-string-match (normalized case/whitespace), while the backend's own conflict
+  detector uses fuzzy substring matching (`_entities_match` in `conflict_detector.py`).
+  This means near-duplicate entity phrasings (e.g. "authentication database" vs.
+  "authentication database connections") currently render as separate tiles instead of
+  merging. Not a fail-proof violation — nothing crashes or lies — just a quality
+  refinement to consider in a future pass; noted here so it isn't forgotten.
 
 **Still to do (do not skip ahead — each step depends on the last actually being verified):**
-- Step 3 — add `DynamicSituationTiles` component (reusing `useIncidentState` +
-  `deriveDynamicTiles`), rendered *alongside* the existing panel in `voice-test/page.tsx`
-  (both visible, or behind a query param) — verify output against the real running
-  backend without removing anything yet.
 - Step 4 — swap the visible panel to the new component; delete `extractIncidentInfo()`
   and the old `incidentData` metrics state in the same change (~200 lines, including
-  every flood/fire/earthquake/cyclone regex pattern).
-- Step 5 — full live verification per the plan's §8 (fresh incident, demo scenario,
-  genuine conflict, backend-down, conflict-resolution reflecting live).
+  every flood/fire/earthquake/cyclone regex pattern), remove the `?debug_tiles=1` flag
+  since the dark-launch comparison is no longer needed once it's the only panel.
+- Step 5 — full live verification per the plan's §8 (fresh incident with zero claims,
+  demo scenario, backend-down/disconnected state, conflict-resolution reflecting live
+  without a page refresh).
 - Step 6 — update `TODO.md` (delete this item) and `README.md`'s capability matrix.
 
 
