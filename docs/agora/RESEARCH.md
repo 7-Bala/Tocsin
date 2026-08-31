@@ -457,6 +457,60 @@ requires an active agent (a billed live session) to test.
 
 ---
 
+## 11. Live credentialed test (2026-08-31) — real bug found and fixed
+
+A real, billed `POST /api/agora/start-agent` call with `voice_pipeline:
+"composed_tools"` (and MCP wiring active) was made against a real running channel,
+with a real browser (`/voice-test`) joined via RTC+RTM. This is the first live
+credentialed test of the composed_tools pipeline; everything above this section
+was schema-verified against docs and mocked tests only.
+
+**Real bug found**: Agora's actual join API rejected the first attempt with
+`HTTP 400: "Invalid value at properties.asr.params.url: required field is
+missing"`, then the same for `properties.tts.params.url` once asr was fixed. The
+managed-credential examples in `docs.agora.io/en/conversational-ai/models/asr/overview`
+and the MiniMax TTS page both do require an explicit `params.url` even under
+`credential_mode: "managed"` — that field only means Agora supplies the *API key*,
+not the endpoint. This codebase's payload had omitted `url` entirely for both
+blocks. **Fixed** in `backend/app/api/agora.py`:
+`asr.params.url = "wss://api.deepgram.com/v1/listen"`,
+`tts.params.url = "wss://api.minimax.io/ws/v1/t2a_v2"` (both confirmed exact
+literal values from the respective docs pages). Regression tests added in
+`backend/tests/test_agora_token.py` assert these exact URLs.
+
+**After the fix**: the same call was accepted — Agora returned a real `agent_id`,
+`mcp_enabled: true` was echoed back, and in the live browser the agent's RTC audio
+track was subscribed and played (`RemoteAudioTrack.play onSuccess` in the SDK's
+own console log) — real audio genuinely flowed from the ConvoAI agent into the
+room. This **upgrades item 6's first half** — Agora accepting the
+`llm.mcp_servers` + `advanced_features.enable_tools` payload — from "not yet
+observed" to confirmed; whether the agent actually *invoked* a tool through it
+was not observed in this pass (nothing in the test window required a tool call).
+
+**Not confirmed in this pass**: no transcript text appeared in the RTM-driven
+transcript panel during the ~30s test window, despite RTM login+subscribe both
+succeeding (200 OK from `/api/agora/rtm-token`, confirmed via network inspection).
+This could mean the agent's greeting message doesn't fire automatically, RTM
+delivery genuinely isn't working, or the window was too short — not
+distinguished in this pass. `voice-test/page.tsx`'s `addLog` now also mirrors to
+`console.log` (previously only fed an unrendered `logs` state) specifically to
+make the next live attempt diagnosable from the browser console instead of
+requiring React-state inspection through the DOM. The agent was stopped
+(`/stop-agent`, confirmed `"status": "stopped"`) once this was established, to
+control cost — `/speak` (item 4) was not tested in this pass; it needs a fresh
+live agent session.
+
+Test environment note: the real Chrome extension (`mcp__claude-in-chrome`) was
+not reachable this pass, so the sandboxed Browser pane was used instead, which
+blocks real microphone capture. `navigator.mediaDevices.getUserMedia` was
+monkey-patched with a synthetic silent oscillator stream purely so the RTC/RTM
+join flow could complete without real hardware — this is a test-environment
+workaround only, not a code change, and explains why VAD showed 0% speech
+confidence throughout (no real speech was ever produced for the agent to
+transcribe).
+
+---
+
 ## Capability matrix
 
 Per the project's status-labeling convention (see `CLAUDE.md`), every row below is
@@ -468,13 +522,13 @@ carries that status, because no live credentialed run was performed in this pass
 | Capability | Status | Note |
 |---|---|---|
 | RTC token generation (`/api/agora/token`) | `CREDENTIAL REQUIRED` | Code path and role/expiry constants match official docs; issuing a token that Agora's servers actually accept for a channel join has not been run live in this pass. Requires `AGORA_APP_ID` + `AGORA_APP_CERTIFICATE`. |
-| ConvoAI agent join (`/api/agora/start-agent`) | `CREDENTIAL REQUIRED` | Request URL, auth scheme, and Gemini `mllm` payload fields match official docs (§1–3). Whether Agora's servers accept and run this exact payload has not been observed live. Requires `AGORA_APP_ID`, `AGORA_APP_CERTIFICATE`, `AGORA_CUSTOMER_ID`, `AGORA_CUSTOMER_SECRET`, `GEMINI_API_KEY`. |
-| ConvoAI agent leave (`/api/agora/stop-agent`) | `CREDENTIAL REQUIRED` | URL and auth scheme match official docs. Not run live in this pass. |
+| ConvoAI agent join (`/api/agora/start-agent`), `composed_tools` pipeline | `VERIFIED IN CODE` | **Live-verified 2026-08-31** (see §11): real Agora acceptance, real `agent_id` returned, real RTC audio from the agent played in a live browser. Found and fixed a real bug in this pass (`asr`/`tts` blocks were missing required `params.url`). The `gemini_live` pipeline itself was not re-tested this pass (only `composed_tools` was live-dispatched) — its schema is unchanged from earlier verification. |
+| ConvoAI agent leave (`/api/agora/stop-agent`) | `VERIFIED IN CODE` | **Live-verified 2026-08-31**: stopped the real agent started in §11, confirmed `"status": "stopped"`. |
 | Local agent session lookup (`/api/agora/local-agent-session`) | `VERIFIED IN CODE` | This one only claims to be local bookkeeping (an in-memory dict read), which was exercised indirectly by the existing mocked `/start-agent` and `/stop-agent` tests that populate/clear `ACTIVE_AGENTS`. It makes no live Agora claim, so there is nothing further to verify. |
 | Real Agora "Query agent status" REST endpoint | `NOT USED` | Its existence is referenced in Agora's own docs (search-result title only); its exact URL/schema could not be confirmed via `WebFetch` in this pass, and per project policy it was not implemented against a guessed contract. Not called anywhere in this codebase. |
 | Gemini Live `mllm` params, voice enum, `agora_vad` turn detection | `OFFICIAL DOCS ONLY` | Confirmed to match `docs.agora.io/en/conversational-ai/models/mllm/gemini` field-for-field. Not run against a live Gemini Live session in this pass. |
 | `mllm.mcp_servers` under `gemini_live` pipeline | `NOT USED` (confirmed unsupported) | **Resolved 2026-08-31**: never sent regardless of request — official docs confirm `mcp_servers` belongs under `llm`, not `mllm`. |
-| `llm.mcp_servers` under new `composed_tools` pipeline | `CREDENTIAL REQUIRED` | **Implemented 2026-08-31** (`voice_pipeline: "composed_tools"` on `/start-agent`) per the confirmed schema. Payload shape verified by regression tests against a mocked Agora response; real Agora acceptance and actual tool invocation both require a live credentialed session, not yet performed. |
+| `llm.mcp_servers` under new `composed_tools` pipeline | `CREDENTIAL REQUIRED` | **Payload acceptance live-verified 2026-08-31** (see §11): Agora accepted the payload with `mcp_enabled: true` echoed back. Actual tool *invocation* through it is still unconfirmed — nothing in the live test window required the agent to call a tool. Stays `CREDENTIAL REQUIRED`, not `VERIFIED IN CODE`, until a tool call is actually observed. |
 | Agora `/speak` TTS broadcast (spoken summaries) | `CREDENTIAL REQUIRED` | **Implemented 2026-08-31**: `POST /api/agora/speak` calls the documented `POST /v2/projects/{appid}/agents/{agentId}/speak` schema (`text`/`priority`/`interruptable`) against the agent tracked for a channel, returning 404 if none is running. Wired into `HandoffPanel`'s "🔊 Broadcast" button, sending the same `spoken_brief` text already generated for problem-statement item 11. Payload shape verified by regression tests; live audio delivery into a real channel not yet observed. |
 | Agora `/think` custom instruction | `OFFICIAL DOCS ONLY` | Documented; not called by Tocsin. |
 | Transcript delivery over RTM (v2.9) | `CREDENTIAL REQUIRED` | **Implemented 2026-08-31** (see §9): `POST /api/agora/rtm-token`, `advanced_features.enable_rtm`/`parameters.data_channel: "rtm"` on agent-join, and a real RTM login/subscribe/parse path on both `/` and `/voice-test`. RTM token issuance and login/subscribe machinery verified against real Agora credentials in a real browser; actual transcript-message delivery from a live speaking agent is not yet observed. |

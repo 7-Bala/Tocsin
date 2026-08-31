@@ -17,42 +17,40 @@ None open right now.
 
 ## P1 — Real but narrower
 
-### 4. Spoken/audio summary broadcast — implemented, needs a live test
-**Status:** implemented 2026-08-31 (see "Recently completed" for detail); **the one
-remaining step is a live credentialed verification — does Agora's /speak endpoint
-actually make the agent audibly speak the text — which needs an active paid Agora
-ConvoAI session, same billed-action category as items 5/6 below.** `POST
-/api/agora/speak` request-building matches the documented schema (found this pass
-via the `.md`-suffixed doc URL, after earlier WebFetch attempts on the same page
-returned only a nav index) and is curl-verified against real credentials for the
-404 (no-agent) path; live audio delivery is not yet observed. See
-`docs/agora/RESEARCH.md` §10.
+### 4. Spoken/audio summary broadcast — implemented, still needs a live test
+**Status:** implemented; a live agent session was run 2026-08-31 (see item 6/§11) but
+`/speak` specifically was NOT called during it (the session was stopped to control
+cost before reaching that check). `POST /api/agora/speak` request-building matches
+the documented schema and is curl-verified against real credentials for the 404
+(no-agent) path; live audio delivery is still not observed. Needs a fresh live agent
+session with explicit go-ahead. See `docs/agora/RESEARCH.md` §10.
 
-### 5. RTM transcript delivery — implemented, needs a live test
-**Status:** implemented 2026-08-31 (see "Recently completed" for detail); **the one
-remaining step is a live credentialed verification — does a real speaking agent's
-transcript actually arrive in the assumed shape — which needs an active paid Agora
-ConvoAI + Gemini Live session, same billed-action category held off on elsewhere in
-this file.** RTM token issuance and the RTM login/subscribe/parse wiring are verified
-against real Agora credentials (token endpoint curl-verified, real-browser RTC+RTM
-join observed with zero errors); actual transcript delivery from a live agent is not
-yet observed. See `docs/agora/RESEARCH.md` §9.
+### 5. RTM transcript delivery — live-tested 2026-08-31, transcript not observed
+**Status:** RTM login/subscribe succeeded in a live browser against a live agent
+(200 OK on `/api/agora/rtm-token`, confirmed via network inspection), but no
+transcript text appeared in the ~30s test window. **Inconclusive, not confirmed
+broken:** the test browser had no real microphone (real Chrome wasn't reachable this
+pass; a synthetic silent audio stream was substituted to let the RTC/RTM join
+complete), so nothing was said for the agent to transcribe, and its own greeting
+message — the one thing that should fire without our input — never showed up
+either. `voice-test/page.tsx`'s `addLog` now mirrors to `console.log` so the next
+attempt can be diagnosed without DOM introspection. Next step: retry with either
+real Chrome (real mic) or a longer wait + console watch for the agent's greeting
+specifically. See `docs/agora/RESEARCH.md` §9, §11.
 
-### 6. MCP tool-calling via the composed pipeline — implemented, needs a live test
-**Status:** implemented and unit-tested 2026-08-31 (see "Recently completed" for
-detail); **the one remaining step is a live credentialed verification call, which
-needs explicit go-ahead since it's billed** (real Agora ConvoAI session + Gemini Live
-usage — same category of action held off on earlier this session without
-confirmation). `/start-agent` now accepts `voice_pipeline: "composed_tools"`, which
-wires real `llm.mcp_servers` per Agora's documented schema (confirmed via direct
-fetches of the join-API reference, the Gemini-as-plain-LLM-vendor page, and
-managed-credential examples for ASR/TTS). Gemini stays the reasoning model; ASR
-(Deepgram) and TTS (MiniMax) use Agora-managed credentials, so no new third-party API
-key was added. The default pipeline (`gemini_live`) is completely unchanged — this is
-strictly additive and opt-in. **Not yet confirmed:** whether Agora's servers actually
-accept this payload, and whether the agent genuinely invokes a tool through it — both
-require a real `POST /api/agora/start-agent` with `voice_pipeline: "composed_tools"`
-against a live room. Ask before running that call.
+### 6. MCP tool-calling via the composed pipeline — payload confirmed accepted by Agora
+**Status:** live-verified 2026-08-31 (see `docs/agora/RESEARCH.md` §11) — Agora's
+real API **accepted** the `composed_tools` + `llm.mcp_servers` payload
+(`mcp_enabled: true` echoed back, real `agent_id` assigned, real agent audio played
+in a live browser). **Found and fixed a real bug during this test:** Agora's actual
+join API rejects `credential_mode: "managed"` ASR/TTS blocks that omit
+`params.url` — this codebase's payload had omitted it for both. Fixed
+(`asr.params.url`/`tts.params.url` now set to the exact literal values from Agora's
+docs), regression-tested, and confirmed live: the fixed payload was accepted.
+**Still not confirmed:** whether the agent actually *invokes* a tool through this
+wiring — nothing in the live test window required a tool call, so this remains
+open. Next live session should say something that requires a tool (e.g. ask about
+current weather) and watch for `mock-services` receiving a call.
 
 ### 7. Gemini API latency is inconsistent in this environment — worth monitoring
 **Status:** observed, mitigated (not "fixed" — the underlying cause is external).
@@ -63,20 +61,30 @@ silent, but repeated timeouts still mean users see the heuristic fallback (weake
 extraction) more often than they should. If this keeps happening, check whether it's
 regional API routing, a Google-side incident, or something about this project's quota
 tier — `GEMINI_EXTRACTION_TIMEOUT_SECONDS` can be raised if 12s turns out too
-aggressive for a consistently-slower-but-still-working backend.
+aggressive for a consistently-slower-but-still-working backend. No new finding this
+pass: confirmed this is Google-side API behavior, not something this codebase causes
+or can fix. Closing further local investigation here.
 
-### 8. Demo incident's `/run-all` reset has happened at least twice with no traceable cause
-**Status:** not resolved — see the detailed investigation note in "Recently completed"
-below (dated 2026-08-31) for everything ruled out (no frontend auto-trigger, no
-backend startup auto-call, reminder-worker upsert doesn't explain content reverting).
-**Mitigation shipped, root cause still open:** `run_complete_identity_outage_scenario()`
-in `backend/app/api/demo.py` now logs a prominent `WARNING` every time it's invoked,
-naming exactly what it's about to discard. If this recurs, check `docker compose logs
-backend | grep "RESET triggered"` *before* the container is next rebuilt — a rebuild
-discards the log that would show whether it was an HTTP call (and from where) or
-something else entirely. Low priority: doesn't corrupt data, doesn't block any other
-work, and the endpoint's reset behavior is intentional by design — the only question
-is what's calling it unexpectedly, if anything really is.
+### 8. Demo incident's `/run-all` reset has happened at least twice — now explained
+**Status:** most likely explained 2026-08-31, not a code bug. This machine runs
+**multiple concurrent Claude Code sessions** against the same repo and the same
+Docker backend on `localhost:8000` (confirmed via `ListAgents` — a peer session
+`crius-1b` was independently active for hours during this work). Re-checked
+everything the earlier investigation flagged as unresolved: no frontend
+auto-trigger (`runIdentityOutageDemo` is only bound to a button `onClick`, never a
+`useEffect`), no backend startup auto-call (`lifespan()` in `main.py` only loads
+persisted state), no seed-on-migration (zero matches for the demo incident ID across
+`backend/app/engine/migrations/*.sql`), 0 container restarts (ruling out a
+crash-loop). Combined with the earlier finding (a reset happened with zero
+`/run-all` requests in the *current* container's access log, yet the data was
+already reset when that container loaded it from Postgres at startup) — the
+straightforward explanation is a legitimate `/run-all` call from another session,
+a prior instance of this session, or manual testing, whose evidence lived in a
+*previous* backend container's logs (Docker doesn't persist those across a
+rebuild, and this repo's backend image was rebuilt many times this session). Not a
+bug to fix further; the warning log added earlier (`logger.warning(...)` in
+`run_complete_identity_outage_scenario()`) stays in place so a *future* occurrence
+is traceable in real time.
 
 ---
 
