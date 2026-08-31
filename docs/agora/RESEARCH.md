@@ -511,6 +511,71 @@ transcribe).
 
 ---
 
+## 12. Live credentialed test with a real microphone (2026-09-01) — root cause of the day's failures found
+
+Continuation of §11, this time with real Chrome and a real microphone (the earlier
+pass's synthetic audio workaround wasn't needed). Two real bugs found and fixed:
+
+**Bug 1 — wrong Gemini model for composed_tools, confirmed via direct curl against
+the live Gemini API (not guessed):**
+
+```
+curl "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-live-preview:streamGenerateContent?alt=sse&key=..."
+→ HTTP 400: "models/gemini-3.1-flash-live-preview only supports real-time
+   bidirectional streaming via WebSocket (bidiGenerateContent). Please use the
+   Gemini Live API (bidiGenerateContent via WebSocket) instead of generateContent."
+```
+
+`StartAgentRequest.model` (default `gemini-3.1-flash-live-preview`) was being reused
+for *both* pipelines, but `composed_tools`'s `llm` block calls the plain REST
+`streamGenerateContent` endpoint, which that model cannot serve. This is the actual
+root cause of "Sorry, I encountered an issue" appearing on every single turn
+throughout the day's earlier testing (§11's model-quota theory was a red herring —
+the real quota exhaustion was on `gemini-3.7-flash`, used only by this project's own
+extraction pipeline, an entirely separate code path from the agent's own LLM call).
+Fixed with a new `composed_tools_llm_model` field, default `gemini-3.6-flash`
+(confirmed working via the same curl methodology). `backend/app/api/agora.py`'s two
+pipelines now have fully independent model fields instead of sharing one with
+incompatible requirements.
+
+**Bug 2 — RTM dependency silently missing from the Docker image**, discovered while
+debugging why RTM never produced a single console log line all day: `grep -rl
+'agora-rtm' /app/.next/static/chunks/` returned nothing even after adding the
+package to `package.json`, because Next.js's webpack minifier strips literal
+package-name strings from production chunk output — a red herring that cost real
+debugging time. The actual chunk mapping (`"lib/agoraRtmTranscripts.ts -> agora-rtm"`)
+was confirmed present in `.next/react-loadable-manifest.json`, and a one-off
+container built from the `deps` Docker stage confirmed `agora-rtm@2.3.0` genuinely
+installs. The dependency was never actually the problem; the real gap was that
+`client.login()`/`client.subscribe()` have no documented timeout, so if the RTM WSS
+handshake were silently blocked, it would hang forever with zero log output --
+indistinguishable from "still connecting." Added explicit step-by-step logging and
+a 10s timeout per call in `agoraRtmTranscripts.ts`.
+
+**After both fixes**: a real live conversation happened. The agent held a
+back-and-forth exchange with a real human voice, and its own response ("Logged as
+UNCLASSIFIED (UNVERIFIED). Extracted via keyword fallback (LLM unavailable) — treat
+as UNVERIFIED.") — phrasing that reflects `DEFAULT_EMERGENCY_PROMPT`'s evidence-
+labeling instructions — appeared in the transcript panel correctly labeled
+**TOCSIN**, not Field Operator. This is the first confirmed instance all day of a
+genuinely agent-sourced, correctly-attributed transcript entry.
+
+**Also found**: two unrelated real bugs in `voice-test/page.tsx`, both fixed
+alongside the above (see the `fix: real bugs found via live voice testing` commit):
+`.vcc-root`'s `min-height: 100vh` + `overflow: visible` let every nested scroll
+panel grow the whole page instead of scrolling internally (fixed to `height: 100vh`
++ `overflow: hidden`); and Chrome's local `SpeechRecognition` fallback path
+mislabeled agent speech leaking through the mic as the operator's own words, because
+its finalization lag (1-3s) meant checking "is the agent currently speaking" at
+result-time missed speech that had already ended (fixed with a 3s post-speech
+cooldown window).
+
+**Still open**: whether the agent invokes an MCP tool through a real conversational
+turn (only discovery — `ListToolsRequest` — was observed in `mock-services` logs,
+not an actual tool call), and whether `/speak` audibly broadcasts into a live room.
+
+---
+
 ## Capability matrix
 
 Per the project's status-labeling convention (see `CLAUDE.md`), every row below is
@@ -525,7 +590,7 @@ carries that status, because no live credentialed run was performed in this pass
 | ConvoAI agent join (`/api/agora/start-agent`), `composed_tools` pipeline | `VERIFIED IN CODE` | **Live-verified 2026-08-31** (see §11): real Agora acceptance, real `agent_id` returned, real RTC audio from the agent played in a live browser. Found and fixed a real bug in this pass (`asr`/`tts` blocks were missing required `params.url`). The `gemini_live` pipeline itself was not re-tested this pass (only `composed_tools` was live-dispatched) — its schema is unchanged from earlier verification. |
 | ConvoAI agent leave (`/api/agora/stop-agent`) | `VERIFIED IN CODE` | **Live-verified 2026-08-31**: stopped the real agent started in §11, confirmed `"status": "stopped"`. |
 | Local agent session lookup (`/api/agora/local-agent-session`) | `VERIFIED IN CODE` | This one only claims to be local bookkeeping (an in-memory dict read), which was exercised indirectly by the existing mocked `/start-agent` and `/stop-agent` tests that populate/clear `ACTIVE_AGENTS`. It makes no live Agora claim, so there is nothing further to verify. |
-| Real Agora "Query agent status" REST endpoint | `NOT USED` | Its existence is referenced in Agora's own docs (search-result title only); its exact URL/schema could not be confirmed via `WebFetch` in this pass, and per project policy it was not implemented against a guessed contract. Not called anywhere in this codebase. |
+| Real Agora "Query agent status" REST endpoint | `VERIFIED IN CODE` (URL confirmed, not yet wired into the app) | **Confirmed live 2026-09-01**: `GET /api/conversational-ai-agent/v2/projects/{appid}/agents/{agentId}` (Basic Auth, same scheme as join/leave) returns `{agent_id, message, name, start_ts, status}` for a real running agent. Discovered while debugging why an agent showed no RTC activity in the browser — this endpoint definitively confirmed the agent was genuinely `RUNNING` server-side even when the browser's own RTC events hadn't shown it yet, which is what proved the browser-side symptom was a timing/observation issue, not an actual agent failure. Not yet wired into `backend/app/api/agora.py`'s `/local-agent-session` endpoint (still local-registry-only) -- that would be the natural next step to make that endpoint's data live instead of just cached. |
 | Gemini Live `mllm` params, voice enum, `agora_vad` turn detection | `OFFICIAL DOCS ONLY` | Confirmed to match `docs.agora.io/en/conversational-ai/models/mllm/gemini` field-for-field. Not run against a live Gemini Live session in this pass. |
 | `mllm.mcp_servers` under `gemini_live` pipeline | `NOT USED` (confirmed unsupported) | **Resolved 2026-08-31**: never sent regardless of request — official docs confirm `mcp_servers` belongs under `llm`, not `mllm`. |
 | `llm.mcp_servers` under new `composed_tools` pipeline | `CREDENTIAL REQUIRED` | **Payload acceptance live-verified 2026-08-31** (see §11): Agora accepted the payload with `mcp_enabled: true` echoed back. Actual tool *invocation* through it is still unconfirmed — nothing in the live test window required the agent to call a tool. Stays `CREDENTIAL REQUIRED`, not `VERIFIED IN CODE`, until a tool call is actually observed. |

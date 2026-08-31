@@ -5,7 +5,12 @@ Auto-maintained by Claude: an entry is added when work is identified, and delete
 it's done. Do not treat an entry's presence here as "not started"; check the note for
 current state. This file is the resume point after any session/context reset.
 
-Last updated: 2026-08-31 (all P1/P2 items closed except live-agent verification for items 4/5/6; fixed a more severe version of the real-Postgres test-pollution bug found earlier).
+Last updated: 2026-09-01 (live voice-tested with a real microphone in real Chrome;
+found and fixed the actual root cause of "Sorry, I encountered an issue" on every
+turn — composed_tools was defaulting to a WebSocket-only Gemini model against a
+REST-only endpoint. Speaker-labeled transcript delivery confirmed working live.
+Items 4/6's remaining gaps are now narrow: /speak untested, MCP tool invocation
+unconfirmed (discovery confirmed, a call is not).).
 
 ---
 
@@ -17,40 +22,43 @@ None open right now.
 
 ## P1 — Real but narrower
 
-### 4. Spoken/audio summary broadcast — implemented, still needs a live test
-**Status:** implemented; a live agent session was run 2026-08-31 (see item 6/§11) but
-`/speak` specifically was NOT called during it (the session was stopped to control
-cost before reaching that check). `POST /api/agora/speak` request-building matches
-the documented schema and is curl-verified against real credentials for the 404
-(no-agent) path; live audio delivery is still not observed. Needs a fresh live agent
-session with explicit go-ahead. See `docs/agora/RESEARCH.md` §10.
+### 4. Spoken/audio summary broadcast — still not exercised live
+**Status:** implemented, request-building curl-verified for the 404 (no-agent) path.
+Two live agent sessions ran 2026-09-01 (real mic, real Chrome — see items 5/6) but
+`/speak` specifically still wasn't called during either. Needs one more live session
+segment: with an agent already running, call `POST /api/agora/speak` and confirm
+audio is actually heard. See `docs/agora/RESEARCH.md` §10.
 
-### 5. RTM transcript delivery — live-tested 2026-08-31, transcript not observed
-**Status:** RTM login/subscribe succeeded in a live browser against a live agent
-(200 OK on `/api/agora/rtm-token`, confirmed via network inspection), but no
-transcript text appeared in the ~30s test window. **Inconclusive, not confirmed
-broken:** the test browser had no real microphone (real Chrome wasn't reachable this
-pass; a synthetic silent audio stream was substituted to let the RTC/RTM join
-complete), so nothing was said for the agent to transcribe, and its own greeting
-message — the one thing that should fire without our input — never showed up
-either. `voice-test/page.tsx`'s `addLog` now mirrors to `console.log` so the next
-attempt can be diagnosed without DOM introspection. Next step: retry with either
-real Chrome (real mic) or a longer wait + console watch for the agent's greeting
-specifically. See `docs/agora/RESEARCH.md` §9, §11.
+### 5. RTM transcript delivery — now producing correctly-labeled agent transcripts
+**Status:** substantially more verified 2026-09-01. Root cause of the whole day's
+"never works" pattern found: `agora-rtm` was declared in `package.json` but its
+dynamic `import('agora-rtm')` had no logging around it and no timeout, so a stall
+was indistinguishable from "still trying" — fixed with explicit step logging and a
+10s timeout per call in `agoraRtmTranscripts.ts`. Live-verified in real Chrome with
+a real microphone: a genuine agent response ("Logged as UNCLASSIFIED (UNVERIFIED)...")
+appeared correctly labeled **TOCSIN**, not Field Operator — confirming
+speaker-correct transcript delivery is working end-to-end, through either RTM or
+the legacy stream-message fallback (both call the same labeling path; which one
+fired specifically was not pinned down this pass due to console-log capture
+unreliability in this environment — worth confirming precisely next session).
 
-### 6. MCP tool-calling via the composed pipeline — payload confirmed accepted by Agora
-**Status:** live-verified 2026-08-31 (see `docs/agora/RESEARCH.md` §11) — Agora's
-real API **accepted** the `composed_tools` + `llm.mcp_servers` payload
-(`mcp_enabled: true` echoed back, real `agent_id` assigned, real agent audio played
-in a live browser). **Found and fixed a real bug during this test:** Agora's actual
-join API rejects `credential_mode: "managed"` ASR/TTS blocks that omit
-`params.url` — this codebase's payload had omitted it for both. Fixed
-(`asr.params.url`/`tts.params.url` now set to the exact literal values from Agora's
-docs), regression-tested, and confirmed live: the fixed payload was accepted.
-**Still not confirmed:** whether the agent actually *invokes* a tool through this
-wiring — nothing in the live test window required a tool call, so this remains
-open. Next live session should say something that requires a tool (e.g. ask about
-current weather) and watch for `mock-services` receiving a call.
+### 6. MCP tool-calling via the composed pipeline — payload accepted, real bug fixed
+**Status:** live-verified 2026-09-01. Found and fixed a second real bug beyond the
+asr/tts.params.url one: `composed_tools_llm_model` was defaulting to
+`gemini-3.1-flash-live-preview` (a WebSocket-Live-only model), but composed_tools
+calls the plain `streamGenerateContent` REST endpoint — confirmed via direct curl
+that Agora's real backend (and Google's own API) rejects that combination with
+HTTP 400. This is what caused "Sorry, I encountered an issue" on every single turn
+all day. Fixed with a dedicated `composed_tools_llm_model` field (default
+`gemini-3.6-flash`, confirmed working live). After the fix: the agent held a real
+back-and-forth voice conversation, correctly transcribed both sides. Also newly
+confirmed live: Agora's undocumented-URL "Query agent status" endpoint is
+`GET /api/conversational-ai-agent/v2/projects/{appid}/agents/{agentId}` (previously
+`NOT USED` in RESEARCH.md's capability matrix pending confirmation — now confirmed).
+**Still not confirmed:** whether the agent actually invoked an MCP tool through a
+real conversational turn (the live conversation so far covered general Q&A, not a
+tool-triggering question like "what's the weather risk" — `mock-services` logs
+show the agent's `ListToolsRequest` discovery succeeding, but no tool *call* yet).
 
 ### 7. Gemini API latency is inconsistent in this environment — worth monitoring
 **Status:** observed, mitigated (not "fixed" — the underlying cause is external).
