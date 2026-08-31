@@ -174,12 +174,51 @@ Consequences, all acted on in the code:
 public APIs and remain callable directly and from `mock-services/server.py`. What is
 not available is *the voice agent invoking them mid-call over Gemini Live*.
 
-**Path to actually enabling in-call tools (not implemented):** switch from the `mllm`
-(Gemini Live end-to-end) pipeline to the `llm` pipeline (separate ASR + LLM + TTS),
-where `llm.mcp_servers` + `advanced_features.enable_tools` are documented and
-supported. That is a material architecture change — it trades Gemini Live's
-low-latency end-to-end audio for a composed pipeline — and should not be attempted
-without a live credentialed session to verify against.
+**Path to actually enabling in-call tools — now IMPLEMENTED (2026-08-31), NOT YET
+LIVE-VERIFIED:** `backend/app/api/agora.py`'s `/start-agent` now accepts a
+`voice_pipeline` field (`"gemini_live"` default, unchanged behavior; or
+`"composed_tools"`, the new path). Building the `composed_tools` payload required
+resolving a real contradiction found mid-implementation: the join-API reference lists
+`llm.vendor` as `openai | azure | xai | custom` — Gemini is not in that enum — while a
+separate, dedicated `docs.agora.io/en/conversational-ai/models/llm/gemini` page shows
+Gemini used as a plain `llm` vendor via `style: "gemini"` with a raw URL and embedded
+API key. Resolution: `vendor: "custom"` + `style: "gemini"`, matching both pages —
+`"custom"` is the documented escape hatch for pointing the `llm` step at an arbitrary
+endpoint, which is exactly what a raw Gemini URL is. This keeps Gemini as the
+reasoning model; only the tool-calling *plumbing* changes, not the "brain".
+
+ASR (`vendor: "deepgram"`) and TTS (`vendor: "minimax"`) both use
+`credential_mode: "managed"` — confirmed via directly-fetched official examples for
+each — so Agora supplies and bills those two hops itself; no new third-party API key
+was added to this project. Full schema sources, all fetched directly this pass:
+- ASR managed-credential example: `docs.agora.io/en/conversational-ai/models/asr/overview`
+- LLM managed-credential example (confirms the `credential_mode` mechanism generally):
+  `docs.agora.io/en/conversational-ai/models/llm/openai`
+- Gemini as a plain `llm` vendor: `docs.agora.io/en/conversational-ai/models/llm/gemini`
+- TTS managed-credential example: `docs.agora.io/en/conversational-ai/models/tts/overview`
+  (via search-result excerpt, not a direct fetch — see caveat below)
+- `mcp_servers` item shape + `advanced_features.enable_tools`:
+  `docs.agora.io/en/api-reference/api-ref/conversational-ai/join`
+
+**Caveat carried forward honestly:** the TTS managed-credential example came from a
+web-search result excerpt quoting the docs page, not a direct `WebFetch` of that page
+in this pass — slightly weaker sourcing than the others. The `asr.params` fields used
+(`model: "nova-3"`, `language: "en"`) and `tts.params` fields (voice ID, sample rate)
+are copied from the one confirmed example for each vendor; other valid values were not
+enumerated, so these are "a working example," not "the only correct configuration."
+
+**This trades Gemini Live's single native-audio hop for three hops (ASR → LLM → TTS),
+a real latency cost** — chosen only when the caller explicitly requests
+`composed_tools`, never as a silent default. `mcp_tool_calling_status` in the
+`/start-agent` response is explicit either way: `NOT_SUPPORTED` for `gemini_live`
+(even if an MCP URL is configured — it is never sent), or `"WIRED PER OFFICIAL
+DOCS — NOT YET LIVE-VERIFIED"` for `composed_tools`. Regression tests
+(`test_agora_token.py`) assert the actual outbound JSON payload matches this
+documented shape and that `mllm.mcp_servers` is never sent regardless of pipeline
+choice. **What remains genuinely unverified: whether Agora's servers accept this
+exact payload, and whether the agent actually invokes a tool through it** — both
+require a live credentialed session (real `AGORA_CUSTOMER_ID`/`SECRET` +
+`GEMINI_API_KEY` + a running voice room), which was not performed in this pass.
 
 ### Other findings from the 2026-08-31 release-notes pass
 
@@ -326,7 +365,8 @@ carries that status, because no live credentialed run was performed in this pass
 | Local agent session lookup (`/api/agora/local-agent-session`) | `VERIFIED IN CODE` | This one only claims to be local bookkeeping (an in-memory dict read), which was exercised indirectly by the existing mocked `/start-agent` and `/stop-agent` tests that populate/clear `ACTIVE_AGENTS`. It makes no live Agora claim, so there is nothing further to verify. |
 | Real Agora "Query agent status" REST endpoint | `NOT USED` | Its existence is referenced in Agora's own docs (search-result title only); its exact URL/schema could not be confirmed via `WebFetch` in this pass, and per project policy it was not implemented against a guessed contract. Not called anywhere in this codebase. |
 | Gemini Live `mllm` params, voice enum, `agora_vad` turn detection | `OFFICIAL DOCS ONLY` | Confirmed to match `docs.agora.io/en/conversational-ai/models/mllm/gemini` field-for-field. Not run against a live Gemini Live session in this pass. |
-| `mllm.mcp_servers` tool-calling wiring | `NOT USED` (confirmed unsupported) | **Resolved 2026-08-31**: official release notes state `mcp_servers` is supported only under `llm`, not `mllm`. The field Tocsin sends is not a supported field. Labeled MOCK/DEMO ONLY in prompt, API response, and README. Enabling real in-call tools requires migrating to the `llm` pipeline. |
+| `mllm.mcp_servers` under `gemini_live` pipeline | `NOT USED` (confirmed unsupported) | **Resolved 2026-08-31**: never sent regardless of request — official docs confirm `mcp_servers` belongs under `llm`, not `mllm`. |
+| `llm.mcp_servers` under new `composed_tools` pipeline | `CREDENTIAL REQUIRED` | **Implemented 2026-08-31** (`voice_pipeline: "composed_tools"` on `/start-agent`) per the confirmed schema. Payload shape verified by regression tests against a mocked Agora response; real Agora acceptance and actual tool invocation both require a live credentialed session, not yet performed. |
 | Agora `/speak` TTS broadcast (spoken summaries) | `OFFICIAL DOCS ONLY` | Endpoint documented; not called by Tocsin. Closing this would complete problem-statement item 11. |
 | Agora `/think` custom instruction | `OFFICIAL DOCS ONLY` | Documented; not called by Tocsin. |
 | Transcript delivery over RTM (v2.9) | `OFFICIAL DOCS ONLY` | Documented; Tocsin still reads the RTC `stream-message` path. |
@@ -351,7 +391,8 @@ carries that status, because no live credentialed run was performed in this pass
 | Gemini `mllm` params/voice enum/turn_detection (`agora_vad`) | VERIFIED — MATCHES OFFICIAL DOCS |
 | `gemini-3.1-flash-live-preview` as current model name | VERIFIED as of this fetch (preview model — expect rotation) |
 | Hand-built Gemini WS URL as `mllm.url` | UNVERIFIED — necessity vs redundancy not confirmed |
-| `mllm.mcp_servers` for tool-calling on Gemini Live | **NOT CONFIRMED BY OFFICIAL DOCS** — docs describe `llm.mcp_servers` instead; code/prompt/README now label this MOCK/DEMO ONLY; requires live credentialed test to resolve |
+| `mllm.mcp_servers` for tool-calling on Gemini Live | **CONFIRMED UNSUPPORTED, never sent** (2026-08-31) — docs describe `llm.mcp_servers` instead |
+| `llm.mcp_servers` via new `composed_tools` pipeline | **IMPLEMENTED 2026-08-31** per confirmed schema — `CREDENTIAL REQUIRED` for live verification (Agora acceptance + actual tool invocation both unverified) |
 | Web SDK `stream-message` event usage | VERIFIED — MATCHES OFFICIAL DOCS |
 | `agoraStreamDecoder.ts` exact wire format | UNVERIFIED AGAINST OFFICIAL DOCS — now has fixture tests proving fail-safe (`null`) behavior on unrecognized payloads; wire format itself still unconfirmed |
 | `.env.example` completeness for Agora vars | RESOLVED (2026-08-31) — `AGORA_CUSTOMER_ID`, `AGORA_CUSTOMER_SECRET`, `MCP_SERVER_PUBLIC_URL` now documented there |

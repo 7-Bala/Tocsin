@@ -30,12 +30,21 @@ Agora v2.9 moved transcript/agent-state delivery to RTM messages. Tocsin still r
 the RTC `stream-message` event with an empirical, doc-unconfirmed wire format. Migrate
 and capture one real payload as a test fixture.
 
-### 6. MCP tools cannot be invoked by the live Gemini Live voice agent
-**Status:** confirmed and already labeled correctly everywhere (README, prompt,
-`docs/agora/RESEARCH.md` §4) as `NOT IMPLEMENTED`. Not a bug — a documented, honest
-limitation. Real fix requires migrating from the `mllm` pipeline to the `llm` pipeline
-(architecture change, needs a live credentialed session to verify against). Listed
-here only so it isn't lost, not because it needs urgent action.
+### 6. MCP tool-calling via the composed pipeline — implemented, needs a live test
+**Status:** implemented and unit-tested 2026-08-31 (see "Recently completed" for
+detail); **the one remaining step is a live credentialed verification call, which
+needs explicit go-ahead since it's billed** (real Agora ConvoAI session + Gemini Live
+usage — same category of action held off on earlier this session without
+confirmation). `/start-agent` now accepts `voice_pipeline: "composed_tools"`, which
+wires real `llm.mcp_servers` per Agora's documented schema (confirmed via direct
+fetches of the join-API reference, the Gemini-as-plain-LLM-vendor page, and
+managed-credential examples for ASR/TTS). Gemini stays the reasoning model; ASR
+(Deepgram) and TTS (MiniMax) use Agora-managed credentials, so no new third-party API
+key was added. The default pipeline (`gemini_live`) is completely unchanged — this is
+strictly additive and opt-in. **Not yet confirmed:** whether Agora's servers actually
+accept this payload, and whether the agent genuinely invokes a tool through it — both
+require a real `POST /api/agora/start-agent` with `voice_pipeline: "composed_tools"`
+against a live room. Ask before running that call.
 
 ### 7. Gemini API latency is inconsistent in this environment — worth monitoring
 **Status:** observed, mitigated (not "fixed" — the underlying cause is external).
@@ -72,6 +81,32 @@ a real incident needs "we decided X because Y, superseded by Z at T2."
 ---
 
 ## Recently completed (kept briefly for context, then deleted next pass)
+
+- ✅ **MCP tool-calling wired for real via a new opt-in `composed_tools` pipeline**
+  (2026-08-31). Root research finding that made this possible: the join-API reference
+  lists `llm.vendor` as `openai | azure | xai | custom` (Gemini not in the enum), while
+  a *separate* dedicated Gemini-LLM docs page shows Gemini used via `style: "gemini"` +
+  a raw URL/embedded key — resolved as `vendor: "custom"` + `style: "gemini"`,
+  satisfying both pages and keeping Gemini as the reasoning model. `backend/app/api/agora.py`
+  now branches on a new `voice_pipeline` field on `/start-agent`
+  (`"gemini_live"` default — completely unchanged behavior — or `"composed_tools"`,
+  the new path). `composed_tools` builds `asr` (Deepgram) + `llm` (Gemini, BYOK, our
+  existing key) + `tts` (MiniMax) with `asr`/`tts` on `credential_mode: "managed"` so
+  Agora bills those two hops itself — no new third-party API key added to the project.
+  Real `llm.mcp_servers` + `advanced_features.enable_tools` are only ever wired into
+  this new pipeline; `mllm.mcp_servers` (the old, doc-confirmed-wrong attempt) is
+  removed entirely — never sent under any circumstances now, closing the dishonesty
+  risk instead of leaving it as a "maybe it works anyway" field. The system prompt and
+  `/start-agent` response are both explicit about which pipeline is active and what
+  that means for tool support (`NOT_SUPPORTED` vs `"WIRED PER OFFICIAL DOCS — NOT YET
+  LIVE-VERIFIED"`). `sanitize_payload` generalized to cover all four vendor blocks
+  (`mllm`/`llm`/`asr`/`tts`) instead of just two, hardcoding nothing that isn't
+  actually redacted. 5 new/updated regression tests assert the *actual outbound JSON*
+  matches the documented schema (not just that the endpoint returns 200), including
+  that `mllm.mcp_servers` is never sent regardless of pipeline choice. 62/62 backend
+  tests pass. **Live verification (does Agora accept this payload; does the agent
+  actually invoke a tool) intentionally not performed — it's a billed action requiring
+  explicit go-ahead, tracked as the one remaining step in the P1 item above.**
 
 - ✅ **Unowned action items now surfaced as a distinct alert, not silent "Unassigned"**
   (2026-08-31). Backend (`evidence.py`): added an `unowned` boolean per item in the

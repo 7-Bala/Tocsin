@@ -1,6 +1,16 @@
 """
 Agora Voice & Conversational AI Agent Endpoints
-Handles RTC token issuance and Agora Conversational AI (Gemini Live MLLM + MCP Tools) lifecycle.
+Handles RTC token issuance and Agora Conversational AI agent lifecycle.
+
+Two voice pipelines are supported (see StartAgentRequest.voice_pipeline):
+  - gemini_live (default): Agora's mllm pipeline, Gemini handles audio end-to-end.
+    Lowest latency. Does NOT support MCP tool-calling (confirmed against official
+    Agora docs — mcp_servers is documented only under `llm`, not `mllm`).
+  - composed_tools: Agora's separate asr+llm+tts pipeline. Higher latency, but this is
+    where Agora actually documents MCP tool-calling. Still uses Gemini as the
+    reasoning model; ASR/TTS use Agora-managed credentials for Deepgram/MiniMax so no
+    new third-party API keys are required. See docs/agora/RESEARCH.md §4 for the full
+    research trail behind this split.
 """
 
 import base64
@@ -28,14 +38,15 @@ CHANNEL_NAME_REGEX = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
 ACTIVE_AGENTS: dict[str, str] = {}
 
 # NOTE on MCP tool wiring (see docs/agora/RESEARCH.md §4): Agora's official release
-# notes document tool-calling as an `llm.mcp_servers` field, not `mllm.mcp_servers`.
-# Agora's dedicated Gemini Live MLLM documentation page makes no mention of tool
-# calling or mcp_servers at all, and MLLM mode is documented to disable the separate
-# llm/asr/tts pipeline that `llm.mcp_servers` belongs to. Wiring mcp_servers under
-# `mllm` below (see `start_conversational_agent`) is therefore UNVERIFIED AGAINST
-# OFFICIAL AGORA DOCS, not a confirmed capability. Until a live, credentialed session
-# demonstrates the agent actually invoking a tool through this path, treat MCP tool
-# execution during a live Gemini Live voice call as MOCK/DEMO ONLY.
+# notes document tool-calling as an `llm.mcp_servers` field, not `mllm.mcp_servers`,
+# and the dedicated Gemini Live MLLM documentation page makes no mention of tool
+# calling at all. This is why `start_conversational_agent` below offers two pipelines
+# (StartAgentRequest.voice_pipeline) — MCP tools are only ever wired into the
+# `composed_tools` pipeline, where the documented `llm.mcp_servers` field actually
+# lives. The default `gemini_live` pipeline never claims tool access. The base prompt
+# below stays pipeline-agnostic (no tool claims either way) — MCP_TOOL_ROSTER_NOTICE,
+# appended only for composed_tools when a tool server is configured, is what actually
+# tells the model tools might be available.
 DEFAULT_EMERGENCY_PROMPT = (
   "You are Tocsin, an intelligent AI emergency disaster coordinator and Incident Commander assistant. "
   "You are speaking to field responders, commanders, and citizens in active crisis situations. "
@@ -61,11 +72,13 @@ DEFAULT_EMERGENCY_PROMPT = (
   "OPERATIONAL RESPONSE STRUCTURE: When addressing operational questions, internally structure your assessment with: VERIFIED facts, REPORTED user claims, UNCERTAIN gaps, reasoned ASSESSMENT, RECOMMENDATION, and PROPOSED ACTION."
 )
 
-# Appended to the prompt only when an MCP server URL is actually configured for this
-# session (see `start_conversational_agent`). This still cannot promise the tools work
-# — see the UNVERIFIED note above `DEFAULT_EMERGENCY_PROMPT` — so it is written to make
-# the model treat every tool call as attempted, not guaranteed, and to prefer stating
-# that a tool result is unavailable over inventing one.
+# Appended to the prompt only when the composed_tools pipeline is active AND an MCP
+# server URL is configured (see `start_conversational_agent`). The `llm.mcp_servers`
+# wiring itself is now confirmed against official Agora docs (unlike the earlier
+# mllm.mcp_servers attempt) — what remains unverified is only whether a *live* session
+# actually invokes a tool through it, so this is still written to make the model treat
+# every tool call as attempted, not guaranteed, and to prefer stating that a tool
+# result is unavailable over inventing one.
 MCP_TOOL_ROSTER_NOTICE = (
   "An MCP tool server has been configured for this session, exposing up to 13 emergency "
   "intelligence and response tools if the connection succeeds: get_incident_status, "
@@ -75,10 +88,9 @@ MCP_TOOL_ROSTER_NOTICE = (
   "dispatch_resolution_action, notify_stakeholders. Select only tools relevant to the "
   "incident (e.g. for floods: get_incident_status, get_weather_risk, "
   "get_official_emergency_alerts, search_emergency_infrastructure, find_nearby_resource, "
-  "calculate_eta). Whether this tool connection is actually usable in a live Gemini Live "
-  "voice session has not been confirmed against official Agora documentation as of this "
-  "build — if a tool call does not return a result, say so plainly rather than assuming "
-  "it executed."
+  "calculate_eta). This tool wiring matches Agora's documented schema, but no live "
+  "session has yet confirmed a tool call actually completes — if a tool call does not "
+  "return a result, say so plainly rather than assuming it executed."
 )
 
 
@@ -144,6 +156,25 @@ class StartAgentRequest(BaseModel):
     default=None,
     description="Public HTTPS MCP server URL (defaults to MCP_SERVER_PUBLIC_URL env var if set)",
   )
+  voice_pipeline: Literal["gemini_live", "composed_tools"] = Field(
+    default="gemini_live",
+    description=(
+      "'gemini_live' (default, unchanged behavior): Agora's mllm pipeline — Gemini "
+      "handles audio end-to-end with the lowest latency, but Agora's official docs do "
+      "not support MCP tool-calling in this mode (see docs/agora/RESEARCH.md §4). "
+      "'composed_tools': Agora's separate asr+llm+tts pipeline — higher latency (three "
+      "hops instead of one native audio model), but this is the pipeline Agora's docs "
+      "actually document `llm.mcp_servers` under, so MCP tool-calling can genuinely be "
+      "wired here. Still uses Gemini as the reasoning model (via `style: 'gemini'` "
+      "with our own GEMINI_API_KEY, matching how the gemini_live pipeline builds its "
+      "URL) — ASR and TTS use Agora-managed credentials (credential_mode: 'managed') "
+      "for Deepgram and MiniMax respectively, so no new third-party API keys are "
+      "required, but this does draw on Agora's own managed billing for those two "
+      "steps. NOT YET LIVE-VERIFIED — the request is built per official Agora "
+      "documentation, but no live credentialed session has confirmed Agora accepts it "
+      "or that the agent actually invokes a tool through it."
+    ),
+  )
 
 
 class StopAgentRequest(BaseModel):
@@ -162,29 +193,31 @@ class StopAgentRequest(BaseModel):
 def sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
   """Create a safe-to-log copy of the request payload with secrets redacted."""
   sanitized = copy.deepcopy(payload)
-  if "properties" in sanitized and isinstance(sanitized["properties"], dict):
-    if "token" in sanitized["properties"]:
-      sanitized["properties"]["token"] = "[REDACTED_RTC_TOKEN]"
-    if "mllm" in sanitized["properties"] and isinstance(
-      sanitized["properties"]["mllm"], dict
-    ):
-      if "api_key" in sanitized["properties"]["mllm"]:
-        sanitized["properties"]["mllm"]["api_key"] = "[REDACTED_GEMINI_KEY]"
-      if "url" in sanitized["properties"]["mllm"]:
-        raw_url = str(sanitized["properties"]["mllm"]["url"])
-        sanitized["properties"]["mllm"]["url"] = re.sub(
-          r"key=[^&]+", "key=[REDACTED_GEMINI_KEY]", raw_url
-        )
-    if "llm" in sanitized["properties"] and isinstance(
-      sanitized["properties"]["llm"], dict
-    ):
-      if "api_key" in sanitized["properties"]["llm"]:
-        sanitized["properties"]["llm"]["api_key"] = "[REDACTED_GEMINI_KEY]"
-      if "url" in sanitized["properties"]["llm"]:
-        raw_url = str(sanitized["properties"]["llm"]["url"])
-        sanitized["properties"]["llm"]["url"] = re.sub(
-          r"key=[^&]+", "key=[REDACTED_GEMINI_KEY]", raw_url
-        )
+  props = sanitized.get("properties")
+  if not isinstance(props, dict):
+    return sanitized
+
+  if "token" in props:
+    props["token"] = "[REDACTED_RTC_TOKEN]"
+
+  # Applies to every vendor block that can carry a credential — mllm and llm today
+  # (both BYOK, straight to our own Gemini key), and defensively asr/tts too in case a
+  # future change adds BYOK credentials there (today they use credential_mode
+  # "managed" and carry no secret, but this redaction costs nothing to keep general).
+  for block_name in ("mllm", "llm", "asr", "tts"):
+    block = props.get(block_name)
+    if not isinstance(block, dict):
+      continue
+    if "api_key" in block:
+      block["api_key"] = "[REDACTED_API_KEY]"
+    if isinstance(block.get("url"), str):
+      block["url"] = re.sub(r"key=[^&]+", "key=[REDACTED_API_KEY]", block["url"])
+    headers = block.get("headers")
+    if isinstance(headers, dict):
+      for header_key in list(headers.keys()):
+        if header_key.lower() in ("authorization", "x-api-key"):
+          headers[header_key] = "[REDACTED_HEADER]"
+
   return sanitized
 
 
@@ -265,8 +298,13 @@ async def generate_rtc_token(request: GenerateTokenRequest) -> TokenResponse:
 
 @router.post(
   "/start-agent",
-  summary="Start Agora Conversational AI Agent (Gemini Live MLLM + MCP Tools)",
-  description="Launches a Google Gemini Live AI Voice Agent with MCP disaster tools into the specified Agora RTC voice channel.",
+  summary="Start Agora Conversational AI Agent",
+  description=(
+    "Launches a Gemini-powered voice agent into the specified Agora RTC voice channel. "
+    "Two pipelines available via voice_pipeline: 'gemini_live' (default, lowest "
+    "latency, no MCP tool support) or 'composed_tools' (higher latency, MCP tools "
+    "wired per official Agora docs — see StartAgentRequest.voice_pipeline)."
+  ),
 )
 async def start_conversational_agent(
   request: StartAgentRequest,
@@ -333,76 +371,141 @@ async def start_conversational_agent(
   # (see MCP_TOOL_ROSTER_NOTICE) is only appended when a tool server is actually wired.
   raw_mcp = request.mcp_server_url or os.getenv("MCP_SERVER_PUBLIC_URL") or ""
   mcp_url = raw_mcp.strip()
+  # MCP tools are only ever wired into the composed_tools pipeline (below) — Agora's
+  # own release notes document mcp_servers under `llm`, and the Gemini Live `mllm`
+  # documentation page makes no mention of tool-calling at all. See
+  # docs/agora/RESEARCH.md §4 for the full research trail.
+  mcp_requested = bool(mcp_url) and request.voice_pipeline == "composed_tools"
 
   prompt = (request.system_prompt or DEFAULT_EMERGENCY_PROMPT).strip()
-  if mcp_url and not request.system_prompt:
+  if mcp_requested and not request.system_prompt:
     prompt = f"{prompt}\n\n{MCP_TOOL_ROSTER_NOTICE}"
-  gemini_ws_url = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={gemini_key}"
 
-  # Official Agora ConvoAI REST v2 Join Schema (Gemini Live MLLM)
-  payload: dict[str, Any] = {
-    "name": f"tocsin_agent_{channel_name}",
-    "properties": {
-      "channel": channel_name,
-      "token": agent_token,
-      "agent_rtc_uid": str(request.agent_uid),
-      "remote_rtc_uids": ["*"],
-      "enable_string_uid": False,
-      "idle_timeout": 120,
-      "mllm": {
-        "enable": True,
-        "vendor": "gemini",
-        "url": gemini_ws_url,
-        "api_key": gemini_key,
-        "params": {
-          "model": request.model,
-          "instructions": prompt,
-          "voice": request.voice,
-          "affective_dialog": False,
-          "proactive_audio": False,
-          "transcribe_agent": True,
-          "transcribe_user": True,
-          "http_options": {"api_version": "v1beta"},
+  sse_endpoint: str | None = None
+  payload: dict[str, Any]
+
+  if request.voice_pipeline == "gemini_live":
+    # Unchanged from the original implementation, MINUS mcp_servers: official docs
+    # confirm this field is not supported here (docs/agora/RESEARCH.md §4). Gemini
+    # handles audio end-to-end — no separate asr/tts hop, lowest latency.
+    gemini_ws_url = (
+      "wss://generativelanguage.googleapis.com/ws/"
+      f"google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={gemini_key}"
+    )
+    payload = {
+      "name": f"tocsin_agent_{channel_name}",
+      "properties": {
+        "channel": channel_name,
+        "token": agent_token,
+        "agent_rtc_uid": str(request.agent_uid),
+        "remote_rtc_uids": ["*"],
+        "enable_string_uid": False,
+        "idle_timeout": 120,
+        "mllm": {
+          "enable": True,
+          "vendor": "gemini",
+          "url": gemini_ws_url,
+          "api_key": gemini_key,
+          "params": {
+            "model": request.model,
+            "instructions": prompt,
+            "voice": request.voice,
+            "affective_dialog": False,
+            "proactive_audio": False,
+            "transcribe_agent": True,
+            "transcribe_user": True,
+            "http_options": {"api_version": "v1beta"},
+          },
+          "turn_detection": {
+            "mode": "agora_vad",
+            "agora_vad_config": {
+              "interrupt_duration_ms": 500,
+              "prefix_padding_ms": 800,
+              "silence_duration_ms": 640,
+              "threshold": 0.5,
+            },
+          },
+          "input_modalities": ["audio"],
+          "output_modalities": ["audio"],
+          "greeting_message": (
+            "Tocsin emergency coordinator active. How can I assist?"
+          ),
+          "failure_message": "Sorry, I encountered an issue. Please try again.",
         },
-        "turn_detection": {
-          "mode": "agora_vad",
-          "agora_vad_config": {
-            "interrupt_duration_ms": 500,
-            "prefix_padding_ms": 800,
-            "silence_duration_ms": 640,
-            "threshold": 0.5,
+      },
+    }
+
+  else:  # composed_tools: separate asr + llm + tts pipeline, per official docs
+    # Higher latency than gemini_live (three hops instead of one native audio model),
+    # chosen only when the caller explicitly wants MCP tool-calling, which Agora's
+    # docs only support here. Schema confirmed against:
+    #   - ASR managed-credential example: docs.agora.io/en/conversational-ai/models/asr/overview
+    #   - LLM managed-credential example: docs.agora.io/en/conversational-ai/models/llm/openai
+    #   - Gemini as a plain llm vendor (style: "gemini", raw URL+key, BYOK):
+    #     docs.agora.io/en/conversational-ai/models/llm/gemini
+    #   - TTS managed-credential example: docs.agora.io/en/conversational-ai/models/tts/overview
+    #   - mcp_servers item shape + advanced_features.enable_tools:
+    #     docs.agora.io/en/api-reference/api-ref/conversational-ai/join
+    # ASR (Deepgram) and TTS (MiniMax) use credential_mode "managed" — Agora supplies
+    # those credentials and bills them to the Agora account; no new third-party API key
+    # is added to this project. LLM stays on our own GEMINI_API_KEY (BYOK) so the
+    # actual reasoning model doesn't change, only how tool-calling reaches it.
+    gemini_llm_url = (
+      "https://generativelanguage.googleapis.com/v1beta/models/"
+      f"{request.model}:streamGenerateContent?alt=sse&key={gemini_key}"
+    )
+    payload = {
+      "name": f"tocsin_agent_{channel_name}",
+      "properties": {
+        "channel": channel_name,
+        "token": agent_token,
+        "agent_rtc_uid": str(request.agent_uid),
+        "remote_rtc_uids": ["*"],
+        "enable_string_uid": False,
+        "idle_timeout": 120,
+        "asr": {
+          "credential_mode": "managed",
+          "vendor": "deepgram",
+          "params": {"model": "nova-3", "language": "en"},
+        },
+        "llm": {
+          # Gemini is not in Agora's documented `vendor` enum for the llm block
+          # (openai | azure | xai | custom) — "custom" plus style: "gemini" is the
+          # doc-consistent way to point the llm step at our own Gemini endpoint,
+          # matching the same BYOK URL-with-embedded-key pattern the gemini_live
+          # pipeline already uses above.
+          "vendor": "custom",
+          "style": "gemini",
+          "url": gemini_llm_url,
+          "api_key": gemini_key,
+          "system_messages": [{"role": "system", "content": prompt}],
+          "max_history": 32,
+          "params": {"model": request.model},
+          "greeting_message": "Tocsin emergency coordinator active. How can I assist?",
+          "failure_message": "Sorry, I encountered an issue. Please try again.",
+        },
+        "tts": {
+          "credential_mode": "managed",
+          "vendor": "minimax",
+          "params": {
+            "model": "speech-2.8-turbo",
+            "voice_setting": {"voice_id": "English_captivating_female1", "speed": 1.0},
+            "audio_setting": {"sample_rate": 44100},
           },
         },
-        "input_modalities": ["audio"],
-        "output_modalities": ["audio"],
-        "greeting_message": (
-          "Tocsin emergency coordinator active. How can I assist?"
-        ),
-        "failure_message": "Sorry, I encountered an issue. Please try again.",
       },
-    },
-  }
-
-  # Wire MCP Servers if public URL is configured. UNVERIFIED AGAINST OFFICIAL AGORA
-  # DOCS for the `mllm` (Gemini Live) pipeline — see the note above DEFAULT_EMERGENCY_PROMPT
-  # and docs/agora/RESEARCH.md §4. Treat this as MOCK/DEMO ONLY until a live session
-  # confirms the agent actually invokes a tool through it.
-  if mcp_url:
-    sse_endpoint = (
-      mcp_url if mcp_url.endswith("/sse") else f"{mcp_url.rstrip('/')}/sse"
-    )
-    mcp_config = [
-      {
-        "name": "tocsin-emergency-tools",
-        "endpoint": sse_endpoint,
-        "transport": "sse",
-      }
-    ]
-    payload["properties"]["mllm"]["mcp_servers"] = mcp_config
-    payload["properties"]["advanced_features"] = {"enable_tools": True}
-    logger.info(
-      f"Configured MCP server for agent: {sse_endpoint} (transport: sse)"
-    )
+    }
+    if mcp_requested:
+      sse_endpoint = mcp_url if mcp_url.endswith("/sse") else f"{mcp_url.rstrip('/')}/sse"
+      payload["properties"]["llm"]["mcp_servers"] = [
+        {
+          "name": "tocsin-emergency-tools",
+          "endpoint": sse_endpoint,
+          "transport": "sse",
+        }
+      ]
+      payload["properties"]["advanced_features"] = {"enable_tools": True}
+      logger.info(f"Configured MCP server for agent: {sse_endpoint} (transport: sse)")
 
   agora_url = (
     f"https://api.agora.io/api/conversational-ai-agent/v2/projects/{app_id}/join"
@@ -447,23 +550,38 @@ async def start_conversational_agent(
         f"Agora Conversational AI agent started successfully (agent_id:"
         f" {agent_id}) for channel '{channel_name}'"
       )
+      if request.voice_pipeline == "gemini_live":
+        mcp_status = (
+          "NOT_SUPPORTED: the gemini_live (mllm) pipeline does not support MCP tool "
+          "wiring per official Agora docs (mcp_servers is documented only under "
+          "properties.llm, not properties.mllm). Request voice_pipeline="
+          "'composed_tools' to enable it. See docs/agora/RESEARCH.md §4."
+          if mcp_url
+          else "NOT_REQUESTED"
+        )
+      else:
+        mcp_status = (
+          "WIRED PER OFFICIAL DOCS — NOT YET LIVE-VERIFIED: properties.llm.mcp_servers "
+          "+ advanced_features.enable_tools were sent, matching the documented schema "
+          "at docs.agora.io/en/api-reference/api-ref/conversational-ai/join. No live "
+          "credentialed session has yet confirmed Agora accepted this or that the "
+          "agent actually invoked a tool through it. Treat as CREDENTIAL REQUIRED, "
+          "not confirmed working, until verified. See docs/agora/RESEARCH.md §4."
+          if mcp_requested
+          else "NOT_REQUESTED"
+        )
+
       return {
         "status": "started",
         "agent_id": agent_id,
         "channel_name": channel_name,
         "agent_uid": request.agent_uid,
-        "mllm_provider": "gemini",
+        "voice_pipeline": request.voice_pipeline,
+        "llm_provider": "gemini",
         "voice": request.voice,
-        "mcp_enabled": bool(mcp_url),
-        "mcp_server_url": sse_endpoint if mcp_url else None,
-        "mcp_tool_calling_status": (
-          "MOCK/DEMO ONLY - UNVERIFIED: mcp_servers was sent under properties.mllm, "
-          "which official Agora docs do not confirm for the Gemini Live pipeline "
-          "(docs describe properties.llm.mcp_servers instead). Live tool invocation "
-          "has not been observed. See docs/agora/RESEARCH.md."
-          if mcp_url
-          else "NOT_CONFIGURED"
-        ),
+        "mcp_enabled": mcp_requested,
+        "mcp_server_url": sse_endpoint,
+        "mcp_tool_calling_status": mcp_status,
       }
   except httpx.HTTPError as exc:
     logger.error(f"Network error connecting to Agora ConvoAI REST API: {exc}")
