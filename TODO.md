@@ -5,41 +5,15 @@ Auto-maintained by Claude: an entry is added when work is identified, and delete
 it's done. Do not treat an entry's presence here as "not started"; check the note for
 current state. This file is the resume point after any session/context reset.
 
-Last updated: 2026-08-31 (live browser + API testing session).
+Last updated: 2026-08-31 (implemented + live-verified Tocsin chat replies).
 
 ---
 
 ## P0 — Breaks the demo / actively misleading
 
-### 1. `/voice-test` chat never shows a Tocsin reply for typed input
-**Status:** diagnosed, not fixed.
-Confirmed live: typing into the command box (`handleCommandSubmit` in
-`frontend/src/app/voice-test/page.tsx:940`) adds only the user's own message to the
-transcript. `addTranscriptEntry('AI Agent', ...)` is called from exactly one place —
-the live Agora `stream-message` handler (line ~861) — never from typed input. There is
-currently no code path that generates or displays a Tocsin response to typed text.
-**This is the user's core complaint** ("I want Tocsin's response visible under our
-prompt") and it is not cosmetic — the feature does not exist yet for text input.
-**Fix requires a decision:** either (a) call the real backend extraction pipeline
-(`/api/incidents/{id}/observations`) and render its structured result as a reply
-bubble ("Logged as REPORT, evidence status UNVERIFIED, entity: X"), or (b) route
-typed text through Gemini for a conversational reply. (a) is more honest — it reflects
-what Tocsin actually does — and reuses the already-tested extraction pipeline. Recommend (a).
-
-### 2. `/voice-test` observation POST always 404s, silently
-**Status:** diagnosed, not fixed.
-Confirmed via network inspection: `handleCommandSubmit` posts to
-`/api/incidents/${channelName}/observations` where `channelName` defaults to
-`'tocsin-emergency-room'` — not a real incident ID. Every submission returns
-`404 Not Found`, swallowed by `.catch(() => {})`. No error is ever surfaced to the
-user or logged to the diagnostic panel. Same bug likely applies to the two other
-fetch-and-catch call sites at lines ~864 and ~885 (voice stream ingestion).
-**Fix:** use the actual selected incident ID (thread it in as a prop from `page.tsx`,
-same as the main dashboard does), and log failures to `addLog(...)` instead of
-silently discarding them.
-
-### 3. `/voice-test` right-side "INCIDENT COMMAND" panel is a disconnected client-side simulator
-**Status:** diagnosed, not fixed. This is the single biggest integrity gap found this session.
+### 1. `/voice-test` right-side "INCIDENT COMMAND" panel is a disconnected client-side simulator
+**Status:** diagnosed, not fixed. This is now the single biggest remaining integrity
+gap on this page.
 The tiles ("Customers Affected", "Gateway Error Rate", "Risk Level", "Service Health")
 are populated entirely by `extractIncidentInfo()`, a ~200-line regex NLP function that
 runs **only in the browser**, has zero connection to the real backend evidence engine
@@ -55,50 +29,90 @@ underlying detector still contains those patterns and could surface them if trig
 `fetchIncident`. This is a real architecture change to a 2341-line file — needs its
 own session, not a quick patch. Do NOT attempt as a drive-by edit.
 
-### 4. Database has 149+ accumulated test/demo incidents
-**Status:** diagnosed, not fixed.
-`GET /api/incidents` returns 149 rows against the dev Postgres instance, including
-dozens of `test-inc-*` and `inc-proc-restart-*` rows clearly left over from repeated
-pytest runs against a real (not ephemeral) database. Not dangerous, but pollutes any
-"list all incidents" UI and makes manual testing confusing.
+### 2. Database has 149+ (now 185+) accumulated test/demo incidents
+**Status:** diagnosed, not fixed, growing every test run.
+`GET /api/incidents` returns 185 rows against the dev Postgres instance as of
+2026-08-31 (was 149 earlier the same day), including dozens of `test-inc-*` and
+`inc-proc-restart-*` rows clearly left over from repeated pytest runs against a real
+(not ephemeral) database. Not dangerous, but pollutes any "list all incidents" UI and
+makes manual testing confusing.
 **Fix:** either point the test suite at a dedicated test database/schema, or add a
 teardown that deletes rows it created, or add a `docker compose` reset script. Flagged
 in `CLAUDE.md`'s existing "Remove generated local database files from version control"
 item — this is the live-database analogue of the same hygiene issue.
 
+### 3. One persisted incident row cannot be deserialized (data regression from removing PAYMENT_OUTAGE)
+**Status:** newly found 2026-08-31, not fixed.
+Backend logs on every startup:
+```
+ERROR tocsin.repositories - Failed to deserialize incident row: 1 validation error for IncidentState
+event_type: Input should be 'WATER_CONTAMINATION', ... [type=enum, input_value='PAYMENT_OUTAGE', ...]
+```
+A prior session removed `PAYMENT_OUTAGE` from the `EventType` enum (correctly, per the
+project's scenario rules) but did not account for an already-persisted row in the dev
+database still carrying that value. That row is silently dropped from
+`Loaded N persisted incidents` on every boot — it's not corrupting anything else, but
+it is now permanently unreachable through the API until fixed, and the failure is only
+visible in backend logs, not surfaced anywhere a developer would normally look.
+**Fix:** either (a) add a data migration that remaps any `PAYMENT_OUTAGE` rows to
+`TECHNICAL_INCIDENT` before the enum validation runs, or (b) since this is dev/demo
+data with no production stakes, just delete that one row. (a) is more correct if this
+pattern could recur with other enum changes.
+
 ---
 
 ## P1 — Real but narrower
 
-### 5. Spoken/audio summary broadcast not wired
+### 4. Spoken/audio summary broadcast not wired
 **Status:** documented (`docs/strategy/INNOVATION_ROADMAP.md` §2.1), not implemented.
 Agora's `/speak` REST endpoint is documented but never called. Text summaries and
 handoff briefs exist; nothing makes Tocsin actually speak them into a live room.
 Blocked on live Agora session + exact request schema (WebFetch couldn't extract it
 last research pass — retry or find via SDK source).
 
-### 6. Transcript ingestion may be reading a legacy Agora path
+### 5. Transcript ingestion may be reading a legacy Agora path
 **Status:** documented (`docs/agora/RESEARCH.md`), not implemented.
 Agora v2.9 moved transcript/agent-state delivery to RTM messages. Tocsin still reads
 the RTC `stream-message` event with an empirical, doc-unconfirmed wire format. Migrate
 and capture one real payload as a test fixture.
 
-### 7. MCP tools cannot be invoked by the live Gemini Live voice agent
+### 6. MCP tools cannot be invoked by the live Gemini Live voice agent
 **Status:** confirmed and already labeled correctly everywhere (README, prompt,
 `docs/agora/RESEARCH.md` §4) as `NOT IMPLEMENTED`. Not a bug — a documented, honest
 limitation. Real fix requires migrating from the `mllm` pipeline to the `llm` pipeline
 (architecture change, needs a live credentialed session to verify against). Listed
 here only so it isn't lost, not because it needs urgent action.
 
+### 7. Gemini API latency is inconsistent in this environment — worth monitoring
+**Status:** observed, mitigated (not "fixed" — the underlying cause is external).
+Live-observed 2026-08-31: extraction latency ranged from ~1s to 173s across different
+calls to the same model on the same day, with no error returned for the slow ones —
+just an unbounded hang. The 12s timeout (item below, done) makes this safe rather than
+silent, but repeated timeouts still mean users see the heuristic fallback (weaker
+extraction) more often than they should. If this keeps happening, check whether it's
+regional API routing, a Google-side incident, or something about this project's quota
+tier — `GEMINI_EXTRACTION_TIMEOUT_SECONDS` can be raised if 12s turns out too
+aggressive for a consistently-slower-but-still-working backend.
+
+### 8. `onKeyDown={e => e.key === 'Enter' && handleCommandSubmit()}` did not fire during automated browser testing
+**Status:** observed, not confirmed as a real bug.
+Pressing Return via the browser automation tool did not submit the `/voice-test`
+command input twice in a row, while clicking the send button worked reliably both
+times. The code itself is correctly wired (`frontend/src/app/voice-test/page.tsx`
+~line 2107). This may be a synthetic-keyboard-event quirk of the automation tool
+(CDP-dispatched keydown not always reaching React's synthetic event system) rather than
+an app bug — needs a human to actually press Enter in a real browser to confirm either
+way before spending time "fixing" something that might not be broken.
+
 ---
 
 ## P2 — Smaller, cheap, queued
 
-### 8. Unowned action items are not surfaced as a distinct alert
+### 9. Unowned action items are not surfaced as a distinct alert
 From `docs/strategy/INNOVATION_ROADMAP.md` §3.3. Cheap, high value — action items with
 `owner_name = None` should raise a visible flag, not just render "unassigned" quietly.
 
-### 9. Decisions have no rationale/supersession model
+### 10. Decisions have no rationale/supersession model
 From `docs/strategy/INNOVATION_ROADMAP.md` §3.1. Decisions are currently plain claims;
 a real incident needs "we decided X because Y, superseded by Z at T2."
 
@@ -106,6 +120,34 @@ a real incident needs "we decided X because Y, superseded by Z at T2."
 
 ## Recently completed (kept briefly for context, then deleted next pass)
 
+- ✅ **Tocsin now replies in the `/voice-test` chat, live-verified end-to-end**
+  (2026-08-31): `handleCommandSubmit` now awaits the real
+  `/api/incidents/{id}/observations` response and renders a "TOCSIN" reply directly
+  under the user's message — reporting category, evidence status, the extracted
+  claim, extraction method (with an explicit caveat when it's heuristic fallback,
+  never silently presented as equal to LLM output), and conflict/action-item/missing-
+  info counts. This is a truthful readout of what the backend actually did, not a
+  simulated personality. Verified live in the browser three times, including the
+  exact scenario originally reported broken.
+- ✅ **Root-cause fixed: `/voice-test` observation POST always 404'd, silently**
+  (2026-08-31): default channel name was `'tocsin-emergency-room'`, not a real
+  incident ID. Changed default to `'inc-demo-identity-outage'`, matching the
+  convention the root dashboard's `VoiceHUD` already uses. Confirmed live: POST now
+  returns `201`, not `404`.
+- ✅ **Severe bug found and fixed: Gemini extraction call had no timeout and hung for
+  up to 173 seconds with zero user feedback** (2026-08-31). This was the real reason
+  the chat felt broken even after wiring the reply wiring itself — a request that
+  never resolves produces no reply regardless of how correct the frontend code is.
+  Added a 12s server-side timeout (`GEMINI_EXTRACTION_TIMEOUT_SECONDS`,
+  `asyncio.wait_for` around the SDK call) with a distinct log message so a timeout is
+  never confused with a code bug or a dead model, plus a 20s client-side
+  `AbortController` timeout as defense in depth, plus a "TOCSIN is processing…"
+  indicator with a disabled input/spinner so the UI is never silently frozen even
+  during a fallback. Locked in with a deterministic regression test
+  (`test_gemini_call_that_exceeds_timeout_falls_back_cleanly`) that doesn't depend on
+  live API slowness to verify. Live-verified: a real call now either completes in
+  ~1-12s or falls back cleanly at the 12s mark with a labeled, honest reply — never
+  hangs.
 - ✅ **Gemini model retirement fix** (2026-08-31): `gemini-2.5-flash` was retired by
   Google (404, "no longer available to new users"), silently degrading every
   extraction to the heuristic fallback. Live-tested `gemini-3.6-flash` (worked, then

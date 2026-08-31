@@ -12,6 +12,7 @@ Extraction tiers:
 This module never auto-resolves conflicts. It only detects and flags them.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -20,6 +21,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger("tocsin.extraction")
+
+# Hard ceiling on a single Gemini extraction call. Chosen to sit comfortably above
+# normal latency (observed: low single-digit seconds) while still keeping a typed
+# chat message's round trip well under what a human will wait for a reply. Overridable
+# for environments with slower baseline network characteristics.
+EXTRACTION_TIMEOUT_SECONDS = float(os.getenv("GEMINI_EXTRACTION_TIMEOUT_SECONDS", "12"))
 
 # ─── ClaimSet schema ─────────────────────────────────────────────────────────
 
@@ -190,10 +197,20 @@ async def extract_with_gemini(
         # working product with weak extraction.
         model_name = os.getenv("GEMINI_EXTRACTION_MODEL", "gemini-3.7-flash").strip()
 
-        response = await client.aio.models.generate_content(
-            model=model_name,
-            contents=prompt,
-            config=config,
+        # Hard timeout around the whole call. Live-observed 2026-08-31: a single
+        # generate_content call took 173 seconds to complete with no error — the SDK
+        # has no default timeout, so a slow/degraded API backend or network condition
+        # hangs the entire HTTP request (and therefore the whole chat-reply feature)
+        # indefinitely instead of failing over to the heuristic fallback. A user typing
+        # a message and waiting three minutes for zero feedback is exactly the
+        # "fail proof" failure this project cannot ship with.
+        response = await asyncio.wait_for(
+            client.aio.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=config,
+            ),
+            timeout=EXTRACTION_TIMEOUT_SECONDS,
         )
 
         raw_json = response.text.strip()
@@ -205,6 +222,14 @@ async def extract_with_gemini(
         return None
     except json.JSONDecodeError as e:
         logger.warning(f"Gemini returned invalid JSON: {e}. Falling back to heuristics.")
+        return None
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"Gemini extraction exceeded {EXTRACTION_TIMEOUT_SECONDS}s timeout "
+            "(GEMINI_EXTRACTION_TIMEOUT_SECONDS) — falling back to heuristics. "
+            "Repeated timeouts indicate a degraded API backend or network path, "
+            "not a code bug; check upstream status before assuming the model changed."
+        )
         return None
     except Exception as e:
         logger.warning(f"Gemini extraction failed: {type(e).__name__}: {e}. Falling back to heuristics.")

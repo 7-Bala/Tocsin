@@ -73,7 +73,13 @@ type TranscriptEntry = { id: string; speaker: 'You' | 'AI Agent'; text: string; 
 export default function VoiceTestPage() {
 
   // ── Core session state ─────────────────────────────────────────────────
-  const [channelName,        setChannelName]       = useState('tocsin-emergency-room');
+  // Default matches the canonical demo incident ID (same convention the root
+  // dashboard's VoiceHUD uses: `activeIncident?.incident_id || 'inc-demo-identity-outage'`).
+  // Previously defaulted to 'tocsin-emergency-room', which is not a real incident ID —
+  // every /observations POST from this page 404'd silently against it. Agora channel
+  // names and Tocsin incident IDs are treated as the same string throughout this app,
+  // so reusing the incident ID here is consistent with the rest of the codebase.
+  const [channelName,        setChannelName]       = useState('inc-demo-identity-outage');
   const [connectionState,    setConnectionState]   = useState<ConnectionState>('DISCONNECTED');
   const [isMuted,            setIsMuted]           = useState(false);
   const [isSpeaking,         setIsSpeaking]        = useState(false);
@@ -89,6 +95,7 @@ export default function VoiceTestPage() {
     uid?: number | string; channel?: string; expiresIn?: number;
   } | null>(null);
   const [commandInput, setCommandInput] = useState('');
+  const [isAwaitingReply, setIsAwaitingReply] = useState(false);
   const [isMounted,    setIsMounted]    = useState(false);
   const [currentTime,  setCurrentTime]  = useState<Date | null>(null);
   const [waveStartedAt, setWaveStartedAt] = useState<number | null>(null);
@@ -937,16 +944,117 @@ export default function VoiceTestPage() {
     } catch { setAgentStatus('ERROR'); }
   };
 
-  const handleCommandSubmit = () => {
-    if (!commandInput.trim()) return;
+  /**
+   * Turn a real /observations response into a chat-readable reply.
+   *
+   * Deliberately reports what the extraction pipeline actually did rather than
+   * generating free-form conversational text: this reply is a readout of structured
+   * evidence-record state (category, evidence status, claims, conflicts), not a
+   * simulated personality. That keeps it consistent with the rest of the product's
+   * anti-hallucination stance — Tocsin does not say anything here that isn't backed
+   * by what the backend actually returned.
+   */
+  const buildTocsinReply = (data: any): string => {
+    if (data?.skipped) {
+      return "Already logged — that's a duplicate of something said in the last 30 seconds.";
+    }
+
+    const parts: string[] = [];
+    const category = data?.category ?? 'UNCLASSIFIED';
+    const evidenceStatus = data?.evidence_status ?? 'UNVERIFIED';
+    parts.push(`Logged as ${category} (${evidenceStatus}).`);
+
+    const claims = data?.observation?.claims ?? [];
+    if (claims.length > 0) {
+      const first = claims[0];
+      const extra = claims.length > 1 ? ` +${claims.length - 1} more` : '';
+      parts.push(`Claim: "${first.entity}" → "${first.value}"${extra}.`);
+    }
+
+    if (data?.extraction_method === 'heuristic_fallback') {
+      parts.push('⚠️ Extracted via keyword fallback (LLM unavailable) — treat as UNVERIFIED.');
+    }
+
+    const conflicts = data?.conflicts_detected ?? 0;
+    if (conflicts > 0) {
+      parts.push(`⚡ Contradicts ${conflicts} existing claim${conflicts > 1 ? 's' : ''} — flagged for review, see Conflicts panel.`);
+    }
+
+    const actionItems = data?.action_items_created ?? 0;
+    if (actionItems > 0) {
+      parts.push(`📋 Created ${actionItems} action item${actionItems > 1 ? 's' : ''}.`);
+    }
+
+    const missing = data?.missing_info_identified ?? 0;
+    if (missing > 0) {
+      parts.push(`❓ Flagged ${missing} open question${missing > 1 ? 's' : ''}.`);
+    }
+
+    if (Array.isArray(data?.persist_errors) && data.persist_errors.length > 0) {
+      parts.push('⚠️ Database persistence failed — this may not survive a refresh.');
+    }
+
+    return parts.join(' ');
+  };
+
+  // Client-side ceiling on how long we'll wait for a reply, independent of whatever
+  // the backend's own extraction timeout is. Live-observed 2026-08-31: a Gemini call
+  // with no server-side timeout hung for 173s with zero feedback to the user. The
+  // backend now enforces its own 12s cap (GEMINI_EXTRACTION_TIMEOUT_SECONDS), but this
+  // is defense in depth — a proxy, DNS issue, or a future backend regression must not
+  // be able to freeze this chat again. 20s gives the backend's 12s budget headroom for
+  // DB writes and network round-trip before we give up client-side.
+  const COMMAND_REPLY_TIMEOUT_MS = 20000;
+
+  const handleCommandSubmit = async () => {
+    if (!commandInput.trim() || isAwaitingReply) return;
     const text = commandInput.trim();
-    addTranscriptEntry('You', text); extractIncidentInfo(text); setCommandInput('');
+    addTranscriptEntry('You', text);
+    extractIncidentInfo(text);
+    setCommandInput('');
+    setIsAwaitingReply(true);
+
     const incId = channelName.trim() || 'inc-demo-identity-outage';
-    fetch(`${API_BASE_URL}/api/incidents/${incId}/observations`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ raw_utterance: text, speaker: 'Operator', source: 'command_input' }),
-    }).catch(() => {});
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), COMMAND_REPLY_TIMEOUT_MS);
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/incidents/${incId}/observations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw_utterance: text, speaker: 'Operator', source: 'command_input' }),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        addTranscriptEntry(
+          'AI Agent',
+          `⚠️ Could not log that (HTTP ${res.status}${errBody?.detail ? `: ${errBody.detail}` : ''}). Nothing was recorded.`
+        );
+        addLog(`⚠️ [Observation] POST failed for incident '${incId}': HTTP ${res.status}`);
+        return;
+      }
+
+      const data = await res.json();
+      addTranscriptEntry('AI Agent', buildTocsinReply(data));
+    } catch (err: any) {
+      const timedOut = err?.name === 'AbortError';
+      addTranscriptEntry(
+        'AI Agent',
+        timedOut
+          ? `⚠️ No reply after ${COMMAND_REPLY_TIMEOUT_MS / 1000}s — the backend may be overloaded. Your message was sent but Tocsin has not confirmed it was logged.`
+          : '⚠️ Could not reach the backend to log that. Check the connection and try again.'
+      );
+      addLog(
+        timedOut
+          ? `⚠️ [Observation] Client-side timeout waiting for incident '${incId}'`
+          : `⚠️ [Observation] Network error for incident '${incId}': ${err?.message || err}`
+      );
+    } finally {
+      clearTimeout(timeoutId);
+      setIsAwaitingReply(false);
+    }
   };
 
   const handleResetIncident = () => {
@@ -1309,8 +1417,22 @@ export default function VoiceTestPage() {
           flex-shrink: 0;
           transition: opacity 0.15s, transform 0.15s;
         }
-        .vcc-cmd-send:hover { opacity: 0.8; transform: scale(1.05); }
-        .vcc-cmd-send:active { transform: scale(0.95); }
+        .vcc-cmd-send:hover:not(:disabled) { opacity: 0.8; transform: scale(1.05); }
+        .vcc-cmd-send:active:not(:disabled) { transform: scale(0.95); }
+        .vcc-cmd-send-spinner {
+          width: 11px; height: 11px;
+          border: 1.5px solid rgba(255,255,255,0.35);
+          border-top-color: #fff;
+          border-radius: 50%;
+          animation: vcc-spin 0.7s linear infinite;
+        }
+        @keyframes vcc-spin { to { transform: rotate(360deg); } }
+        .vcc-cmd-thinking {
+          font-size: 10.5px;
+          color: #999;
+          padding: 4px 2px 0 2px;
+          font-style: italic;
+        }
 
         /* ── Voice select ── */
         .vcc-select {
@@ -1993,18 +2115,34 @@ export default function VoiceTestPage() {
                 <input
                   className="vcc-cmd-input"
                   type="text"
-                  placeholder="Describe the incident or type a command..."
+                  placeholder={isAwaitingReply ? 'Waiting for Tocsin to reply…' : 'Describe the incident or type a command...'}
                   value={commandInput}
                   onChange={e => setCommandInput(e.target.value)}
                   onKeyDown={e => e.key === 'Enter' && handleCommandSubmit()}
                   aria-label="Type incident description or command"
+                  disabled={isAwaitingReply}
                 />
-                <button className="vcc-cmd-send" onClick={handleCommandSubmit} aria-label="Send command">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
-                  </svg>
+                <button
+                  className="vcc-cmd-send"
+                  onClick={handleCommandSubmit}
+                  aria-label="Send command"
+                  disabled={isAwaitingReply}
+                  style={isAwaitingReply ? { opacity: 0.5, cursor: 'not-allowed' } : undefined}
+                >
+                  {isAwaitingReply ? (
+                    <span className="vcc-cmd-send-spinner" aria-hidden="true" />
+                  ) : (
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                    </svg>
+                  )}
                 </button>
               </div>
+              {isAwaitingReply && (
+                <div className="vcc-cmd-thinking" aria-live="polite">
+                  TOCSIN is processing…
+                </div>
+              )}
             </div>
           </aside>
 

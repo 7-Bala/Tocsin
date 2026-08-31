@@ -11,10 +11,14 @@ briefs, human approval workflow) is verified locally and, per the capability mat
 below, mostly `VERIFIED LOCALLY` or `VERIFIED LIVE`. It is the primary way to see
 Tocsin actually work.
 
-`/voice-test` (the standalone voice-room chat interface) has real, diagnosed gaps as
-of 2026-08-31 live browser testing — typed messages don't currently produce a visible
-Tocsin reply, and its right-hand "Incident Command" tiles are driven by a client-side
-simulator disconnected from the real backend. These are **not fixed yet**. Full detail,
+`/voice-test` (the standalone voice-room chat interface) had real, diagnosed gaps found
+via live browser testing on 2026-08-31. **As of the same day, typed messages now
+produce a real Tocsin reply directly under the prompt** — logged category, evidence
+status, extracted claim, and extraction method, with a 12s server-side timeout + 20s
+client-side timeout so the chat can never hang silently (a live-observed defect: one
+extraction call took 173 seconds with no error before this fix). What's still open:
+the right-hand "Incident Command" tiles are driven by a client-side regex simulator
+disconnected from the real backend evidence engine — see `TODO.md` item 1. Full detail,
 root cause, and fix plan for every open item live in **[`TODO.md`](TODO.md)** — that
 file is the single source of truth for pending work and is kept up to date after every
 work session, so check it rather than assuming this README's capability matrix implies
@@ -37,7 +41,8 @@ Every capability in this repository is classified under one of six explicit stat
 | **PostgreSQL Persistence & Migrations** | `VERIFIED LOCALLY` | Real `postgres:16-alpine` Docker container tested. All 13 schema tables migrated, full entity persistence verified, and multi-process restart survival verified by `test_postgresql_live.py`. |
 | **SQLite Fallback Database** | `VERIFIED LOCALLY` | Isolated local/test database fallback tested with clean fixtures via `test_intelligence.py`. |
 | **Gemini LLM Structured Extraction** | `VERIFIED LIVE` | Uses `google-genai` SDK. Model ID is configurable via `GEMINI_EXTRACTION_MODEL` (default `gemini-3.7-flash`, released 2026-08-13) — Google retires model IDs on its own schedule, and a retired ID 404s into the heuristic fallback silently. `gemini-2.5-flash` was found retired live 2026-08-31; `gemini-3.6-flash` worked, then hit a 429 quota exhaustion the same day; `gemini-3.7-flash` is the current live-verified default. Verified live: `"I think the authentication database might be overloaded, but I have not confirmed that yet"` → `extraction_method: "llm"`, category `HYPOTHESIS`, evidence status `ASSUMED`. Falls back to `heuristic_fallback` (always `UNVERIFIED`, never `CONFIRMED`) on quota exhaustion, missing key, or model retirement. |
-| **Canonical Voice Ingestion Pipeline (`/` dashboard)** | `VERIFIED LOCALLY` | Transcripts posted to `/api/incidents/{id}/observations` → structured extraction → PostgreSQL persistence → WebSocket broadcast → UI panels. This is the real pipeline and is what the root `/` dashboard uses. **`/voice-test`'s own text command box does not reliably reach this pipeline yet — see `TODO.md` items 1–3.** |
+| **Canonical Voice Ingestion Pipeline (`/` dashboard)** | `VERIFIED LOCALLY` | Transcripts posted to `/api/incidents/{id}/observations` → structured extraction → PostgreSQL persistence → WebSocket broadcast → UI panels. This is the real pipeline and is what the root `/` dashboard uses. |
+| **`/voice-test` Chat Reply** | `VERIFIED LOCALLY` | Typing a message now produces a real "TOCSIN" reply directly under the prompt via the actual `/observations` pipeline (not a simulated chatbot) — reports category, evidence status, extracted claim, and extraction method, with an explicit caveat when the reply came from heuristic fallback rather than the LLM. Bounded by a 12s server-side timeout (`GEMINI_EXTRACTION_TIMEOUT_SECONDS`) and a 20s client-side `AbortController` timeout, with a visible "TOCSIN is processing…" state — the chat cannot hang silently. Live-verified 2026-08-31, including the exact hang scenario the timeout exists to prevent. The right-hand "Incident Command" tiles on this page still use a disconnected client-side simulator — see `TODO.md` item 1. |
 | **Contradictory Claim Conflict Detection** | `VERIFIED LOCALLY` | Flags opposing health polarity or numeric divergence >20% on the same entity, and generates a recommended verification action. Deliberately conservative: complementary detail about one entity ("returning 503" + "elevated latency") is **not** reported as a contradiction. 7 precision unit tests in `test_evidence_lifecycle.py`. |
 | **Evidence Resolution Lifecycle** | `VERIFIED LOCALLY` | Contradictions, information gaps, and risks are closable by a named human with stated evidence (`POST .../conflicts/{id}/resolve`, `.../missing-info/{id}/resolve`, `.../risks/{id}/resolve`). Resolution is terminal (409 on re-resolve) and requires both `resolved_by` and `resolution_notes`. Tocsin records *that* a human settled a contradiction — never *which side was right*. `test_evidence_lifecycle.py`. |
 | **Claim Provenance Trace** | `VERIFIED LOCALLY` | `GET .../claims/{id}/provenance` returns claim → originating observation → raw utterance → speaker → role and whether that role was declared or inferred → extraction method + caveat → related conflicts. Answers "why do we believe this?" without re-reading the transcript. |

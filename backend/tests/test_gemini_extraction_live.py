@@ -72,3 +72,47 @@ async def test_end_to_end_observation_ingestion_with_gemini_or_fallback():
         data = obs_res.json()
         assert data["extraction_method"] in ("llm", "heuristic_fallback")
         assert data["claims_extracted"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_gemini_call_that_exceeds_timeout_falls_back_cleanly(monkeypatch):
+    """
+    Regression test for a live-observed defect (2026-08-31): a single Gemini call took
+    173 seconds with no error, because the SDK call had no timeout — the entire
+    observation-ingestion request (and therefore any chat feature built on it) hung
+    indefinitely instead of failing over to the heuristic fallback.
+
+    This simulates that condition deterministically: monkeypatch the timeout ceiling to
+    a tiny value and make the mocked SDK call sleep longer than it, then assert
+    extraction still returns promptly via the heuristic fallback rather than hanging.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import app.engine.extraction as extraction_module
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-timeout-test")
+    monkeypatch.setattr(extraction_module, "EXTRACTION_TIMEOUT_SECONDS", 0.2)
+
+    async def _hangs_forever(*args, **kwargs):
+        await asyncio.sleep(5.0)  # far longer than the 0.2s timeout above
+        raise AssertionError("should have been cancelled by asyncio.wait_for before this ran")
+
+    mock_models = MagicMock()
+    mock_models.generate_content = AsyncMock(side_effect=_hangs_forever)
+    mock_client = MagicMock()
+    mock_client.aio.models = mock_models
+
+    with patch("google.genai.Client", return_value=mock_client):
+        start = asyncio.get_event_loop().time()
+        claim_set = await extraction_module.extract_intelligence(
+            "The identity service is down.", speaker="Test"
+        )
+        elapsed = asyncio.get_event_loop().time() - start
+
+    # Must return quickly (bounded by the timeout, not the simulated 5s hang) and must
+    # fall back — never silently produce llm-labeled output from a call that never
+    # actually completed.
+    assert elapsed < 2.0, f"extraction took {elapsed:.2f}s — timeout did not cut off the hang"
+    assert claim_set.extraction_method == "heuristic_fallback"
+    assert claim_set.evidence_status != "CONFIRMED"
