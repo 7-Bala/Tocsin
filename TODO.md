@@ -5,54 +5,27 @@ Auto-maintained by Claude: an entry is added when work is identified, and delete
 it's done. Do not treat an entry's presence here as "not started"; check the note for
 current state. This file is the resume point after any session/context reset.
 
-Last updated: 2026-08-31 (fixed test-isolation leak + PAYMENT_OUTAGE deserialization; starting item 1's staged rollout).
+Last updated: 2026-08-31 (`/voice-test` dynamic-tiles rollout complete and live-verified; new timeline-spam finding).
 
 ---
 
 ## P0 — Breaks the demo / actively misleading
 
-### 1. `/voice-test` right-side "INCIDENT COMMAND" panel is a disconnected client-side simulator
-**Status:** in progress — rollout steps 1–3 of 6 done and verified, steps 4–6 remain.
-Full design in
-[`docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md`](docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md).
-Read that file before continuing.
-
-**Done:**
-- Step 1 — `frontend/src/hooks/useIncidentState.ts` extracted from `/` (`page.tsx`),
-  zero behavior change. Verified live.
-- Step 2 — `frontend/src/lib/deriveDynamicTiles.ts` (pure function) + 19 unit tests.
-  Verified via test suite, not yet wired to any UI at that point.
-- Step 3 — `frontend/src/components/DynamicSituationTiles.tsx` added, dark-launched
-  behind `?debug_tiles=1` in `voice-test/page.tsx` (default page unaffected — confirmed
-  pixel-identical live screenshot vs. before). **Live-verified against the real running
-  backend, including the one scenario that matters most:** created a fresh, genuinely
-  unresolved conflict via two contradicting observations
-  ("identity service is down and unresponsive" vs. "identity service is up and running
-  fine now") and confirmed the conflicted entity's tile jumped to top priority with red
-  "Contradicted — needs resolution" styling, exactly per the plan's §5 fail-proof
-  requirement. Also confirmed live: real numeric tiles (`Login Api: 40%`), heuristic
-  extraction correctly flagged amber ("Unverified (heuristic)"), and — importantly —
-  a claim from an *already-resolved* conflict correctly showed no conflict styling
-  (confirms the resolved/open distinction from step 2's unit tests holds end-to-end,
-  not just in isolation). Test conflict cleaned up via the resolve endpoint afterward.
-  **One real limitation found and accepted, not yet fixed:** tile entity grouping is
-  exact-string-match (normalized case/whitespace), while the backend's own conflict
-  detector uses fuzzy substring matching (`_entities_match` in `conflict_detector.py`).
-  This means near-duplicate entity phrasings (e.g. "authentication database" vs.
-  "authentication database connections") currently render as separate tiles instead of
-  merging. Not a fail-proof violation — nothing crashes or lies — just a quality
-  refinement to consider in a future pass; noted here so it isn't forgotten.
-
-**Still to do (do not skip ahead — each step depends on the last actually being verified):**
-- Step 4 — swap the visible panel to the new component; delete `extractIncidentInfo()`
-  and the old `incidentData` metrics state in the same change (~200 lines, including
-  every flood/fire/earthquake/cyclone regex pattern), remove the `?debug_tiles=1` flag
-  since the dark-launch comparison is no longer needed once it's the only panel.
-- Step 5 — full live verification per the plan's §8 (fresh incident with zero claims,
-  demo scenario, backend-down/disconnected state, conflict-resolution reflecting live
-  without a page refresh).
-- Step 6 — update `TODO.md` (delete this item) and `README.md`'s capability matrix.
-
+### 1. Timeline is spammed with duplicate `FOLLOWUP_REMINDER` entries
+**Status:** newly found 2026-08-31, not fixed. Found while live-verifying the dynamic
+tiles work below — the demo incident's timeline had **120 events**, the large majority
+being the exact same reminder ("Action 'Compare authentication error rates before and
+after deployment' assigned to Dave Miller is O...") repeated once per minute for
+over an hour, from `backend/app/engine/simulator.py`'s background overdue-reminder
+scheduler. Each firing appends a new `TimelineEntry` with no dedup against the
+previous minute's identical reminder for the same action item.
+**Impact:** any UI that surfaces the timeline (both `/` and `/voice-test`, now that
+`voice-test` shows the real one) gets flooded with noise that buries genuinely new
+events, and — worse — makes an incident look far more active/eventful than it is.
+**Fix:** either don't append a new timeline entry on every repeat reminder for the
+same still-overdue item (append once, then just re-emit the WebSocket notification
+without a new persisted row), or collapse consecutive identical reminders in the
+repository/API layer before they reach a client.
 
 ---
 
@@ -114,6 +87,42 @@ a real incident needs "we decided X because Y, superseded by Z at T2."
 ---
 
 ## Recently completed (kept briefly for context, then deleted next pass)
+
+- ✅ **`/voice-test`'s disconnected client-side simulator fully replaced with real
+  backend data — all 6 rollout steps of
+  [`docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md`](docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md)
+  complete and live-verified** (2026-08-31). The actual scope turned out larger than
+  the plan originally estimated: `extractIncidentInfo()` (the ~200-line regex
+  simulator with hardcoded flood/fire/earthquake/cyclone patterns) didn't just drive
+  4 metric tiles — it also drove the incident header (title/location/severity/status),
+  "Possible Causes," "Incident Timeline," and "Response & Actions," all via the same
+  fake local state. All four are now sourced from the real `IncidentState` via the
+  shared `useIncidentState` hook (step 1). "Response & Actions" specifically changed
+  from fake local confirm/reject buttons that never called any backend endpoint to a
+  **read-only** view of real `proposed_actions` with their real approval-workflow
+  status, pointing to the main dashboard's already-implemented, commander-key-gated
+  approval flow for taking action — judged a better fix than wiring a second,
+  parallel authenticated-action surface into this page. The "Reset Incident" button
+  (which cleared fake local state) became "Clear Transcript" (clears only the local
+  chat display; the real backend evidence record is never touched by this page).
+  **Live-verified end-to-end via the accessibility tree** (screenshots were flaky due
+  to an unrelated browser-pane rendering issue this session, not an app bug — a fresh
+  tab confirmed it): real title "Customer Login and Identity Outage," real event type,
+  real incident ID, real severity/status/start time, 6 real dynamic tiles (with an
+  honest "+2 more entities tracked" overflow note), a real hypothesis
+  ("Identity-Service Deployment Regression," 88%), the real timeline, and the real
+  demo-scenario actions — "rollback identity deployment: APPROVED" and "flush all
+  production databases: REJECTED" — exactly matching what the human-approval
+  demonstration in the demo scenario actually did. Zero flood/fire/earthquake
+  vocabulary reachable anywhere on the page anymore. `git diff --check` clean, tsc
+  clean, 56/56 backend tests pass, 43/43 frontend tests pass, build succeeds
+  (`/voice-test` net shrank from 25.5 kB dark-launch size to 21.3 kB after the ~200
+  dead lines were actually deleted). One accepted limitation carried forward from
+  step 3: tile entity grouping is exact-match, not the backend's fuzzy substring
+  match, so near-duplicate entity phrasings can render as separate tiles — a quality
+  refinement, not a fail-proof violation.
+- ✅ New finding surfaced by this verification, not yet fixed: the timeline had 120
+  events, almost all duplicate `FOLLOWUP_REMINDER` spam — see the new P0 item above.
 
 - ✅ **Root cause of the database-pollution item found and fixed: test isolation was
   silently broken, not merely "missing cleanup"** (2026-08-31). `conftest.py`'s

@@ -1,7 +1,8 @@
 'use client';
 
 import React from 'react';
-import { useIncidentState } from '@/hooks/useIncidentState';
+import { IncidentState } from '@/types/incident';
+import { WsConnectionStatus } from '@/hooks/useIncidentWebSocket';
 import { deriveDynamicTiles, DynamicTile } from '@/lib/deriveDynamicTiles';
 
 /**
@@ -9,16 +10,17 @@ import { deriveDynamicTiles, DynamicTile } from '@/lib/deriveDynamicTiles';
  * with tiles derived live from the real backend evidence record — see
  * docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md for the full design.
  *
- * Uses the exact same `useIncidentState` hook the root dashboard uses (step 1 of the
- * plan), so this page and `/` can never silently drift into showing different data
- * for the same incident.
+ * Takes the incident as a prop rather than calling `useIncidentState()` itself: the
+ * parent page already subscribes once (via the same hook the root dashboard uses —
+ * step 1 of the plan) and needs that same state for its header, timeline, and actions
+ * sections too. A second internal subscription here would open a second WebSocket
+ * connection to the same incident for no benefit.
  *
- * Note on scope (deliberate, not an oversight): this always tracks the canonical demo
- * incident (`inc-demo-identity-outage`), same as `useIncidentState()`'s default
- * behavior on `/`. It does not follow `/voice-test`'s free-text "Voice Channel" field
- * if a user types something else there — that field has always been primarily an
- * Agora RTC channel name, not an incident switcher, and this component doesn't change
- * that pre-existing relationship.
+ * Note on scope (deliberate, not an oversight): the incident passed in is always
+ * whatever `useIncidentState()` resolves to — the canonical demo incident by default,
+ * same as `/`. This component does not know about or follow `/voice-test`'s free-text
+ * "Voice Channel" field if a user types something else there — that field has always
+ * been primarily an Agora RTC channel name, not an incident switcher.
  *
  * Visual output intentionally duplicates a handful of CSS rules from
  * `voice-test/page.tsx`'s scoped `<style jsx>` block rather than importing them,
@@ -26,6 +28,11 @@ import { deriveDynamicTiles, DynamicTile } from '@/lib/deriveDynamicTiles';
  * component's own rendered elements — the only way to get pixel-identical output from
  * a separate file is to declare the same rules again, scoped to this component.
  */
+
+export interface DynamicSituationTilesProps {
+  incident: IncidentState | null;
+  wsStatus: WsConnectionStatus;
+}
 
 const TONE_ACCENT: Record<DynamicTile['tone'], { valueColor?: string; subClass: string }> = {
   healthy: { subClass: '' },
@@ -64,9 +71,8 @@ function PlaceholderTile({ label }: { label: string }) {
   );
 }
 
-export const DynamicSituationTiles: React.FC = () => {
-  const { activeIncident, wsStatus } = useIncidentState();
-  const result = deriveDynamicTiles(activeIncident, new Date());
+export const DynamicSituationTiles: React.FC<DynamicSituationTilesProps> = ({ incident, wsStatus }) => {
+  const result = deriveDynamicTiles(incident, new Date());
 
   return (
     <div className="vcc-section-card">

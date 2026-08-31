@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useIncidentState } from '@/hooks/useIncidentState';
 import { DynamicSituationTiles } from '@/components/DynamicSituationTiles';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -98,13 +99,6 @@ export default function VoiceTestPage() {
   const [commandInput, setCommandInput] = useState('');
   const [isAwaitingReply, setIsAwaitingReply] = useState(false);
   const [isMounted,    setIsMounted]    = useState(false);
-  // Dark-launch flag for the new dynamic-tiles panel (item 1, step 3 of
-  // docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md). Read from window.location rather
-  // than Next's useSearchParams() to avoid both a Suspense-boundary requirement and
-  // any risk of reintroducing the SSR/hydration mismatch fixed elsewhere this session
-  // — starts false on every render (server and first client paint match), flips true
-  // only after mount, same pattern as `isMounted` above.
-  const [showDynamicTiles, setShowDynamicTiles] = useState(false);
   const [currentTime,  setCurrentTime]  = useState<Date | null>(null);
   const [waveStartedAt, setWaveStartedAt] = useState<number | null>(null);
 
@@ -113,28 +107,14 @@ export default function VoiceTestPage() {
   const transcriptContainerRef      = useRef<HTMLDivElement | null>(null);
   const userScrolledUpRef           = useRef<boolean>(false);
 
-  // ── Persistent incident state ──────────────────────────────────────────
-  const [incidentData, setIncidentData] = useState<{
-    title: string; location: string; incidentId: string;
-    severity: string; status: string; startedAt: string;
-    metrics: {
-      peopleAffected: string; peopleAffectedSub: string;
-      waterLevel: string;     waterLevelSub: string;
-      riskLevel: string;
-      resourcesDeployed: string; resourcesSub: string;
-    };
-    timeline: Array<{ time: string; title: string; desc: string; color: string }>;
-    causes:   Array<{ name: string; pct: number }>;
-    actions:  Array<{ label: string; status: string; cls: string; iconBg: string }>;
-  } | null>(null);
-
-  // ── Task state ─────────────────────────────────────────────────────────
-  type TaskStatus = 'idle' | 'running' | 'done' | 'error';
-  type Task = { label: string; status: TaskStatus };
-  const [tasks, setTasks] = useState<Task[]>([]);
-
-  // ── Action confirmation UI state (local-only; no backend execution) ────
-  const [actionStates, setActionStates] = useState<Record<string, 'confirmed' | 'rejected'>>({});
+  // ── Real incident state (item 1, step 4 of
+  // docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md) ──────────────────────
+  // Replaces the old client-side-only `incidentData` simulator (a ~200-line regex
+  // function with hardcoded flood/fire/earthquake/cyclone detection patterns,
+  // completely disconnected from the real backend evidence engine) with the exact
+  // same live incident state the root dashboard (`/`) uses. See
+  // frontend/src/hooks/useIncidentState.ts and TODO.md item 1 for the full history.
+  const { activeIncident, wsStatus } = useIncidentState();
 
   // ── Agora / VAD refs ───────────────────────────────────────────────────
   const rtcClientRef       = useRef<any>(null);
@@ -234,167 +214,6 @@ export default function VoiceTestPage() {
     userScrolledUpRef.current = !isAtBottom;
   };
 
-  // ── Incident extraction NLP ────────────────────────────────────────────
-  const extractIncidentInfo = useCallback((text: string, source: 'user' | 'ai' = 'user') => {
-    const lower = text.toLowerCase();
-    const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const has = (...patterns: RegExp[]) => patterns.some(p => p.test(lower));
-
-    const newTasks: string[] = [];
-    const dispatchPatterns: Array<[RegExp, string]> = [
-      [/dispatch(?:ing)?\s+(?:\d+\s+)?(?:flood\s+)?rescue\s+team/i,       'Dispatch flood rescue team'],
-      [/dispatch(?:ing)?\s+(?:\d+\s+)?rescue\s+boat/i,                    'Dispatch rescue boats'],
-      [/dispatch(?:ing)?\s+(?:\d+\s+)?helicopter/i,                        'Dispatch helicopter(s)'],
-      [/dispatch(?:ing)?\s+(?:\d+\s+)?ambulance/i,                         'Dispatch ambulance(s)'],
-      [/dispatch(?:ing)?\s+(?:\d+\s+)?fire\s+(?:truck|engine|brigade)/i,  'Dispatch fire brigade'],
-      [/dispatch(?:ing)?\s+(?:\d+\s+)?relief\s+(?:team|unit|squad)/i,     'Dispatch relief team'],
-      [/send(?:ing)?\s+(?:\d+\s+)?(?:flood\s+)?rescue\s+team/i,           'Deploy flood rescue team'],
-      [/send(?:ing)?\s+(?:\d+\s+)?rescue\s+boat/i,                        'Deploy rescue boats'],
-      [/send(?:ing)?\s+(?:\d+\s+)?helicopter/i,                            'Deploy helicopter(s)'],
-      [/send(?:ing)?\s+(?:\d+\s+)?ambulance/i,                             'Deploy ambulance(s)'],
-      [/deploy(?:ing)?\s+(?:\d+\s+)?(?:flood\s+)?rescue\s+team/i,         'Deploy rescue team'],
-      [/deploy(?:ing)?\s+(?:\d+\s+)?(?:rescue\s+)?boat/i,                 'Deploy rescue boats'],
-      [/deploy(?:ing)?\s+(?:\d+\s+)?helicopter/i,                          'Deploy helicopter(s)'],
-      [/mobiliz(?:e|ing)\s+(?:\d+\s+)?(?:rescue|relief|emergency)\s+team/i, 'Mobilize emergency team'],
-      [/alert(?:ing)?\s+(?:the\s+)?(?:local\s+)?(?:police|authorities)/i, 'Alert local authorities'],
-      [/contact(?:ing)?\s+(?:the\s+)?(?:district|state|national)\s+(?:authority|government|ndrf|sdrf)/i, 'Contact district authority'],
-      [/coordinat(?:e|ing)\s+(?:with\s+)?(?:ndrf|sdrf|army|navy|air\s+force)/i, 'Coordinate with NDRF/SDRF'],
-      [/set(?:ting)?\s+up\s+(?:a\s+)?(?:relief|evacuation|rescue)\s+(?:camp|center|centre)/i, 'Set up relief camp'],
-      [/evacuat(?:e|ing|ion)/i,                                             'Initiate evacuation'],
-      [/issue\s+(?:an?\s+)?(?:alert|warning|advisory)/i,                   'Issue public alert / warning'],
-      [/not(?:ify|ifying)\s+(?:local\s+)?(?:hospital|medical)/i,           'Notify medical facilities'],
-      [/request(?:ing)?\s+(?:additional\s+)?(?:ndrf|sdrf|army|military)/i, 'Request NDRF/SDRF assistance'],
-      [/secur(?:e|ing)\s+(?:the\s+)?area/i,                                'Secure the affected area'],
-      [/open(?:ing)?\s+(?:emergency\s+)?(?:shelter|relief\s+camp)/i,       'Open emergency shelter'],
-      [/provid(?:e|ing)\s+(?:first\s+aid|medical\s+assistance)/i,          'Provide first aid / medical'],
-      [/restor(?:e|ing)\s+(?:power|electricity|communication)/i,            'Restore power / communication'],
-    ];
-    for (const [pattern, label] of dispatchPatterns) {
-      if (pattern.test(text)) newTasks.push(label);
-    }
-
-    setIncidentData(prev => {
-      let d = prev
-        ? { ...prev, metrics: { ...prev.metrics }, timeline: [...prev.timeline], causes: [...prev.causes], actions: [...prev.actions] }
-        : {
-            title: '—', location: '—',
-            incidentId: 'INC-' + Math.floor(1000 + Math.random() * 9000),
-            severity: '', status: 'ACTIVE', startedAt: nowStr,
-            metrics: { peopleAffected: '', peopleAffectedSub: '', waterLevel: '', waterLevelSub: '', riskLevel: '', resourcesDeployed: '', resourcesSub: '' },
-            timeline: [] as Array<{ time: string; title: string; desc: string; color: string }>,
-            causes:   [] as Array<{ name: string; pct: number }>,
-            actions:  [] as Array<{ label: string; status: string; cls: string; iconBg: string }>,
-          };
-
-      let changed = false;
-
-      let detectedType = '';
-      if (has(/\bflood(?:ing|s|ed)?\b/, /\binundation\b/, /\bsubmerg/, /\bwaterlog/))         detectedType = 'Flood Emergency';
-      else if (has(/\bfire\b/, /\bblaze\b/, /\bburning\b/, /\binferno\b/, /\bwildfire\b/))   detectedType = 'Fire Emergency';
-      else if (has(/\bearthquake\b/, /\btremor\b/, /\bseismic\b/, /\bquake\b/))              detectedType = 'Earthquake Emergency';
-      else if (has(/\bcyclone\b/, /\bhurricane\b/, /\btyphoon\b/, /\btropical\s+storm\b/))   detectedType = 'Cyclone / Storm Emergency';
-      else if (has(/\blandslide\b/, /\bmudslide\b/, /\bdebris\s+flow\b/))                    detectedType = 'Landslide Emergency';
-      else if (has(/\btsunami\b/))                                                            detectedType = 'Tsunami Emergency';
-      else if (has(/\bdrought\b/, /\bwater\s+scarcity\b/, /\bwater\s+shortage\b/))           detectedType = 'Drought Emergency';
-      else if (has(/\baccident\b/, /\bcrash\b/, /\bcollision\b/))                            detectedType = 'Accident / Disaster';
-      if (!detectedType && has(/login/, /authentication/, /identity-service/, /identity service/)) detectedType = 'Identity Service Outage';
-      if (detectedType && d.title !== detectedType) { d.title = detectedType; changed = true; }
-
-      const cityMatch  = text.match(/\b(Guwahati|Dibrugarh|Jorhat|Silchar|Tezpur|Nagaon|Delhi|Mumbai|Chennai|Kolkata|Bangalore|Bengaluru|Hyderabad|Pune|Ahmedabad|Jaipur|Lucknow|Patna|Bhopal|Bhubaneswar|Chandigarh|Dehradun|Imphal|Kohima|Aizawl|Agartala|Gangtok|Shillong|Itanagar|Shimla|Jammu|Srinagar|Leh|Raipur|Panaji|Thiruvananthapuram|Kochi|Varanasi|Nagpur|Visakhapatnam|Coimbatore|Madurai|Indore|Surat)\b/);
-      const stateMatch = text.match(/\b(Assam|Maharashtra|Tamil Nadu|West Bengal|Karnataka|Andhra Pradesh|Telangana|Gujarat|Rajasthan|Uttar Pradesh|Bihar|Madhya Pradesh|Odisha|Chhattisgarh|Punjab|Haryana|Uttarakhand|Manipur|Nagaland|Mizoram|Tripura|Meghalaya|Arunachal Pradesh|Sikkim|Himachal Pradesh|Jammu and Kashmir|Ladakh|Goa|Kerala|Jharkhand)\b/);
-      if (cityMatch || stateMatch) {
-        const city = cityMatch?.[1], state = stateMatch?.[1];
-        const loc  = city && state ? `${city}, ${state}` : city ?? state ?? d.location;
-        if (loc !== d.location) { d.location = loc; changed = true; }
-      } else {
-        const locMatch = text.match(/\b(?:in|at|near|around|from|located in)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\b/);
-        if (locMatch && locMatch[1] !== d.location) { d.location = locMatch[1]; changed = true; }
-      }
-
-      const peopleMatch = text.match(/(?:approximately|about|around|over|more than|at least|nearly|some|roughly)?\s*(\d[\d,]*)\s*(?:\+\s*)?(people|persons|individuals|families|households|residents|victims|survivors|civilians|children|workers|trapped|stranded|affected|injured|dead|killed|missing|displaced|homeless|evacuated)/i);
-      if (peopleMatch) {
-        const count = peopleMatch[1].replace(/,/g, '');
-        const plus  = (text.includes(peopleMatch[1] + '+') || has(/more than|over|at least|approximately|about|around/)) ? '+' : '';
-        d.metrics.peopleAffected    = count + plus;
-        d.metrics.peopleAffectedSub = has(/dead|killed/) ? 'Casualties reported' : has(/injur/) ? 'Injured' : has(/miss(?:ing)?/) ? 'Missing persons' : has(/trap(?:ped)?/, /strand(?:ed)?/) ? 'Trapped / needs evacuation' : has(/displac(?:ed)?/, /homeless/, /evacuat(?:ed)?/) ? 'Displaced' : 'Affected';
-        changed = true;
-      }
-
-      if (has(/\bcritical\b/, /\bsevere\b/, /\bcatastrophic\b/, /\bextreme\b/, /\bdevastating\b/, /\bdire\b/)) {
-        if (d.severity !== 'CRITICAL') { d.severity = 'CRITICAL'; d.metrics.riskLevel = 'Critical'; changed = true; }
-      } else if (has(/\bhigh\b/, /\bserious\b/, /\bsignificant\b/, /\bmajor\b/, /\burgent\b/)) {
-        if (!d.severity || d.severity === 'MEDIUM' || d.severity === 'LOW') { d.severity = 'HIGH'; d.metrics.riskLevel = 'High'; changed = true; }
-      } else if (has(/\bmoderate\b/, /\bmedium\b/)) {
-        if (!d.severity || d.severity === 'LOW') { d.severity = 'MEDIUM'; d.metrics.riskLevel = 'Medium'; changed = true; }
-      } else if (has(/\blow\b/, /\bminor\b/, /\bslight\b/)) {
-        if (!d.severity) { d.severity = 'LOW'; d.metrics.riskLevel = 'Low'; changed = true; }
-      }
-
-      const waterNum = text.match(/([\d]+(?:\.[\d]+)?)\s*%\s*(?:of\s+)?(?:login|authentication|identity|requests?|errors?|failures?)/i)
-                    || text.match(/([\d]+(?:\.[\d]+)?)\s*(m\b|meter|metre|meters|metres|ft\b|feet|foot|cm\b|centimeter)\s*(?:of\s+)?(?:water|flood|inundation)?/i)
-                    || text.match(/(?:water|flood|river|level|risen?|rise)\s+(?:level\s+)?(?:to|of|by|at|is|around|about|reached?|stands?\s+at)?\s*([\d]+(?:\.[\d]+)?)\s*(m\b|meter|metre|ft\b|feet|cm\b)/i);
-      if (waterNum) {
-        const val = waterNum[1], rawUnit = (waterNum[2] || '%').toLowerCase();
-        const unit = rawUnit === '%' ? '%' : rawUnit.startsWith('m') ? 'm' : rawUnit.startsWith('f') ? 'ft' : 'cm';
-        if (d.metrics.waterLevel !== val + unit) { d.metrics.waterLevel = val + unit; d.metrics.waterLevelSub = 'Measured level'; changed = true; }
-      } else if (has(/water.{0,40}rising/, /flood.{0,20}rising/, /river.{0,20}overflow/, /water.{0,20}overflow/)) {
-        if (d.metrics.waterLevel !== 'Rising') { d.metrics.waterLevel = 'Rising'; d.metrics.waterLevelSub = 'Rising rapidly'; changed = true; }
-      } else if (has(/water.{0,20}reced/, /flood.{0,20}reced/, /water.{0,20}subsid/)) {
-        if (d.metrics.waterLevel !== 'Receding') { d.metrics.waterLevel = 'Receding'; d.metrics.waterLevelSub = 'Situation improving'; changed = true; }
-      } else if (has(/\bwaterlogged\b/, /\bsubmerged\b/, /\binundated\b/)) {
-        if (!d.metrics.waterLevel) { d.metrics.waterLevel = 'High'; d.metrics.waterLevelSub = 'Area submerged'; changed = true; }
-      } else if (has(/water\s+level|flood\s+level|river\s+level|dam\s+level/)) {
-        if (has(/danger|alarming|above\s+danger/)) { d.metrics.waterLevel = 'Critical'; d.metrics.waterLevelSub = 'Above danger mark'; changed = true; }
-        else if (has(/stable|normal/)) { d.metrics.waterLevel = 'Stable'; d.metrics.waterLevelSub = 'Situation monitored'; changed = true; }
-      }
-
-      const resourceMatch = text.match(/(\d+)\s*(?:flood\s+)?(?:rescue\s+)?(?:boats?|helicopters?|vehicles?|ambulances?|fire\s*trucks?|teams?|units?|personnel|workers?)/i);
-      if (resourceMatch) {
-        const count = resourceMatch[1];
-        const type  = /boat/i.test(text) ? 'boat(s)' : /helicopter/i.test(text) ? 'helicopter(s)' : /ambulance/i.test(text) ? 'ambulance(s)' : /fire/i.test(text) ? 'fire truck(s)' : /team/i.test(text) ? 'team(s)' : 'unit(s)';
-        d.metrics.resourcesDeployed = count; d.metrics.resourcesSub = `${count} ${type} deployed`; changed = true;
-      } else if (has(/\bdispatch\b/, /\bdeploy\b/, /\bsend(?:ing)?\b/, /\bmobiliz/)) {
-        const rType = has(/\bboat/) ? 'Rescue boats' : has(/\bhelicopter/) ? 'Helicopters' : has(/\bambulance/) ? 'Ambulances' : has(/\bfire\b/) ? 'Fire trucks' : has(/\brescue\s+team\b/, /\brelief\s+team\b/) ? 'Rescue teams' : has(/\bndrf\b/, /\bsdrf\b/) ? 'NDRF/SDRF' : has(/\bevacuat/) ? 'Evacuation teams' : null;
-        if (rType) { if (!d.metrics.resourcesDeployed) d.metrics.resourcesDeployed = 'Requested'; d.metrics.resourcesSub = `${rType} requested`; changed = true; }
-      }
-
-      const existingCauseNames = new Set(d.causes.map(c => c.name));
-      const causesToAdd: Array<{ name: string; pct: number }> = [];
-      if (has(/heavy\s+rain/, /intense\s+rain/, /torrential/, /rainfall/, /downpour/, /monsoon/))       if (!existingCauseNames.has('Heavy Rainfall'))          causesToAdd.push({ name: 'Heavy Rainfall',         pct: 70 });
-      if (has(/dam\s+breach/, /dam\s+fail/, /dam\s+overflow/, /reservoir\s+breach/))                   if (!existingCauseNames.has('Dam Breach'))              causesToAdd.push({ name: 'Dam Breach',             pct: 85 });
-      if (has(/drainage\s+fail/, /blocked\s+drain/, /poor\s+drain/, /sewage\s+overflow/))              if (!existingCauseNames.has('Drainage Failure'))        causesToAdd.push({ name: 'Drainage Failure',       pct: 55 });
-      if (has(/deforest/, /soil\s+erosion/))                                                           if (!existingCauseNames.has('Deforestation'))           causesToAdd.push({ name: 'Deforestation',          pct: 40 });
-      if (has(/infrastructure\s+fail/, /bridge\s+(?:fail|collaps)/, /road\s+wash/))                   if (!existingCauseNames.has('Infrastructure Failure'))  causesToAdd.push({ name: 'Infrastructure Failure', pct: 50 });
-      if (has(/earthquake/, /tremor/, /seismic/))                                                      if (!existingCauseNames.has('Seismic Activity'))        causesToAdd.push({ name: 'Seismic Activity',       pct: 90 });
-      if (has(/electrical\s+fault/, /short\s+circuit/, /gas\s+leak/))                                 if (!existingCauseNames.has('Electrical / Gas Fault'))  causesToAdd.push({ name: 'Electrical / Gas Fault', pct: 65 });
-      if (has(/cyclone/, /hurricane/, /strong\s+wind/, /storm\s+surge/))                               if (!existingCauseNames.has('Cyclonic Storm'))          causesToAdd.push({ name: 'Cyclonic Storm',         pct: 80 });
-      if (causesToAdd.length) { d.causes = [...d.causes, ...causesToAdd]; changed = true; }
-
-      const existingActionLabels = new Set(d.actions.map(a => a.label));
-      const newActions = newTasks
-        .filter(label => !existingActionLabels.has(label))
-        .map(label => ({ label, status: source === 'ai' ? 'AI Decision' : 'Requested', cls: '', iconBg: source === 'ai' ? '#e0f2fe' : '#f0fdf4' }));
-      if (newActions.length) { d.actions = [...d.actions, ...newActions]; changed = true; }
-
-      if (changed) {
-        const snippet = text.length > 90 ? text.slice(0, 90) + '\u2026' : text;
-        const tlEntry = { time: nowStr, title: source === 'ai' ? 'AI Assessment' : 'Field Report', desc: snippet, color: source === 'ai' ? '#6366f1' : '#3b82f6' };
-        const alreadyExists = d.timeline.some(e => e.desc === snippet && e.time === nowStr);
-        if (!alreadyExists) d.timeline = [tlEntry, ...d.timeline.slice(0, 19)];
-        return d;
-      }
-      return prev;
-    });
-
-    if (newTasks.length > 0) {
-      setTasks(prev => {
-        const existingLabels = new Set(prev.map(t => t.label));
-        const fresh = newTasks.filter(label => !existingLabels.has(label)).map(label => ({ label, status: 'running' as const }));
-        return fresh.length ? [...prev, ...fresh] : prev;
-      });
-    }
-  }, []);
-
   // ── handleLeave ────────────────────────────────────────────────────────
   const handleLeave = useCallback(async () => {
     if (aiSpeakingTimerRef.current) { clearTimeout(aiSpeakingTimerRef.current); aiSpeakingTimerRef.current = null; }
@@ -445,11 +264,6 @@ export default function VoiceTestPage() {
     setIsMounted(true);
     setCurrentTime(new Date());
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
-    try {
-      setShowDynamicTiles(new URLSearchParams(window.location.search).get('debug_tiles') === '1');
-    } catch {
-      // Non-fatal: dark-launch flag simply stays off.
-    }
     addLog('Voice Command Center ready.');
     return () => { clearInterval(timer); handleLeave(); };
   }, [addLog, handleLeave]);
@@ -750,7 +564,9 @@ export default function VoiceTestPage() {
   // ── handleJoin ─────────────────────────────────────────────────────────
   const handleJoin = async () => {
     if (!channelName.trim()) { addLog('Error: Channel name cannot be empty.'); return; }
-    setIncidentData(null); setTasks([]); setTranscript([]); setActionStates({});
+    // Clear the local transcript display on join — the backend incident record itself
+    // is real, persisted data and is intentionally left untouched.
+    setTranscript([]);
     try {
       setConnectionState('FETCHING_TOKEN');
       addLog(`Requesting RTC token for '${channelName}'...`);
@@ -879,7 +695,6 @@ export default function VoiceTestPage() {
           const content = msg.text ?? msg.transcript ?? null;
           if (content && content.length > 3) {
             addTranscriptEntryRef.current('AI Agent', content);
-            extractIncidentInfo(content, 'ai');
             const incId = channelName.trim() || 'inc-demo-identity-outage';
             fetch(`${API_BASE_URL}/api/incidents/${incId}/observations`, {
               method: 'POST',
@@ -900,7 +715,6 @@ export default function VoiceTestPage() {
             const text = event.results[i][0].transcript.trim();
             if (text.length < 3) continue;
             addTranscriptEntryRef.current('You', text);
-            extractIncidentInfo(text, 'user');
             const incId = channelName.trim() || 'inc-demo-identity-outage';
             fetch(`${API_BASE_URL}/api/incidents/${incId}/observations`, {
               method: 'POST',
@@ -1023,7 +837,6 @@ export default function VoiceTestPage() {
     if (!commandInput.trim() || isAwaitingReply) return;
     const text = commandInput.trim();
     addTranscriptEntry('You', text);
-    extractIncidentInfo(text);
     setCommandInput('');
     setIsAwaitingReply(true);
 
@@ -1070,9 +883,15 @@ export default function VoiceTestPage() {
     }
   };
 
-  const handleResetIncident = () => {
-    setIncidentData(null); setTasks([]); setTranscript([]); setActionStates({});
-    addLog('Incident data, tasks, and transcript reset.');
+  // Replaces the old handleResetIncident, which cleared the local fake-simulator
+  // state (incidentData/tasks/actionStates — all removed, item 1 step 4). There is no
+  // honest equivalent of "reset the incident" now that this page shows the real
+  // backend record: that would mean deleting real evidence, which this page has no
+  // business doing. Clearing the local transcript display is the safe, real action
+  // that remains — it does not touch anything server-side.
+  const handleClearTranscript = () => {
+    setTranscript([]);
+    addLog('Transcript display cleared (backend evidence record is unaffected).');
   };
 
   // ── Computed state ─────────────────────────────────────────────────────
@@ -1121,6 +940,26 @@ export default function VoiceTestPage() {
       case 'MEDIUM':   return { bg: '#fefce8', text: '#ca8a04', border: '#fde047' };
       case 'LOW':      return { bg: '#eff6ff', text: '#2563eb', border: '#bfdbfe' };
       default:         return { bg: '#f4f4f5', text: '#71717a', border: '#e4e4e7' };
+    }
+  };
+
+  // Real ActionApprovalStatus values from the backend state machine (PROPOSED →
+  // PENDING_APPROVAL → APPROVED → EXECUTING → VERIFIED | FAILED; REJECTED is
+  // terminal). Read-only display — see the note above the Response & Actions section.
+  const actionStatusBadge = (status: string): { bg: string; text: string; border: string; icon: string; iconBg: string } => {
+    switch (status) {
+      case 'APPROVED':
+      case 'VERIFIED':
+        return { bg: '#f0fdf4', text: '#16a34a', border: '#bbf7d0', icon: '✓', iconBg: '#f0fdf4' };
+      case 'REJECTED':
+      case 'FAILED':
+        return { bg: '#fef2f2', text: '#dc2626', border: '#fecaca', icon: '✕', iconBg: '#fef2f2' };
+      case 'EXECUTING':
+        return { bg: '#eff6ff', text: '#2563eb', border: '#bfdbfe', icon: '⚙', iconBg: '#eff6ff' };
+      case 'PENDING_APPROVAL':
+        return { bg: '#eef2ff', text: '#6366f1', border: '#c7d2fe', icon: '⚡', iconBg: '#eef2ff' };
+      default: // PROPOSED
+        return { bg: '#f4f4f5', text: '#71717a', border: '#e4e4e7', icon: '•', iconBg: '#f4f4f5' };
     }
   };
 
@@ -1756,13 +1595,13 @@ export default function VoiceTestPage() {
           align-items: center;
           justify-content: center;
           flex-shrink: 0;
-          background: ${incidentData ? '#fee2e2' : '#f4f4f5'};
-          color: ${incidentData ? '#dc2626' : '#a0a0a0'};
+          background: ${activeIncident ? '#fee2e2' : '#f4f4f5'};
+          color: ${activeIncident ? '#dc2626' : '#a0a0a0'};
         }
         .vcc-incident-title {
           font-size: 14px;
           font-weight: 700;
-          color: ${incidentData ? '#1a1a1a' : '#b0b0b0'};
+          color: ${activeIncident ? '#1a1a1a' : '#b0b0b0'};
           margin-bottom: 3px;
           line-height: 1.3;
         }
@@ -2267,7 +2106,7 @@ export default function VoiceTestPage() {
               <div className="vcc-right-inner">
                 <div className="vcc-right-title">Incident Command</div>
 
-                {/* ── Incident Status ── */}
+                {/* ── Incident Status (real data — item 1, step 4) ── */}
                 <div className="vcc-incident-card">
                   <div className="vcc-incident-row">
                     <div className="vcc-incident-icon">
@@ -2278,25 +2117,27 @@ export default function VoiceTestPage() {
                     </div>
                     <div style={{ flex: 1 }}>
                       <div className="vcc-incident-title">
-                        {incidentData?.title ?? 'Customer Login and Identity Outage'}
+                        {activeIncident?.title ?? 'Customer Login and Identity Outage'}
                       </div>
                       <div className="vcc-incident-loc">
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#9b9b9b" strokeWidth="2.5">
                           <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/>
                         </svg>
-                        {incidentData?.location ?? 'Identity service · Multiple regions'}
+                        {activeIncident?.event_type
+                          ? activeIncident.event_type.replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase())
+                          : 'Identity service · Multiple regions'}
                       </div>
-                      <div className="vcc-incident-id">{incidentData?.incidentId ?? '—'}</div>
+                      <div className="vcc-incident-id">{activeIncident?.incident_id ?? '—'}</div>
                     </div>
                   </div>
 
-                  {incidentData && (
+                  {activeIncident && (
                     <div className="vcc-incident-chips">
                       <div className="vcc-chip-group">
                         <span className="vcc-chip-meta">Severity</span>
-                        {incidentData.severity ? (
-                          <span className="vcc-chip" style={{ background: sevStyle(incidentData.severity).bg, color: sevStyle(incidentData.severity).text, border: `1px solid ${sevStyle(incidentData.severity).border}` }}>
-                            {incidentData.severity}
+                        {activeIncident.severity ? (
+                          <span className="vcc-chip" style={{ background: sevStyle(activeIncident.severity).bg, color: sevStyle(activeIncident.severity).text, border: `1px solid ${sevStyle(activeIncident.severity).border}` }}>
+                            {activeIncident.severity}
                           </span>
                         ) : (
                           <span className="vcc-chip" style={{ background: '#f4f4f5', color: '#9b9b9b' }}>Unknown</span>
@@ -2304,128 +2145,78 @@ export default function VoiceTestPage() {
                       </div>
                       <div className="vcc-chip-group">
                         <span className="vcc-chip-meta">Status</span>
-                        <span className="vcc-chip" style={{ background: '#f0fdf4', color: '#16a34a', border: '1px solid #bbf7d0' }}>{incidentData.status}</span>
+                        <span className="vcc-chip" style={{ background: '#f0fdf4', color: '#16a34a', border: '1px solid #bbf7d0' }}>{activeIncident.status}</span>
                       </div>
                       <div className="vcc-chip-group">
                         <span className="vcc-chip-meta">Started</span>
-                        <span style={{ fontSize: 11.5, color: '#4a4a4a', fontWeight: 500 }}>{incidentData.startedAt}</span>
+                        <span style={{ fontSize: 11.5, color: '#4a4a4a', fontWeight: 500 }}>
+                          {isMounted && activeIncident.created_at
+                            ? new Date(activeIncident.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                            : '—'}
+                        </span>
                       </div>
                     </div>
                   )}
 
-                  {incidentData && (
+                  {activeIncident && (
                     <div className="vcc-inferred-note">
-                      ⚠ All values are AI-inferred from voice — verify before operational action
+                      ⚠ Evidence assembled from ingested observations — verify before operational action
                     </div>
                   )}
 
-                  {incidentData && (
+                  {transcript.length > 0 && (
                     <div style={{ marginTop: 8, display: 'flex', justifyContent: 'flex-end' }}>
-                      <button onClick={handleResetIncident} className="vcc-btn" style={{ fontSize: 10, padding: '3px 8px' }}>
-                        Reset Incident
+                      <button onClick={handleClearTranscript} className="vcc-btn" style={{ fontSize: 10, padding: '3px 8px' }}>
+                        Clear Transcript
                       </button>
                     </div>
                   )}
                 </div>
 
-                {/* ── Live Situation ── */}
-                <div className="vcc-section-card">
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                    <div className="vcc-section-label" style={{ margin: 0 }}>Live Situation</div>
-                    <span style={{ fontSize: 9.5, color: '#b0b0b0', fontStyle: 'italic' }}>AI Inferred</span>
-                  </div>
-                  <div className="vcc-metric-grid">
-                    <div className="vcc-metric-item">
-                      <div className="vcc-metric-label">Customers Affected</div>
-                      <div className={`vcc-metric-value ${!incidentData?.metrics.peopleAffected ? 'placeholder' : ''}`}>
-                        {incidentData?.metrics.peopleAffected || '—'}
-                      </div>
-                      <div className={`vcc-metric-sub ${incidentData?.metrics.peopleAffectedSub?.includes('Trapped') ? 'alert' : ''}`}>
-                        {incidentData?.metrics.peopleAffectedSub || 'Awaiting data'}
-                      </div>
-                    </div>
-                    <div className="vcc-metric-item">
-                      <div className="vcc-metric-label">Gateway Error Rate</div>
-                      <div className={`vcc-metric-value ${!incidentData?.metrics.waterLevel ? 'placeholder' : ''}`} style={{ fontSize: incidentData?.metrics.waterLevel && incidentData.metrics.waterLevel.length > 5 ? 15 : 20 }}>
-                        {incidentData?.metrics.waterLevel || '—'}
-                      </div>
-                      <div className={`vcc-metric-sub ${incidentData?.metrics.waterLevelSub?.includes('Rising') || incidentData?.metrics.waterLevelSub?.includes('Critical') ? 'alert' : ''}`}>
-                        {incidentData?.metrics.waterLevelSub || 'Awaiting telemetry'}
-                      </div>
-                    </div>
-                    <div className="vcc-metric-item">
-                      <div className="vcc-metric-label">Risk Level</div>
-                      <div className={`vcc-metric-value ${!incidentData?.metrics.riskLevel ? 'placeholder' : ''}`}
-                        style={{ fontSize: 15, color: incidentData?.metrics.riskLevel === 'Critical' ? '#dc2626' : incidentData?.metrics.riskLevel === 'High' ? '#d97706' : '#1a1a1a' }}>
-                        {incidentData?.metrics.riskLevel || '—'}
-                      </div>
-                    </div>
-                    <div className="vcc-metric-item">
-                      <div className="vcc-metric-label">Service Health</div>
-                      <div className={`vcc-metric-value ${!incidentData?.metrics.resourcesDeployed ? 'placeholder' : ''}`} style={{ fontSize: incidentData?.metrics.resourcesDeployed && incidentData.metrics.resourcesDeployed.length > 4 ? 13 : 20 }}>
-                        {incidentData?.metrics.resourcesDeployed || '—'}
-                      </div>
-                      <div className="vcc-metric-sub">{incidentData?.metrics.resourcesSub || 'Awaiting telemetry'}</div>
-                    </div>
-                  </div>
-                </div>
+                {/* ── Live Situation (real data — item 1, steps 2–4) ──
+                    See docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md. Replaces the old
+                    ~200-line client-side regex simulator (extractIncidentInfo, with
+                    hardcoded flood/fire/earthquake/cyclone patterns) with tiles derived
+                    live from the real backend evidence record via deriveDynamicTiles. */}
+                <DynamicSituationTiles incident={activeIncident} wsStatus={wsStatus} />
 
-                {/* ── Dynamic Situation Tiles (dark-launch, item 1 step 3) ──
-                    Rendered ONLY behind ?debug_tiles=1, alongside the panel above,
-                    not replacing it. See docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md
-                    §9 step 3: verify against the real running backend before step 4
-                    swaps the visible panel over and deletes extractIncidentInfo(). */}
-                {isMounted && showDynamicTiles && (
-                  <div>
-                    <div
-                      style={{
-                        fontSize: 9,
-                        color: '#a78bfa',
-                        fontWeight: 700,
-                        letterSpacing: '0.06em',
-                        textTransform: 'uppercase',
-                        marginBottom: 6,
-                      }}
-                    >
-                      ⚙ Debug: Dynamic Tiles (real backend data)
-                    </div>
-                    <DynamicSituationTiles />
-                  </div>
-                )}
-
-                {/* ── Possible Causes ── */}
-                {(incidentData?.causes?.length ?? 0) > 0 && (
+                {/* ── Possible Causes (Hypotheses) — real data, item 1 step 4 ── */}
+                {(activeIncident?.hypotheses?.length ?? 0) > 0 && (
                   <div className="vcc-section-card">
                     <div className="vcc-section-label">Possible Causes <span style={{ fontWeight: 400, fontSize: 9, letterSpacing: 0, textTransform: 'none', color: '#c0c0c0', marginLeft: 4 }}>Hypotheses</span></div>
-                    {incidentData!.causes.map(h => (
-                      <div className="vcc-hypo" key={h.name}>
+                    {activeIncident!.hypotheses.map((h) => (
+                      <div className="vcc-hypo" key={h.id}>
                         <div className="vcc-hypo-row">
-                          <span className="vcc-hypo-name">{h.name}</span>
-                          <span className="vcc-hypo-pct">{h.pct}%</span>
+                          <span className="vcc-hypo-name">{h.title}</span>
+                          <span className="vcc-hypo-pct">{Math.round(h.confidence * 100)}%</span>
                         </div>
                         <div className="vcc-bar-track">
-                          <div className="vcc-bar-fill" style={{ width: `${h.pct}%` }} />
+                          <div className="vcc-bar-fill" style={{ width: `${Math.round(h.confidence * 100)}%` }} />
                         </div>
                       </div>
                     ))}
                   </div>
                 )}
 
-                {/* ── Incident Timeline ── */}
+                {/* ── Incident Timeline — real data, item 1 step 4 ── */}
                 <div className="vcc-section-card">
                   <div className="vcc-section-label">Incident Timeline</div>
-                  {(incidentData?.timeline?.length ?? 0) > 0 ? (
+                  {(activeIncident?.timeline?.length ?? 0) > 0 ? (
                     <div className="vcc-tl">
-                      {incidentData!.timeline.map((item, i, arr) => (
-                        <div className="vcc-tl-row" key={i}>
-                          <div className="vcc-tl-time">{item.time}</div>
+                      {[...activeIncident!.timeline].reverse().slice(0, 20).map((item, i, arr) => (
+                        <div className="vcc-tl-row" key={`${item.timestamp}-${i}`}>
+                          <div className="vcc-tl-time">
+                            {isMounted
+                              ? new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                              : '—'}
+                          </div>
                           <div className="vcc-tl-mid">
-                            <div className="vcc-tl-dot" style={{ background: item.color }} />
+                            <div className="vcc-tl-dot" style={{ background: item.actor === 'SYSTEM' ? '#9b9b9b' : '#3b82f6' }} />
                             {i < arr.length - 1 && <div className="vcc-tl-line" />}
                           </div>
                           <div className="vcc-tl-body" style={{ paddingBottom: i < arr.length - 1 ? 10 : 0 }}>
-                            <div className="vcc-tl-title">{item.title}</div>
-                            <div className="vcc-tl-desc" title={item.desc}>{item.desc}</div>
+                            <div className="vcc-tl-title">{item.event_type.replaceAll('_', ' ')}</div>
+                            <div className="vcc-tl-desc" title={item.description}>{item.description}</div>
                           </div>
                         </div>
                       ))}
@@ -2435,60 +2226,42 @@ export default function VoiceTestPage() {
                   )}
                 </div>
 
-                {/* ── Response & Actions ── */}
+                {/* ── Response & Actions — real data, read-only, item 1 step 4 ──
+                    The old confirm/reject buttons here never called any backend
+                    endpoint — they were purely local, decorative UI state. Rather than
+                    wire a second, parallel commander-approval flow into this page,
+                    this now shows the REAL proposed-action status from the backend and
+                    points to the main dashboard's already-implemented, commander-key
+                    -gated approval workflow for taking action. Read-only here is more
+                    honest than fake buttons that did nothing. */}
                 <div className="vcc-section-card">
                   <div className="vcc-section-label">Response &amp; Actions</div>
-                  {(incidentData?.actions?.length ?? 0) > 0 ? (
-                    incidentData!.actions.map(action => {
-                      const aState = actionStates[action.label];
-                      return (
-                        <div className="vcc-action-item" key={action.label}>
-                          <div className="vcc-action-top">
-                            <div className="vcc-action-icon" style={{ background: action.iconBg }}>
-                              {aState === 'confirmed' ? '✓' : aState === 'rejected' ? '✕' : '⚡'}
-                            </div>
-                            <span className="vcc-action-label">{action.label}</span>
-                            <span className="vcc-action-status-badge" style={{
-                              background: aState === 'confirmed' ? '#f0fdf4' : aState === 'rejected' ? '#fef2f2' : action.status === 'AI Decision' ? '#eef2ff' : '#f0fdf4',
-                              color: aState === 'confirmed' ? '#16a34a' : aState === 'rejected' ? '#dc2626' : action.status === 'AI Decision' ? '#6366f1' : '#16a34a',
-                              border: `1px solid ${aState === 'confirmed' ? '#bbf7d0' : aState === 'rejected' ? '#fecaca' : action.status === 'AI Decision' ? '#c7d2fe' : '#bbf7d0'}`,
-                            }}>
-                              {aState === 'confirmed' ? 'Confirmed' : aState === 'rejected' ? 'Rejected' : action.status}
-                            </span>
-                          </div>
-
-                          {/* Confirm / Reject only for unresolved AI-recommended actions */}
-                          {!aState && (action.status === 'AI Decision' || action.status === 'Requested') && (
-                            <div style={{ display: 'flex', gap: 6, paddingLeft: 36 }}>
-                              <button
-                                className="vcc-btn vcc-btn-confirm"
-                                onClick={() => setActionStates(prev => ({ ...prev, [action.label]: 'confirmed' }))}
-                                aria-label={`Confirm action: ${action.label}`}
+                  {(activeIncident?.proposed_actions?.length ?? 0) > 0 ? (
+                    <>
+                      {activeIncident!.proposed_actions.map((action) => {
+                        const badge = actionStatusBadge(action.status);
+                        return (
+                          <div className="vcc-action-item" key={action.action_id}>
+                            <div className="vcc-action-top">
+                              <div className="vcc-action-icon" style={{ background: badge.iconBg }}>{badge.icon}</div>
+                              <span className="vcc-action-label">{action.tool_name.replaceAll('_', ' ')}</span>
+                              <span
+                                className="vcc-action-status-badge"
+                                style={{ background: badge.bg, color: badge.text, border: `1px solid ${badge.border}` }}
                               >
-                                ✓ Confirm
-                              </button>
-                              <button
-                                className="vcc-btn vcc-btn-reject"
-                                onClick={() => setActionStates(prev => ({ ...prev, [action.label]: 'rejected' }))}
-                                aria-label={`Reject action: ${action.label}`}
-                              >
-                                ✕ Reject
-                              </button>
+                                {action.status.replaceAll('_', ' ')}
+                              </span>
                             </div>
-                          )}
-                          {aState === 'confirmed' && (
                             <div className="vcc-action-confirmed-note" style={{ paddingLeft: 36 }}>
-                              Confirmed by operator — awaiting operational execution
+                              {action.rationale}
                             </div>
-                          )}
-                          {aState === 'rejected' && (
-                            <div className="vcc-action-rejected-note" style={{ paddingLeft: 36 }}>
-                              Rejected by operator
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })
+                          </div>
+                        );
+                      })}
+                      <p className="vcc-empty" style={{ marginTop: 4 }}>
+                        Approve or reject pending actions on the main dashboard (commander sign-off required).
+                      </p>
+                    </>
                   ) : (
                     <p className="vcc-empty">No response actions yet. Incident information will generate recommendations.</p>
                   )}
@@ -2506,8 +2279,10 @@ export default function VoiceTestPage() {
             <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: isConnected ? '#16a34a' : '#d4d4d4', marginRight: 5, verticalAlign: 'middle' }} />
             {isConnected ? 'Voice channel active' : 'Not connected'}
           </span>
-          {incidentData && <span>{transcript.length} utterance{transcript.length !== 1 ? 's' : ''} · {incidentData.timeline.length} timeline event{incidentData.timeline.length !== 1 ? 's' : ''}</span>}
-          {tasks.length > 0 && <span>{tasks.length} task{tasks.length !== 1 ? 's' : ''} detected</span>}
+          {activeIncident && <span>{transcript.length} utterance{transcript.length !== 1 ? 's' : ''} · {activeIncident.timeline.length} timeline event{activeIncident.timeline.length !== 1 ? 's' : ''}</span>}
+          {(activeIncident?.action_items?.length ?? 0) > 0 && (
+            <span>{activeIncident?.action_items?.length} action item{activeIncident?.action_items?.length !== 1 ? 's' : ''} tracked</span>
+          )}
         </footer>
       </div>
     </>

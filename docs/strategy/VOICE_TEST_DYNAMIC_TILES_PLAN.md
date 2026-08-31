@@ -1,8 +1,11 @@
 # `/voice-test` Dynamic Tiles — Rewire Plan
 
-Status: **planning only, nothing in this doc has been implemented yet.** This is
-`TODO.md` item 1, expanded into a full design. Do not start coding from this file
-without re-reading `TODO.md` first in case its status line has moved.
+Status: **✅ COMPLETE (2026-08-31).** All 6 rollout steps implemented and live-verified
+against the real backend. Kept here as the design record — see `TODO.md`'s "Recently
+completed" section for what actually shipped and how it was verified, including where
+the real implementation ended up larger in scope than this document originally
+estimated (§7's component plan under-scoped `incidentData`'s blast radius — it also
+drove the header, hypotheses, and actions sections, not just the metrics tiles).
 
 Scope boundary set by `CLAUDE.md`: **the visual design of `/voice-test` must not
 change.** Every fix below is a data-source swap underneath the existing light-theme UI
