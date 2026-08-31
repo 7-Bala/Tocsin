@@ -1135,8 +1135,10 @@ export default function VoiceTestPage() {
           overflow-y: auto;
           overflow-x: hidden;
         }
-        .vcc-panel-scroll::-webkit-scrollbar { width: 4px; }
-        .vcc-panel-scroll::-webkit-scrollbar-thumb { background: #d8d8d8; border-radius: 2px; }
+        .vcc-panel-scroll::-webkit-scrollbar { width: 8px; }
+        .vcc-panel-scroll::-webkit-scrollbar-thumb { background: #c4c4c4; border-radius: 4px; }
+        .vcc-panel-scroll::-webkit-scrollbar-thumb:hover { background: #6b6b6b; }
+        .vcc-panel-scroll::-webkit-scrollbar-track { background: transparent; }
 
         /* ── Left panel ── */
         .vcc-left {
@@ -1192,8 +1194,10 @@ export default function VoiceTestPage() {
           gap: 6px;
           padding-bottom: 8px;
         }
-        .vcc-transcript::-webkit-scrollbar { width: 3px; }
-        .vcc-transcript::-webkit-scrollbar-thumb { background: #d0d0d0; border-radius: 2px; }
+        .vcc-transcript::-webkit-scrollbar { width: 8px; }
+        .vcc-transcript::-webkit-scrollbar-thumb { background: #c4c4c4; border-radius: 4px; }
+        .vcc-transcript::-webkit-scrollbar-thumb:hover { background: #6b6b6b; }
+        .vcc-transcript::-webkit-scrollbar-track { background: transparent; }
         .vcc-transcript-empty {
           display: flex;
           flex-direction: column;
@@ -1646,8 +1650,22 @@ export default function VoiceTestPage() {
           overflow-y: auto;
           overflow-x: hidden;
         }
-        .vcc-right-inner::-webkit-scrollbar { width: 4px; }
-        .vcc-right-inner::-webkit-scrollbar-thumb { background: #d8d8d8; border-radius: 2px; }
+        .vcc-right-inner::-webkit-scrollbar { width: 8px; }
+        .vcc-right-inner::-webkit-scrollbar-thumb { background: #c4c4c4; border-radius: 4px; }
+        .vcc-right-inner::-webkit-scrollbar-thumb:hover { background: #6b6b6b; }
+        .vcc-right-inner::-webkit-scrollbar-track { background: transparent; }
+
+        /* ── Incident Timeline: internal scroll, not the whole right column ── */
+        .vcc-tl-scroll {
+          max-height: 280px;
+          overflow-y: auto;
+          overflow-x: hidden;
+          padding-right: 4px;
+        }
+        .vcc-tl-scroll::-webkit-scrollbar { width: 8px; }
+        .vcc-tl-scroll::-webkit-scrollbar-thumb { background: #c4c4c4; border-radius: 4px; }
+        .vcc-tl-scroll::-webkit-scrollbar-thumb:hover { background: #6b6b6b; }
+        .vcc-tl-scroll::-webkit-scrollbar-track { background: transparent; }
         .vcc-right-title {
           font-size: 10px;
           font-weight: 700;
@@ -2287,24 +2305,26 @@ export default function VoiceTestPage() {
                 <div className="vcc-section-card">
                   <div className="vcc-section-label">Incident Timeline</div>
                   {(activeIncident?.timeline?.length ?? 0) > 0 ? (
-                    <div className="vcc-tl">
-                      {[...activeIncident!.timeline].reverse().slice(0, 20).map((item, i, arr) => (
-                        <div className="vcc-tl-row" key={`${item.timestamp}-${i}`}>
-                          <div className="vcc-tl-time">
-                            {isMounted
-                              ? new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                              : '—'}
+                    <div className="vcc-tl-scroll">
+                      <div className="vcc-tl">
+                        {[...activeIncident!.timeline].reverse().slice(0, 20).map((item, i, arr) => (
+                          <div className="vcc-tl-row" key={`${item.timestamp}-${i}`}>
+                            <div className="vcc-tl-time">
+                              {isMounted
+                                ? new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                                : '—'}
+                            </div>
+                            <div className="vcc-tl-mid">
+                              <div className="vcc-tl-dot" style={{ background: item.actor === 'SYSTEM' ? '#9b9b9b' : '#3b82f6' }} />
+                              {i < arr.length - 1 && <div className="vcc-tl-line" />}
+                            </div>
+                            <div className="vcc-tl-body" style={{ paddingBottom: i < arr.length - 1 ? 10 : 0 }}>
+                              <div className="vcc-tl-title">{item.event_type.replaceAll('_', ' ')}</div>
+                              <div className="vcc-tl-desc" title={item.description}>{item.description}</div>
+                            </div>
                           </div>
-                          <div className="vcc-tl-mid">
-                            <div className="vcc-tl-dot" style={{ background: item.actor === 'SYSTEM' ? '#9b9b9b' : '#3b82f6' }} />
-                            {i < arr.length - 1 && <div className="vcc-tl-line" />}
-                          </div>
-                          <div className="vcc-tl-body" style={{ paddingBottom: i < arr.length - 1 ? 10 : 0 }}>
-                            <div className="vcc-tl-title">{item.event_type.replaceAll('_', ' ')}</div>
-                            <div className="vcc-tl-desc" title={item.description}>{item.description}</div>
-                          </div>
-                        </div>
-                      ))}
+                        ))}
+                      </div>
                     </div>
                   ) : (
                     <p className="vcc-empty">Waiting for incident information...</p>
