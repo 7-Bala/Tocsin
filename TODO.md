@@ -5,7 +5,7 @@ Auto-maintained by Claude: an entry is added when work is identified, and delete
 it's done. Do not treat an entry's presence here as "not started"; check the note for
 current state. This file is the resume point after any session/context reset.
 
-Last updated: 2026-08-31 (spoken /speak broadcast implemented for real; live-agent verification for items 4/5/6 still pending).
+Last updated: 2026-08-31 (all P1/P2 items closed except live-agent verification for items 4/5/6; fixed a more severe version of the real-Postgres test-pollution bug found earlier).
 
 ---
 
@@ -82,13 +82,64 @@ is what's calling it unexpectedly, if anything really is.
 
 ## P2 — Smaller, cheap, queued
 
-### 9. Decisions have no rationale/supersession model
-From `docs/strategy/INNOVATION_ROADMAP.md` §3.1. Decisions are currently plain claims;
-a real incident needs "we decided X because Y, superseded by Z at T2."
+None open right now.
 
 ---
 
 ## Recently completed (kept briefly for context, then deleted next pass)
+
+- ✅ **Severe, more complete version of a bug found and fixed: `USE_SQLITE_FALLBACK`
+  was NOT actually short-circuiting Postgres, so test runs were still silently
+  writing into the real dev database for nearly this entire session** (2026-08-31).
+  A `git diff --check` verification while working on item 9 surfaced live test
+  incidents ("Decision Test", "Supersede Test") on the real dashboard, which should
+  have been impossible after an EARLIER session's fix to `tests/conftest.py`
+  (forcing `USE_SQLITE_FALLBACK=true`). Root cause found in
+  `backend/app/engine/database.py`'s `init_db()`: it tried PostgreSQL FIRST
+  whenever `DATABASE_URL` was set, regardless of the fallback flag — the flag was
+  only ever consulted in the `except` branch, i.e. only if the Postgres connection
+  attempt itself threw. Since Docker's Postgres was reachable for nearly this whole
+  session, every test run connected to and wrote into the real database anyway.
+  Confirmed live: 333 test-created rows had accumulated (330 before this pass, +3
+  more from this pass before the fix landed) — only 1 (`inc-demo-identity-outage`)
+  was genuine. Fixed by checking `use_sqlite_fallback` *before* ever attempting
+  Postgres, making the flag authoritative rather than a same-process-failure-only
+  fallback. Verified: a full pytest run after the fix (excluding
+  `test_postgresql_live.py`, which intentionally targets real Postgres by design)
+  added zero rows to the real database. Cleaned up via the existing
+  `backend/scripts/cleanup_test_incidents.sql`, run three times because a
+  concurrent session's already-running (pre-fix, in-memory) pytest process kept
+  adding a few more rows between cleanup passes — a file edit doesn't affect a
+  process that already has the old code loaded. Notified that session directly.
+  Final state confirmed: exactly 1 row (`inc-demo-identity-outage`) in real
+  Postgres. **This corrects, not merely supplements, the earlier "root cause fixed"
+  claim for the same symptom** — the earlier fix was real but only handled the
+  Postgres-unreachable case, which was the rarer case in practice.
+
+- ✅ **First-class decisions with rationale and supersession** (2026-08-31, item 9,
+  closes `docs/strategy/INNOVATION_ROADMAP.md` §3.1). `Claim` gained
+  `rationale`/`decided_by`/`supersedes_id`/`superseded_by_id` (round-trips through
+  the existing `state_json` JSONB blob — no migration needed, since that's the
+  actual read path for `IncidentState.claims`, confirmed by reading
+  `IncidentRepository.get`/`list_all`). Two new endpoints:
+  `POST /api/incidents/{id}/decisions` (record, human-authored, not extracted —
+  a decision needs its rationale attached at the moment it's made) and
+  `POST .../decisions/{claim_id}/supersede` (409 if the target was already
+  superseded, 404 if it doesn't exist or isn't a decision). Only the ACTIVE end of
+  each chain is surfaced as current in the handoff brief and final summary — a
+  superseded decision is kept as history in a separate section, never presented as
+  still in force. Found and fixed a related leak while testing: a decision's
+  `status=CONFIRMED` let it double-appear in the generic "Confirmed facts" list
+  even after being superseded (that list's status filter didn't know about
+  supersession); decisions are now excluded from it entirely since they have their
+  own dedicated section. New `DecisionsPanel.tsx` (record + supersede UI, replacing
+  the old read-only "Incident Decisions" tile which showed superseded decisions as
+  if still current). 5 new backend tests, 2 new frontend tests — 69/69 backend,
+  47/47 frontend, build succeeds. Live-verified end-to-end against the real running
+  backend: recorded a decision, superseded it, confirmed the handoff brief showed
+  only the new value as active, the old one only as superseded history and as
+  supersession context on the new one, the spoken brief mentioned only the current
+  decision, and re-superseding the already-superseded one correctly returned 409.
 
 - ✅ **Spoken audio summary broadcast implemented for real** (2026-08-31). Earlier
   research passes couldn't extract the `/speak` endpoint's request schema via
