@@ -126,8 +126,10 @@ def _split_sql(sql: str) -> list[str]:
 async def init_db() -> None:
     """
     Initialize database connection.
-    1. Try PostgreSQL (asyncpg).
-    2. If USE_SQLITE_FALLBACK=true and PostgreSQL fails, use SQLite.
+    1. If USE_SQLITE_FALLBACK=true, use SQLite directly — do NOT attempt PostgreSQL
+       first. This flag is an explicit instruction ("use sqlite"), not merely a
+       last-resort safety net for when Postgres happens to be unreachable.
+    2. Otherwise, try PostgreSQL (asyncpg).
     3. If both fail, raise RuntimeError.
     """
     global _pool, _db_type
@@ -135,7 +137,20 @@ async def init_db() -> None:
     database_url = os.getenv("DATABASE_URL", "")
     use_sqlite_fallback = os.getenv("USE_SQLITE_FALLBACK", "false").lower() == "true"
 
-    if database_url:
+    # Bug fixed 2026-08-31: this function used to try PostgreSQL first whenever
+    # DATABASE_URL was set, regardless of USE_SQLITE_FALLBACK, only falling through
+    # to SQLite if the Postgres *connection attempt itself* threw. Whenever the dev
+    # Postgres container happened to be reachable (the common case locally), every
+    # test run silently connected to and wrote into the real database anyway,
+    # ignoring USE_SQLITE_FALLBACK entirely — confirmed live: 330 test-created rows
+    # had accumulated in the real incidents table. An earlier fix that forced
+    # USE_SQLITE_FALLBACK=true in tests/conftest.py addressed only half the bug; it
+    # had no effect once Postgres was actually up, which was true for nearly this
+    # entire session. Checking use_sqlite_fallback FIRST, before ever attempting
+    # Postgres, is what actually makes the flag authoritative.
+    attempt_postgres_first = bool(database_url) and not use_sqlite_fallback
+
+    if attempt_postgres_first:
         # Try primary URL first
         urls_to_try = [database_url]
         if "@postgres:" in database_url:
@@ -160,13 +175,13 @@ async def init_db() -> None:
             except Exception as e:
                 logger.debug(f"PostgreSQL connection attempt failed for {_mask_url(url)}: {e}")
 
-        if not use_sqlite_fallback:
-            raise RuntimeError(
-                "PostgreSQL is required but unavailable. Set USE_SQLITE_FALLBACK=true to use SQLite for local development."
-            )
-        logger.warning("Falling back to SQLite (USE_SQLITE_FALLBACK=true).")
+        raise RuntimeError(
+            "PostgreSQL is required but unavailable. Set USE_SQLITE_FALLBACK=true to use SQLite for local development."
+        )
 
     if use_sqlite_fallback or not database_url:
+        if use_sqlite_fallback and database_url:
+            logger.warning("Using SQLite (USE_SQLITE_FALLBACK=true) — PostgreSQL was not attempted.")
         try:
             import aiosqlite  # type: ignore
             db_path = os.getenv("SQLITE_DB_PATH", "./tocsin_dev.db")
