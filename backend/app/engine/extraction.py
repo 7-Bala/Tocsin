@@ -4,8 +4,13 @@ Extracts structured intelligence (claims, action items, risks, missing info)
 from raw transcript utterances.
 
 Extraction tiers:
-  1. PRIMARY: Gemini API (google.genai SDK) with JSON schema enforcement
-  2. FALLBACK (labeled): Keyword heuristic patterns — only when Gemini unavailable or returns invalid JSON
+  1. PRIMARY: Groq (OpenAI-compatible API, JSON schema structured outputs) — tried first
+     when GROQ_API_KEY is configured, since Gemini's free tier is only 20 requests/day
+     (observed exhausted live 2026-08-31) versus Groq's ~1000/day free tier.
+  2. SECONDARY: Gemini API (google.genai SDK) with JSON schema enforcement — tried when
+     Groq is not configured or fails.
+  3. FALLBACK (labeled): Keyword heuristic patterns — only when neither LLM is available
+     or both return invalid JSON.
      - All fallback results tagged extraction_method: "heuristic_fallback"
      - Fallback claims always have status: UNVERIFIED; never promoted to CONFIRMED automatically
 
@@ -20,6 +25,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
+
 logger = logging.getLogger("tocsin.extraction")
 
 # Hard ceiling on a single Gemini extraction call. Chosen to sit comfortably above
@@ -27,6 +34,7 @@ logger = logging.getLogger("tocsin.extraction")
 # chat message's round trip well under what a human will wait for a reply. Overridable
 # for environments with slower baseline network characteristics.
 EXTRACTION_TIMEOUT_SECONDS = float(os.getenv("GEMINI_EXTRACTION_TIMEOUT_SECONDS", "12"))
+GROQ_EXTRACTION_TIMEOUT_SECONDS = float(os.getenv("GROQ_EXTRACTION_TIMEOUT_SECONDS", "12"))
 
 # ─── ClaimSet schema ─────────────────────────────────────────────────────────
 
@@ -233,6 +241,81 @@ async def extract_with_gemini(
         return None
     except Exception as e:
         logger.warning(f"Gemini extraction failed: {type(e).__name__}: {e}. Falling back to heuristics.")
+        return None
+
+
+async def extract_with_groq(
+    utterance: str,
+    speaker: str | None,
+    incident_context: str = "",
+) -> ClaimSet | None:
+    """
+    Groq extraction via its OpenAI-compatible chat completions API, using
+    structured-output JSON schema enforcement (response_format: json_schema).
+    Returns None if Groq is unavailable or returns invalid JSON, so the caller
+    can fall through to Gemini and then the heuristic extractor.
+
+    Schema request shape confirmed against console.groq.com/docs/structured-outputs
+    (2026-09-01) -- best-effort mode (strict: false) reuses the exact same
+    EXTRACTION_SCHEMA Gemini uses, avoiding a second schema to keep in sync.
+    Default model is openai/gpt-oss-120b, one of the models Groq's docs confirm
+    support structured outputs; llama-3.3-70b-versatile (Groq's most commonly
+    referenced model) is NOT in that supported list, so it is deliberately not
+    the default here despite being well-known.
+    """
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
+    if not api_key:
+        logger.debug("GROQ_API_KEY not configured; skipping Groq extraction.")
+        return None
+
+    model_name = os.getenv("GROQ_EXTRACTION_MODEL", "openai/gpt-oss-120b").strip()
+    speaker_str = f"Speaker: {speaker}\n" if speaker else ""
+    context_str = f"Incident context: {incident_context}\n" if incident_context else ""
+    prompt = f"{EXTRACTION_SYSTEM_PROMPT}\n\n{context_str}{speaker_str}Utterance: \"{utterance}\""
+
+    payload = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "claim_extraction",
+                "strict": False,
+                "schema": EXTRACTION_SCHEMA,
+            },
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=GROQ_EXTRACTION_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+            )
+        if response.status_code != 200:
+            logger.warning(
+                f"Groq extraction HTTP {response.status_code}: {response.text[:300]}. "
+                "Falling back to Gemini/heuristics."
+            )
+            return None
+
+        raw_json = response.json()["choices"][0]["message"]["content"].strip()
+        data = json.loads(raw_json)
+        return _parse_claim_set(data, method="llm")
+
+    except httpx.TimeoutException:
+        logger.warning(
+            f"Groq extraction exceeded {GROQ_EXTRACTION_TIMEOUT_SECONDS}s timeout "
+            "(GROQ_EXTRACTION_TIMEOUT_SECONDS) — falling back to Gemini/heuristics."
+        )
+        return None
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        logger.warning(f"Groq returned unparseable response: {e}. Falling back to Gemini/heuristics.")
+        return None
+    except Exception as e:
+        logger.warning(f"Groq extraction failed: {type(e).__name__}: {e}. Falling back to Gemini/heuristics.")
         return None
 
 
@@ -446,9 +529,14 @@ async def extract_intelligence(
     """
     Extract structured intelligence from a transcript utterance.
     Pipeline:
-    1. Try Gemini LLM extraction (primary) via modern google.genai SDK.
-    2. If unavailable or fails: use HeuristicExtractor (fallback, clearly labeled).
+    1. Try Groq extraction if GROQ_API_KEY is configured (generous free tier).
+    2. Try Gemini LLM extraction via modern google.genai SDK.
+    3. If both unavailable or fail: use HeuristicExtractor (fallback, clearly labeled).
     """
+    result = await extract_with_groq(utterance, speaker, incident_context)
+    if result is not None:
+        return result
+
     result = await extract_with_gemini(utterance, speaker, incident_context)
     if result is not None:
         return result

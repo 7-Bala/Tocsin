@@ -255,6 +255,62 @@ class SpeakRequest(BaseModel):
   )
 
 
+class AgentUpdateRequest(BaseModel):
+  channel_name: str = Field(
+    min_length=1,
+    max_length=64,
+    description="Target Agora voice channel whose active agent should be reconfigured",
+    examples=["tocsin-emergency-room"],
+  )
+  system_prompt: str = Field(
+    min_length=1,
+    description=(
+      "New system prompt for the running agent's LLM, replacing its current "
+      "system_messages going forward (does not restart the agent or the "
+      "conversation). Intended use: re-sync a live agent's understanding of the "
+      "incident when evidence changes materially (new conflict, severity change, "
+      "new confirmed claim) after it was originally dispatched."
+    ),
+  )
+
+
+class AgentThinkRequest(BaseModel):
+  channel_name: str = Field(
+    min_length=1,
+    max_length=64,
+    description="Target Agora voice channel whose active agent should react to this instruction",
+    examples=["tocsin-emergency-room"],
+  )
+  text: str = Field(
+    min_length=1,
+    description=(
+      "Instruction injected into the agent's conversation pipeline as if it were "
+      "user input -- the agent processes and responds to it following normal "
+      "turn logic (it may speak about it, per the agent's own judgment, not "
+      "guaranteed verbatim playback like /speak). Intended use: push a real-time "
+      "incident development into a live session so the agent can proactively "
+      "raise it, e.g. 'A new conflict was just detected: the database team "
+      "reports 30% CPU while SRE reports 95% CPU. Mention this to the room.'"
+    ),
+  )
+  on_listening_action: Literal["inject", "interrupt", "ignore"] = Field(
+    default="inject",
+    description="How this instruction interacts if the agent is currently listening to the user, per Agora's documented schema.",
+  )
+  on_thinking_action: Literal["interrupt", "ignore"] = Field(
+    default="interrupt",
+    description="How this instruction interacts if the agent is currently thinking (mid-LLM-call), per Agora's documented schema.",
+  )
+  on_speaking_action: Literal["interrupt", "ignore"] = Field(
+    default="interrupt",
+    description="How this instruction interacts if the agent is currently speaking, per Agora's documented schema.",
+  )
+  interruptable: bool = Field(
+    default=True,
+    description="Whether the agent's resulting response to this instruction can itself be interrupted.",
+  )
+
+
 class StopAgentRequest(BaseModel):
   channel_name: str = Field(
     min_length=1,
@@ -901,6 +957,210 @@ async def speak_into_channel(request: SpeakRequest) -> dict[str, Any]:
       }
   except httpx.HTTPError as exc:
     logger.error(f"Network error connecting to Agora speak REST API: {exc}")
+    raise HTTPException(
+      status_code=status.HTTP_502_BAD_GATEWAY,
+      detail=f"Network error communicating with Agora REST API: {exc}",
+    )
+
+
+@router.post(
+  "/agent-update",
+  summary="Update a running agent's system prompt without restarting it",
+  description=(
+    "Calls Agora's documented POST /v2/projects/{appid}/agents/{agentId}/update "
+    "endpoint to change the running agent's LLM system_messages going forward, "
+    "without restarting the agent or the conversation. Requires an agent already "
+    "running in the target channel; returns 404 if none is tracked. Schema "
+    "confirmed via docs.agora.io/en/api-reference/api-ref/conversational-ai/update "
+    "(see docs/agora/RESEARCH.md §13) — CREDENTIAL REQUIRED / NOT YET "
+    "LIVE-VERIFIED until a real credentialed session confirms Agora accepts the "
+    "call and the agent's behavior actually reflects the new prompt."
+  ),
+)
+async def update_agent_prompt(request: AgentUpdateRequest) -> dict[str, Any]:
+  """Push a new system prompt into an already-running Conversational AI agent."""
+  channel_name = request.channel_name.strip()
+  agent_id = ACTIVE_AGENTS.get(channel_name)
+
+  if not agent_id:
+    raise HTTPException(
+      status_code=status.HTTP_404_NOT_FOUND,
+      detail=(
+        f"No active agent tracked for channel '{channel_name}'. Start one via "
+        "/api/agora/start-agent first — this endpoint reconfigures an existing "
+        "agent session, it does not create one."
+      ),
+    )
+
+  app_id = os.getenv("AGORA_APP_ID", "").strip()
+  customer_id = os.getenv("AGORA_CUSTOMER_ID", "").strip()
+  customer_secret = os.getenv("AGORA_CUSTOMER_SECRET", "").strip()
+
+  if not app_id or not customer_id or not customer_secret:
+    raise HTTPException(
+      status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+      detail=(
+        "AGORA_APP_ID, AGORA_CUSTOMER_ID, and AGORA_CUSTOMER_SECRET are not "
+        "configured on the backend server."
+      ),
+    )
+
+  auth_str = f"{customer_id}:{customer_secret}"
+  b64_auth = base64.b64encode(auth_str.encode("utf-8")).decode("utf-8")
+  headers = {
+    "Authorization": f"Basic {b64_auth}",
+    "Content-Type": "application/json",
+  }
+
+  # Per the confirmed schema (docs/agora/RESEARCH.md §13), the update payload uses
+  # the same llm.system_messages shape as the composed_tools agent-join payload
+  # (see start_conversational_agent above) — reusing that exact structure here
+  # rather than inventing a second one.
+  payload = {
+    "properties": {
+      "llm": {
+        "system_messages": [{"role": "system", "content": request.system_prompt}],
+      },
+    },
+  }
+
+  agora_url = (
+    f"https://api.agora.io/api/conversational-ai-agent/v2/projects/{app_id}"
+    f"/agents/{agent_id}/update"
+  )
+
+  logger.info(
+    f"Outgoing agent-update request to Agora URL: {agora_url} for channel"
+    f" '{channel_name}' (agent_id: {agent_id}, prompt_length:"
+    f" {len(request.system_prompt)})"
+  )
+
+  try:
+    async with httpx.AsyncClient(timeout=12.0) as client:
+      resp = await client.post(agora_url, json=payload, headers=headers)
+      logger.info(f"Agora agent-update response HTTP {resp.status_code}: {resp.text}")
+
+      if resp.status_code not in (200, 201):
+        err_msg = resp.text
+        logger.error(f"Agora agent-update request failed (HTTP {resp.status_code}): {err_msg}")
+        raise HTTPException(
+          status_code=status.HTTP_502_BAD_GATEWAY,
+          detail=(
+            f"Agora Conversational AI update error (HTTP {resp.status_code}):"
+            f" {err_msg}"
+          ),
+        )
+
+      data = resp.json() if resp.text else {}
+      return {
+        "status": "updated",
+        "channel_name": channel_name,
+        "agent_id": agent_id,
+        "agora_response": data,
+      }
+  except httpx.HTTPError as exc:
+    logger.error(f"Network error connecting to Agora agent-update REST API: {exc}")
+    raise HTTPException(
+      status_code=status.HTTP_502_BAD_GATEWAY,
+      detail=f"Network error communicating with Agora REST API: {exc}",
+    )
+
+
+@router.post(
+  "/agent-think",
+  summary="Inject a one-off instruction into a running agent's live conversation",
+  description=(
+    "Calls Agora's documented POST /v2/projects/{appid}/agents/{agentId}/think "
+    "endpoint to inject text into the running agent's conversation pipeline as "
+    "if it were user input -- the agent processes and responds to it following "
+    "normal turn logic (this is NOT guaranteed verbatim playback the way /speak "
+    "is). Requires an agent already running in the target channel; returns 404 "
+    "if none is tracked. Schema confirmed via "
+    "docs.agora.io/en/api-reference/api-ref/conversational-ai/think (see "
+    "docs/agora/RESEARCH.md §13) — CREDENTIAL REQUIRED / NOT YET LIVE-VERIFIED "
+    "until a real credentialed session confirms Agora accepts the call and the "
+    "agent actually reacts to the injected instruction."
+  ),
+)
+async def think_into_channel(request: AgentThinkRequest) -> dict[str, Any]:
+  """Inject a one-off instruction into an already-running Conversational AI agent."""
+  channel_name = request.channel_name.strip()
+  agent_id = ACTIVE_AGENTS.get(channel_name)
+
+  if not agent_id:
+    raise HTTPException(
+      status_code=status.HTTP_404_NOT_FOUND,
+      detail=(
+        f"No active agent tracked for channel '{channel_name}'. Start one via "
+        "/api/agora/start-agent first — this endpoint talks to an existing "
+        "agent session, it does not create one."
+      ),
+    )
+
+  app_id = os.getenv("AGORA_APP_ID", "").strip()
+  customer_id = os.getenv("AGORA_CUSTOMER_ID", "").strip()
+  customer_secret = os.getenv("AGORA_CUSTOMER_SECRET", "").strip()
+
+  if not app_id or not customer_id or not customer_secret:
+    raise HTTPException(
+      status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+      detail=(
+        "AGORA_APP_ID, AGORA_CUSTOMER_ID, and AGORA_CUSTOMER_SECRET are not "
+        "configured on the backend server."
+      ),
+    )
+
+  auth_str = f"{customer_id}:{customer_secret}"
+  b64_auth = base64.b64encode(auth_str.encode("utf-8")).decode("utf-8")
+  headers = {
+    "Authorization": f"Basic {b64_auth}",
+    "Content-Type": "application/json",
+  }
+
+  payload = {
+    "text": request.text,
+    "on_listening_action": request.on_listening_action,
+    "on_thinking_action": request.on_thinking_action,
+    "on_speaking_action": request.on_speaking_action,
+    "interruptable": request.interruptable,
+  }
+
+  agora_url = (
+    f"https://api.agora.io/api/conversational-ai-agent/v2/projects/{app_id}"
+    f"/agents/{agent_id}/think"
+  )
+
+  logger.info(
+    f"Outgoing agent-think request to Agora URL: {agora_url} for channel"
+    f" '{channel_name}' (agent_id: {agent_id}, text_length: {len(request.text)})"
+  )
+
+  try:
+    async with httpx.AsyncClient(timeout=12.0) as client:
+      resp = await client.post(agora_url, json=payload, headers=headers)
+      logger.info(f"Agora agent-think response HTTP {resp.status_code}: {resp.text}")
+
+      if resp.status_code not in (200, 201):
+        err_msg = resp.text
+        logger.error(f"Agora agent-think request failed (HTTP {resp.status_code}): {err_msg}")
+        raise HTTPException(
+          status_code=status.HTTP_502_BAD_GATEWAY,
+          detail=(
+            f"Agora Conversational AI think error (HTTP {resp.status_code}):"
+            f" {err_msg}"
+          ),
+        )
+
+      data = resp.json() if resp.text else {}
+      return {
+        "status": "injected",
+        "channel_name": channel_name,
+        "agent_id": agent_id,
+        "text_length": len(request.text),
+        "agora_response": data,
+      }
+  except httpx.HTTPError as exc:
+    logger.error(f"Network error connecting to Agora agent-think REST API: {exc}")
     raise HTTPException(
       status_code=status.HTTP_502_BAD_GATEWAY,
       detail=f"Network error communicating with Agora REST API: {exc}",

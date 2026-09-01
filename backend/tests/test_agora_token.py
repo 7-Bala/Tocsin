@@ -281,6 +281,147 @@ async def test_speak_returns_404_when_no_active_agent(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_agent_update_pushes_new_system_prompt(monkeypatch):
+    """
+    /api/agora/agent-update must call Agora's documented
+    POST /v2/projects/{appid}/agents/{agentId}/update with the confirmed
+    properties.llm.system_messages shape (see docs/agora/RESEARCH.md §13).
+    """
+    from app.api import agora as agora_module
+
+    monkeypatch.setenv("AGORA_APP_ID", "mock_app_id_1234567890123456789012")
+    monkeypatch.setenv("AGORA_CUSTOMER_ID", "mock_customer_id")
+    monkeypatch.setenv("AGORA_CUSTOMER_SECRET", "mock_customer_secret")
+    monkeypatch.setitem(agora_module.ACTIVE_AGENTS, "update_test_room", "agent_update_1")
+
+    mock_agora_response = Response(
+        status_code=200,
+        json={"agent_id": "agent_update_1", "create_ts": 1234567890, "status": "RUNNING"},
+    )
+    mock_client_instance = AsyncMock()
+    mock_client_instance.post.return_value = mock_agora_response
+    mock_client_instance.__aenter__.return_value = mock_client_instance
+    mock_client_instance.__aexit__.return_value = None
+
+    with patch("app.api.agora.httpx.AsyncClient", return_value=mock_client_instance):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as test_client:
+            resp = await test_client.post(
+                "/api/agora/agent-update",
+                json={
+                    "channel_name": "update_test_room",
+                    "system_prompt": "A new conflict was just detected: mention it.",
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "updated"
+            assert data["agent_id"] == "agent_update_1"
+
+            sent_url = mock_client_instance.post.call_args.args[0]
+            assert sent_url == (
+                "https://api.agora.io/api/conversational-ai-agent/v2/projects/"
+                "mock_app_id_1234567890123456789012/agents/agent_update_1/update"
+            )
+            sent_payload = mock_client_instance.post.call_args.kwargs["json"]
+            assert sent_payload == {
+                "properties": {
+                    "llm": {
+                        "system_messages": [
+                            {"role": "system", "content": "A new conflict was just detected: mention it."}
+                        ],
+                    },
+                },
+            }
+
+
+@pytest.mark.asyncio
+async def test_agent_update_returns_404_when_no_active_agent(monkeypatch):
+    """Updating a channel with no tracked agent must fail clearly, not silently."""
+    monkeypatch.setenv("AGORA_APP_ID", "mock_app_id_1234567890123456789012")
+    monkeypatch.setenv("AGORA_CUSTOMER_ID", "mock_customer_id")
+    monkeypatch.setenv("AGORA_CUSTOMER_SECRET", "mock_customer_secret")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as test_client:
+        resp = await test_client.post(
+            "/api/agora/agent-update",
+            json={"channel_name": "no_agent_here_room", "system_prompt": "Hello"},
+        )
+        assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_agent_think_injects_instruction(monkeypatch):
+    """
+    /api/agora/agent-think must call Agora's documented
+    POST /v2/projects/{appid}/agents/{agentId}/think with the confirmed
+    text/on_listening_action/on_thinking_action/on_speaking_action/interruptable
+    shape (see docs/agora/RESEARCH.md §13).
+    """
+    from app.api import agora as agora_module
+
+    monkeypatch.setenv("AGORA_APP_ID", "mock_app_id_1234567890123456789012")
+    monkeypatch.setenv("AGORA_CUSTOMER_ID", "mock_customer_id")
+    monkeypatch.setenv("AGORA_CUSTOMER_SECRET", "mock_customer_secret")
+    monkeypatch.setitem(agora_module.ACTIVE_AGENTS, "think_test_room", "agent_think_1")
+
+    mock_agora_response = Response(
+        status_code=200,
+        json={"agent_id": "agent_think_1", "channel": "think_test_room", "start_ts": 1234567890},
+    )
+    mock_client_instance = AsyncMock()
+    mock_client_instance.post.return_value = mock_agora_response
+    mock_client_instance.__aenter__.return_value = mock_client_instance
+    mock_client_instance.__aexit__.return_value = None
+
+    with patch("app.api.agora.httpx.AsyncClient", return_value=mock_client_instance):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as test_client:
+            resp = await test_client.post(
+                "/api/agora/agent-think",
+                json={
+                    "channel_name": "think_test_room",
+                    "text": "A new conflict was just detected. Mention this to the room.",
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "injected"
+            assert data["agent_id"] == "agent_think_1"
+
+            sent_url = mock_client_instance.post.call_args.args[0]
+            assert sent_url == (
+                "https://api.agora.io/api/conversational-ai-agent/v2/projects/"
+                "mock_app_id_1234567890123456789012/agents/agent_think_1/think"
+            )
+            sent_payload = mock_client_instance.post.call_args.kwargs["json"]
+            assert sent_payload == {
+                "text": "A new conflict was just detected. Mention this to the room.",
+                "on_listening_action": "inject",
+                "on_thinking_action": "interrupt",
+                "on_speaking_action": "interrupt",
+                "interruptable": True,
+            }
+
+
+@pytest.mark.asyncio
+async def test_agent_think_returns_404_when_no_active_agent(monkeypatch):
+    """Injecting an instruction into a channel with no tracked agent must fail clearly."""
+    monkeypatch.setenv("AGORA_APP_ID", "mock_app_id_1234567890123456789012")
+    monkeypatch.setenv("AGORA_CUSTOMER_ID", "mock_customer_id")
+    monkeypatch.setenv("AGORA_CUSTOMER_SECRET", "mock_customer_secret")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as test_client:
+        resp = await test_client.post(
+            "/api/agora/agent-think",
+            json={"channel_name": "no_agent_here_room", "text": "Hello"},
+        )
+        assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_gemini_live_pipeline_never_sends_mcp_servers_even_when_requested(monkeypatch):
     """
     Regression test for the confirmed-wrong wiring: even if a caller asks for
