@@ -96,25 +96,32 @@ is traceable in real time.
 
 ---
 
+### 9. Agora `agent-update`/`agent-think` endpoints — implemented, needs a live test
+**Status:** implemented 2026-09-01. `POST /api/agora/agent-update` (push a new
+system prompt into a running agent without restarting it) and
+`POST /api/agora/agent-think` (inject a one-off instruction, agent responds live)
+both wired per the confirmed schema (`docs/agora/RESEARCH.md` §13), regression
+tested (payload shape, 404-when-no-agent), curl-verified for the 404 path against
+the real backend. **Not yet confirmed:** whether Agora accepts either call
+against a real running agent, and whether the agent's behavior/speech actually
+reflects the pushed prompt or injected instruction. Needs a live agent session —
+ask before running (same billed-action category as items 4/6).
+
+### 10. Groq extraction tier — implemented, needs a real API key to verify
+**Status:** implemented 2026-09-01 (`backend/app/engine/extraction.py`).
+`extract_intelligence()` now tries Groq first when `GROQ_API_KEY` is set
+(structured-output JSON schema enforcement, default model
+`openai/gpt-oss-120b`), falling through to Gemini then the heuristic extractor
+exactly as before when unset. 6 new regression tests pass (mocked HTTP calls).
+**Not yet confirmed:** whether Groq's real API accepts this exact payload shape
+and returns valid structured JSON — needs the user to get a free key from
+console.groq.com and set `GROQ_API_KEY` before this can be live-verified.
+
+---
+
 ## P2 — Smaller, cheap, queued
 
-### 10. Live mid-session agent updates via Agora's `/update` and `/think` endpoints
-Researched 2026-09-01 (see `docs/agora/RESEARCH.md` §13), schema confirmed against
-official docs, not yet implemented — user said "research more first, don't build
-yet" when offered. `/think` in particular could let the backend push real-time
-incident developments into a live voice session and have the agent proactively
-announce them, rather than only responding when asked. Ask before starting; needs
-a live agent session to verify once implemented (same billed-action category as
-items 4/6).
-
-### 11. Groq model swap for the extraction pipeline
-Recommended 2026-09-01 as a fix for Gemini's aggressive free-tier limit (20
-req/day, already exhausted once this session). User wants "best model, generous
-free tier" — Groq recommended (OpenAI-compatible, ~1000 req/day free). Not yet
-implemented; needs a Groq API key from the user first. Extraction pipeline
-(`backend/app/engine/extraction.py`) is the safe, low-risk target; swapping the
-live voice agent's LLM too would need separate research into whether Agora's
-`vendor: "openai"` accepts a custom base URL for Groq's endpoint.
+None open right now.
 
 ---
 
