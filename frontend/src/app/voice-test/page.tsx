@@ -1271,6 +1271,7 @@ export default function VoiceTestPage() {
           padding: 10px 12px;
         }
         .vcc-card-sm .vcc-section-label { margin-bottom: 6px; }
+        .vcc-channel-card { width: 260px; margin-top: 20px; }
         .vcc-input {
           width: 100%;
           padding: 7px 9px;
@@ -1993,44 +1994,6 @@ export default function VoiceTestPage() {
 
             {/* Controls area */}
             <div className="vcc-left-controls">
-              {/* Voice channel */}
-              <div className="vcc-card-sm">
-                <div className="vcc-section-label">Voice Channel</div>
-                <input
-                  id="channel-input"
-                  type="text"
-                  className="vcc-input"
-                  value={channelName}
-                  onChange={e => setChannelName(e.target.value)}
-                  disabled={connectionState !== 'DISCONNECTED' && connectionState !== 'ERROR'}
-                  placeholder="channel-name"
-                  aria-label="Voice channel name"
-                />
-                <div className="vcc-btn-row">
-                  {isConnected
-                    ? <button className="vcc-btn vcc-btn-danger" onClick={handleLeave}>Leave Channel</button>
-                    : <button
-                        className={`vcc-btn ${isConnecting ? '' : 'vcc-btn-primary'}`}
-                        onClick={handleJoin}
-                        disabled={isConnecting}
-                        aria-label="Join voice channel"
-                      >
-                        {connectionState === 'FETCHING_TOKEN' ? 'Authorizing...' :
-                         connectionState === 'JOINING' ? 'Connecting...' : 'Join Channel'}
-                      </button>
-                  }
-                  {isConnected && (
-                    <button
-                      className={`vcc-btn ${isMuted ? 'vcc-btn-danger' : 'vcc-btn-green'}`}
-                      onClick={handleToggleMute}
-                      aria-label={isMuted ? 'Unmute microphone' : 'Mute microphone'}
-                    >
-                      {isMuted ? '🔇 Unmute' : '🎤 Mute'}
-                    </button>
-                  )}
-                </div>
-              </div>
-
               {/* Gemini Agent (only when connected) */}
               {isConnected && (
                 <div className="vcc-card-sm">
@@ -2191,6 +2154,45 @@ export default function VoiceTestPage() {
                     )}
                   </div>
                 )}
+              </div>
+
+              {/* Voice channel — moved here from the left column so it lives with the
+                  rest of the call controls, not next to the text-command chat input. */}
+              <div className="vcc-card-sm vcc-channel-card">
+                <div className="vcc-section-label">Voice Channel</div>
+                <input
+                  id="channel-input"
+                  type="text"
+                  className="vcc-input"
+                  value={channelName}
+                  onChange={e => setChannelName(e.target.value)}
+                  disabled={connectionState !== 'DISCONNECTED' && connectionState !== 'ERROR'}
+                  placeholder="channel-name"
+                  aria-label="Voice channel name"
+                />
+                <div className="vcc-btn-row">
+                  {isConnected
+                    ? <button className="vcc-btn vcc-btn-danger" onClick={handleLeave}>Leave Channel</button>
+                    : <button
+                        className={`vcc-btn ${isConnecting ? '' : 'vcc-btn-primary'}`}
+                        onClick={handleJoin}
+                        disabled={isConnecting}
+                        aria-label="Join voice channel"
+                      >
+                        {connectionState === 'FETCHING_TOKEN' ? 'Authorizing...' :
+                         connectionState === 'JOINING' ? 'Connecting...' : 'Join Channel'}
+                      </button>
+                  }
+                  {isConnected && (
+                    <button
+                      className={`vcc-btn ${isMuted ? 'vcc-btn-danger' : 'vcc-btn-green'}`}
+                      onClick={handleToggleMute}
+                      aria-label={isMuted ? 'Unmute microphone' : 'Mute microphone'}
+                    >
+                      {isMuted ? '🔇 Unmute' : '🎤 Mute'}
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
 
