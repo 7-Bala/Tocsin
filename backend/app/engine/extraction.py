@@ -3,12 +3,13 @@ Tocsin Structured Claim Extraction
 Extracts structured intelligence (claims, action items, risks, missing info)
 from raw transcript utterances.
 
-Extraction tiers:
-  1. PRIMARY: Groq (OpenAI-compatible API, JSON schema structured outputs) — tried first
-     when GROQ_API_KEY is configured, since Gemini's free tier is only 20 requests/day
-     (observed exhausted live 2026-08-31) versus Groq's ~1000/day free tier.
-  2. SECONDARY: Gemini API (google.genai SDK) with JSON schema enforcement — tried when
-     Groq is not configured or fails.
+Extraction tiers (user-directed order, 2026-09-01):
+  1. PRIMARY: Gemini API (google.genai SDK) with JSON schema enforcement.
+  2. SECONDARY: Groq (OpenAI-compatible API, JSON schema structured outputs) — tried
+     when Gemini is unavailable or fails, including quota exhaustion (Gemini's free
+     tier is only 20 requests/day, observed exhausted live 2026-08-31, versus Groq's
+     ~1000/day free tier). Explicitly a fallback for when Gemini's limit runs out,
+     not a replacement for Gemini.
   3. FALLBACK (labeled): Keyword heuristic patterns — only when neither LLM is available
      or both return invalid JSON.
      - All fallback results tagged extraction_method: "heuristic_fallback"
@@ -528,16 +529,19 @@ async def extract_intelligence(
 ) -> ClaimSet:
     """
     Extract structured intelligence from a transcript utterance.
-    Pipeline:
-    1. Try Groq extraction if GROQ_API_KEY is configured (generous free tier).
-    2. Try Gemini LLM extraction via modern google.genai SDK.
+    Pipeline (user-directed order, 2026-09-01: Gemini stays primary; Groq is the
+    fallback for when Gemini's tighter free-tier quota (20 req/day, observed
+    exhausted live 2026-08-31) runs out, not a replacement for it):
+    1. Try Gemini LLM extraction via modern google.genai SDK.
+    2. If unavailable or fails (including quota exhaustion): try Groq, if
+       GROQ_API_KEY is configured.
     3. If both unavailable or fail: use HeuristicExtractor (fallback, clearly labeled).
     """
-    result = await extract_with_groq(utterance, speaker, incident_context)
+    result = await extract_with_gemini(utterance, speaker, incident_context)
     if result is not None:
         return result
 
-    result = await extract_with_gemini(utterance, speaker, incident_context)
+    result = await extract_with_groq(utterance, speaker, incident_context)
     if result is not None:
         return result
 

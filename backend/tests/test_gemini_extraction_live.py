@@ -36,8 +36,14 @@ async def test_live_gemini_extraction_or_graceful_quota_fallback():
 
 @pytest.mark.asyncio
 async def test_fallback_when_gemini_key_missing(monkeypatch):
-    """When GEMINI_API_KEY is empty, fallback extractor is strictly used and clearly labeled."""
+    """
+    When GEMINI_API_KEY is empty AND GROQ_API_KEY is empty, the heuristic
+    extractor is strictly used and clearly labeled. (GROQ_API_KEY is explicitly
+    cleared too, since 2026-09-01 Groq sits between Gemini and the heuristic
+    fallback -- see test_groq_extraction.py for tests of that middle tier.)
+    """
     monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("GROQ_API_KEY", "")
 
     utterance = "The main water pump is down and failing."
     claim_set = await extract_intelligence(utterance, speaker="Field Tech")
@@ -92,6 +98,10 @@ async def test_gemini_call_that_exceeds_timeout_falls_back_cleanly(monkeypatch):
     import app.engine.extraction as extraction_module
 
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-timeout-test")
+    # Cleared so this test exercises Gemini's own timeout handling in isolation --
+    # otherwise, since 2026-09-01, a real Groq call would fire next (a different
+    # tier, covered separately in test_groq_extraction.py).
+    monkeypatch.setenv("GROQ_API_KEY", "")
     monkeypatch.setattr(extraction_module, "EXTRACTION_TIMEOUT_SECONDS", 0.2)
 
     async def _hangs_forever(*args, **kwargs):
