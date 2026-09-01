@@ -280,6 +280,127 @@ async def test_speak_returns_404_when_no_active_agent(monkeypatch):
         assert resp.status_code == 404
 
 
+def _mock_list_agents_response(agent_ids):
+    """Mocks Agora's GET /agents?channel=&state=2 (running-agent list) response."""
+    return Response(
+        status_code=200,
+        json={
+            "data": {"count": len(agent_ids), "list": [{"agent_id": a, "status": "RUNNING"} for a in agent_ids]},
+            "meta": {"cursor": "", "total": len(agent_ids)},
+            "status": "ok",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_agent_does_not_start_a_duplicate_when_one_is_already_running(monkeypatch):
+    """
+    Regression test for the live-reported "two greetings" bug (2026-09-02): the user
+    heard one greeting on unmute (an agent already in the channel) and a second after
+    pressing Start Agent, because this endpoint started a duplicate unconditionally --
+    leaving two agents in one room, both greeting and both billing.
+
+    Now: if Agora reports an agent already RUNNING in the channel, return it instead
+    of POSTing a second /join.
+    """
+    monkeypatch.setenv("AGORA_APP_ID", "mock_app_id_1234567890123456789012")
+    monkeypatch.setenv("AGORA_APP_CERTIFICATE", "mock_cert_1234567890123456789012")
+    monkeypatch.setenv("AGORA_CUSTOMER_ID", "mock_customer_id")
+    monkeypatch.setenv("AGORA_CUSTOMER_SECRET", "mock_customer_secret")
+    monkeypatch.setenv("GEMINI_API_KEY", "mock_gemini_api_key")
+
+    mock_client_instance = AsyncMock()
+    mock_client_instance.get.return_value = _mock_list_agents_response(["agent_already_live"])
+    mock_client_instance.post.side_effect = AssertionError(
+        "start-agent must NOT POST /join when an agent is already running"
+    )
+    mock_client_instance.__aenter__.return_value = mock_client_instance
+    mock_client_instance.__aexit__.return_value = None
+
+    with patch("app.api.agora.httpx.AsyncClient", return_value=mock_client_instance):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as test_client:
+            resp = await test_client.post(
+                "/api/agora/start-agent",
+                json={"channel_name": "dup_guard_room", "agent_uid": 9999},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "already_running"
+            assert data["agent_id"] == "agent_already_live"
+            assert data["reused_existing_agent"] is True
+
+
+@pytest.mark.asyncio
+async def test_start_agent_force_restart_stops_existing_then_starts_new(monkeypatch):
+    """force_restart=true must stop the already-running agent before starting a fresh one."""
+    monkeypatch.setenv("AGORA_APP_ID", "mock_app_id_1234567890123456789012")
+    monkeypatch.setenv("AGORA_APP_CERTIFICATE", "mock_cert_1234567890123456789012")
+    monkeypatch.setenv("AGORA_CUSTOMER_ID", "mock_customer_id")
+    monkeypatch.setenv("AGORA_CUSTOMER_SECRET", "mock_customer_secret")
+    monkeypatch.setenv("GEMINI_API_KEY", "mock_gemini_api_key")
+    monkeypatch.delenv("MCP_SERVER_PUBLIC_URL", raising=False)
+
+    mock_client_instance = AsyncMock()
+    mock_client_instance.get.return_value = _mock_list_agents_response(["agent_stale_one"])
+    # First POST = the /leave for the stale agent, second POST = the new /join.
+    mock_client_instance.post.side_effect = [
+        Response(status_code=200, json={}),
+        Response(status_code=200, json={"agent_id": "agent_brand_new"}),
+    ]
+    mock_client_instance.__aenter__.return_value = mock_client_instance
+    mock_client_instance.__aexit__.return_value = None
+
+    with patch("app.api.agora.httpx.AsyncClient", return_value=mock_client_instance):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as test_client:
+            resp = await test_client.post(
+                "/api/agora/start-agent",
+                json={"channel_name": "force_restart_room", "agent_uid": 9999, "force_restart": True},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "started"
+            assert data["agent_id"] == "agent_brand_new"
+
+            # The stale agent's /leave must have been called before the new /join.
+            called_urls = [c.args[0] for c in mock_client_instance.post.call_args_list]
+            assert called_urls[0].endswith("/agents/agent_stale_one/leave")
+            assert called_urls[1].endswith("/join")
+
+
+@pytest.mark.asyncio
+async def test_start_agent_proceeds_when_running_agent_lookup_fails(monkeypatch):
+    """
+    A failed duplicate-check must never block starting an agent -- a transient Agora
+    API blip should degrade to the old behavior, not become an outage of our own.
+    """
+    monkeypatch.setenv("AGORA_APP_ID", "mock_app_id_1234567890123456789012")
+    monkeypatch.setenv("AGORA_APP_CERTIFICATE", "mock_cert_1234567890123456789012")
+    monkeypatch.setenv("AGORA_CUSTOMER_ID", "mock_customer_id")
+    monkeypatch.setenv("AGORA_CUSTOMER_SECRET", "mock_customer_secret")
+    monkeypatch.setenv("GEMINI_API_KEY", "mock_gemini_api_key")
+    monkeypatch.delenv("MCP_SERVER_PUBLIC_URL", raising=False)
+
+    mock_client_instance = AsyncMock()
+    mock_client_instance.get.return_value = Response(status_code=500, text="upstream boom")
+    mock_client_instance.post.return_value = Response(
+        status_code=200, json={"agent_id": "agent_started_anyway"}
+    )
+    mock_client_instance.__aenter__.return_value = mock_client_instance
+    mock_client_instance.__aexit__.return_value = None
+
+    with patch("app.api.agora.httpx.AsyncClient", return_value=mock_client_instance):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as test_client:
+            resp = await test_client.post(
+                "/api/agora/start-agent",
+                json={"channel_name": "lookup_fails_room", "agent_uid": 9999},
+            )
+            assert resp.status_code == 200
+            assert resp.json()["agent_id"] == "agent_started_anyway"
+
+
 @pytest.mark.asyncio
 async def test_agent_update_pushes_new_system_prompt(monkeypatch):
     """

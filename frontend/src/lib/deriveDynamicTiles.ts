@@ -151,10 +151,31 @@ export function deriveDynamicTiles(
     const hasOpenConflict = openConflictEntities.has(key);
     const hasOverdueAction = Array.from(overdueEntities).some((desc) => desc.includes(key));
     const priority = priorityFor(hasOpenConflict, hasOverdueAction, latest);
-    return { key, original, latest, hasOpenConflict, priority };
+    const ageMs = now.getTime() - new Date(latest.timestamp).getTime();
+    const isStale = Number.isFinite(ageMs) && ageMs > STALE_AFTER_MS;
+    // Conflicts and overdue actions stay pinned regardless of age -- they are
+    // open, actionable work, not merely "recent news". Everything else competes
+    // on freshness first (see the sort below).
+    const isPinned = priority <= 1;
+    return { key, original, latest, hasOpenConflict, priority, isStale, isPinned };
   });
 
+  // Ordering fix (2026-09-02): previously this sorted by `priority` before recency,
+  // which meant a *stale* CONFIRMED claim (priority 2) permanently outranked a
+  // *brand-new* REPORTED one (priority 3). On the seeded demo incident -- whose
+  // original claims are CONFIRMED and conflicted -- that pinned the seed data to the
+  // top of the panel forever, so freshly-spoken observations were pushed to the
+  // bottom or into overflow. The tiles were genuinely live-updating the whole time,
+  // but looked frozen on old data, which is indistinguishable from "hardcoded" to
+  // anyone watching. Staleness was already *displayed* ("No recent update") but was
+  // not weighted in the ordering at all.
+  //
+  // Now: pinned items (open conflict / overdue action) first, then fresh before
+  // stale, then evidence-status priority, then newest first.
   scored.sort((a, b) => {
+    if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
+    if (a.isPinned && b.isPinned && a.priority !== b.priority) return a.priority - b.priority;
+    if (a.isStale !== b.isStale) return a.isStale ? 1 : -1;
     if (a.priority !== b.priority) return a.priority - b.priority;
     return new Date(b.latest.timestamp).getTime() - new Date(a.latest.timestamp).getTime();
   });
@@ -162,7 +183,7 @@ export function deriveDynamicTiles(
   const shown = scored.slice(0, MAX_TILES);
   const overflowCount = Math.max(0, scored.length - MAX_TILES);
 
-  const tiles: DynamicTile[] = shown.map(({ original, latest, hasOpenConflict }) => {
+  const tiles: DynamicTile[] = shown.map(({ original, latest, hasOpenConflict, isStale }) => {
     const measurementMatch = MEASUREMENT_RE.exec(latest.value);
     const polarity = normalizePolarity(latest.value);
 
@@ -191,8 +212,8 @@ export function deriveDynamicTiles(
     }
 
     const isUnverifiedExtraction = latest.extraction_method === 'heuristic_fallback';
-    const ageMs = now.getTime() - new Date(latest.timestamp).getTime();
-    const isStale = Number.isFinite(ageMs) && ageMs > STALE_AFTER_MS;
+    // isStale is computed once, above, and reused here -- so the value that drives
+    // the ordering can never disagree with the "No recent update" badge shown.
 
     const subLabelParts: string[] = [];
     if (hasOpenConflict) subLabelParts.push('Contradicted — needs resolution');

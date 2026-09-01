@@ -218,6 +218,17 @@ class StartAgentRequest(BaseModel):
       "or that the agent actually invokes a tool through it."
     ),
   )
+  force_restart: bool = Field(
+    default=False,
+    description=(
+      "By default this endpoint is idempotent per channel: if an agent is already "
+      "RUNNING in the target channel, it is returned as-is instead of starting a "
+      "second one (which would put two agents in the same room, each greeting the "
+      "user and each billing separately — the live-reported 'two greetings' bug of "
+      "2026-09-02). Set true to deliberately stop the existing agent and start a "
+      "fresh one, e.g. to apply a different voice or voice_pipeline."
+    ),
+  )
 
 
 class SpeakRequest(BaseModel):
@@ -322,6 +333,67 @@ class StopAgentRequest(BaseModel):
     default=None,
     description="Agent session ID (if known; otherwise resolved from active channel registry)",
   )
+
+
+async def find_running_agents_in_channel(
+  app_id: str,
+  headers: dict[str, str],
+  channel_name: str,
+) -> list[str]:
+  """
+  Ask Agora which agents are actually RUNNING in a channel right now.
+
+  This exists because ACTIVE_AGENTS is an in-memory dict: any backend restart wipes
+  it while the agent keeps running (and billing) on Agora's side, so the local
+  registry alone cannot detect an orphan. Confirmed live 2026-09-02 against
+  GET /v2/projects/{appid}/agents?channel=&state= (state 2 == RUNNING), schema per
+  docs.agora.io/en/api-reference/api-ref/conversational-ai/list.
+
+  Returns agent_ids, or [] if none are running OR if the lookup itself fails --
+  a failed lookup must never block starting an agent, so this degrades to the old
+  "just start one" behavior rather than turning a transient Agora API blip into an
+  outage of our own.
+  """
+  url = f"https://api.agora.io/api/conversational-ai-agent/v2/projects/{app_id}/agents"
+  try:
+    async with httpx.AsyncClient(timeout=8.0) as client:
+      resp = await client.get(
+        url, headers=headers, params={"channel": channel_name, "state": "2"}
+      )
+    if resp.status_code != 200:
+      logger.warning(
+        f"Could not list running agents for channel '{channel_name}' "
+        f"(HTTP {resp.status_code}): {resp.text[:200]}. Proceeding without the "
+        "duplicate-agent guard."
+      )
+      return []
+    data = resp.json()
+    return [
+      entry["agent_id"]
+      for entry in data.get("data", {}).get("list", []) or []
+      if isinstance(entry, dict) and entry.get("agent_id")
+    ]
+  except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+    logger.warning(
+      f"Failed to list running agents for channel '{channel_name}': {exc}. "
+      "Proceeding without the duplicate-agent guard."
+    )
+    return []
+
+
+async def leave_agent(app_id: str, headers: dict[str, str], agent_id: str) -> bool:
+  """Best-effort stop of a single agent by id. Returns True if Agora accepted it."""
+  url = (
+    f"https://api.agora.io/api/conversational-ai-agent/v2/projects/{app_id}"
+    f"/agents/{agent_id}/leave"
+  )
+  try:
+    async with httpx.AsyncClient(timeout=8.0) as client:
+      resp = await client.post(url, headers=headers)
+    return resp.status_code in (200, 204)
+  except httpx.HTTPError as exc:
+    logger.warning(f"Failed to stop agent '{agent_id}': {exc}")
+    return False
 
 
 def sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -554,6 +626,45 @@ async def start_conversational_agent(
     "Content-Type": "application/json",
   }
 
+  # Duplicate-agent guard (added 2026-09-02 after a live-reported bug: the user heard
+  # TWO greetings -- one when unmuting, one after pressing "Start Agent" -- because an
+  # agent was already in the channel and this endpoint started a second one anyway,
+  # leaving both running, both greeting, and both billing. Asking Agora (rather than
+  # trusting the in-memory ACTIVE_AGENTS dict) is what makes this survive a backend
+  # restart, which silently orphans agents by wiping that dict while they keep running.
+  already_running = await find_running_agents_in_channel(app_id, headers, channel_name)
+  if already_running:
+    if not request.force_restart:
+      existing_id = already_running[0]
+      ACTIVE_AGENTS[channel_name] = existing_id
+      logger.info(
+        f"Agent(s) already RUNNING in channel '{channel_name}': {already_running}. "
+        "Returning the existing agent instead of starting a duplicate (pass "
+        "force_restart=true to replace it)."
+      )
+      return {
+        "status": "already_running",
+        "agent_id": existing_id,
+        "channel_name": channel_name,
+        "agent_uid": request.agent_uid,
+        "reused_existing_agent": True,
+        "all_running_agent_ids": already_running,
+        "note": (
+          "An agent was already live in this channel, so no new one was started "
+          "and no second greeting was triggered. Pass force_restart=true to stop "
+          "the existing agent and start a fresh one (e.g. to change voice or "
+          "voice_pipeline)."
+        ),
+      }
+    logger.info(
+      f"force_restart=true: stopping {len(already_running)} already-running agent(s) "
+      f"in channel '{channel_name}' before starting a new one: {already_running}"
+    )
+    for stale_agent_id in already_running:
+      stopped = await leave_agent(app_id, headers, stale_agent_id)
+      logger.info(f"  stop {stale_agent_id}: {'ok' if stopped else 'FAILED'}")
+    ACTIVE_AGENTS.pop(channel_name, None)
+
   # Resolve MCP server config before building the prompt, so the tool roster notice
   # (see MCP_TOOL_ROSTER_NOTICE) is only appended when a tool server is actually wired.
   raw_mcp = request.mcp_server_url or os.getenv("MCP_SERVER_PUBLIC_URL") or ""
@@ -784,7 +895,32 @@ async def start_conversational_agent(
         "agent_uid": request.agent_uid,
         "voice_pipeline": request.voice_pipeline,
         "llm_provider": "gemini",
+        # `voice` is only honored by the gemini_live (mllm) pipeline, whose voice enum
+        # (Puck/Charon/Aoede/...) it belongs to. composed_tools synthesizes through
+        # MiniMax TTS, which uses its own separate voice_id namespace -- so the
+        # requested voice is silently ignored there. Reported live 2026-09-02: a user
+        # with "Puck" selected heard a female voice, because the running agent was
+        # composed_tools using MiniMax's English_captivating_female1. Reporting the
+        # effective voice (not just the requested one) makes that mismatch visible
+        # instead of silent. Only English_captivating_female1 is documented by Agora
+        # for MiniMax, so no alternative mapping is invented here.
         "voice": request.voice,
+        "effective_voice": (
+          request.voice
+          if request.voice_pipeline == "gemini_live"
+          else "English_captivating_female1 (MiniMax TTS)"
+        ),
+        "voice_request_honored": request.voice_pipeline == "gemini_live",
+        "voice_note": (
+          None
+          if request.voice_pipeline == "gemini_live"
+          else (
+            f"The requested voice '{request.voice}' was IGNORED: it belongs to the "
+            "gemini_live (mllm) voice enum, but this agent uses the composed_tools "
+            "pipeline, which synthesizes via MiniMax TTS with a different voice_id "
+            "namespace. Use voice_pipeline='gemini_live' if the voice selection matters."
+          )
+        ),
         "mcp_enabled": mcp_requested,
         "mcp_server_url": sse_endpoint,
         "mcp_tool_calling_status": mcp_status,

@@ -271,4 +271,67 @@ describe('deriveDynamicTiles — priority ordering (plan §6.1)', () => {
     const order = result.tiles.map((t) => t.entity);
     assert.deepEqual(order, ['confirmed thing', 'reported thing', 'assumed thing']);
   });
+
+  test('a fresh claim outranks a STALE confirmed one (live-reported 2026-09-02)', () => {
+    // Regression test for the real defect behind "the tiles are not updating, they
+    // show old data": ordering weighted evidence status but ignored age entirely, so
+    // the seeded demo incident's stale CONFIRMED claims permanently occupied the top
+    // of the panel and freshly-spoken observations were pushed below them (or into
+    // overflow). The tiles were live-updating the whole time; they just looked frozen.
+    const now = new Date('2026-09-02T12:00:00Z');
+    const staleConfirmed = makeClaim({
+      entity: 'stale confirmed thing',
+      value: 'healthy',
+      status: 'CONFIRMED',
+      timestamp: new Date('2026-09-02T11:00:00Z').toISOString(), // 1h old -> stale
+    });
+    const freshReported = makeClaim({
+      entity: 'fresh reported thing',
+      value: 'failing',
+      status: 'REPORTED',
+      timestamp: new Date('2026-09-02T11:59:30Z').toISOString(), // 30s old -> fresh
+    });
+    const state = makeState({ claims: [staleConfirmed, freshReported] });
+    const result = deriveDynamicTiles(state, now);
+
+    assert.equal(result.tiles[0].entity, 'fresh reported thing');
+    assert.equal(result.tiles[0].isStale, false);
+    assert.equal(result.tiles[1].entity, 'stale confirmed thing');
+    assert.equal(result.tiles[1].isStale, true);
+  });
+
+  test('an open conflict stays pinned above a fresh claim even when the conflict is stale', () => {
+    // The freshness demotion above must not bury genuinely open, actionable work.
+    // A contradiction that nobody has resolved is still the most important thing on
+    // screen, however old it is.
+    const now = new Date('2026-09-02T12:00:00Z');
+    const staleConflicted = makeClaim({
+      entity: 'contested thing',
+      value: 'normal',
+      status: 'CONFLICTED',
+      timestamp: new Date('2026-09-02T10:00:00Z').toISOString(), // 2h old -> stale
+    });
+    const freshReported = makeClaim({
+      entity: 'fresh thing',
+      value: 'failing',
+      status: 'REPORTED',
+      timestamp: new Date('2026-09-02T11:59:30Z').toISOString(),
+    });
+    const conflict: ConflictRecord = {
+      id: 'cf-1',
+      incident_id: 'inc-1',
+      entity: 'contested thing',
+      claim_a_id: 'a',
+      claim_b_id: 'b',
+      description: 'contradiction',
+      status: 'OPEN',
+      detected_at: new Date('2026-09-02T10:00:00Z').toISOString(),
+    } as ConflictRecord;
+    const state = makeState({ claims: [staleConflicted, freshReported], conflicts: [conflict] });
+    const result = deriveDynamicTiles(state, now);
+
+    assert.equal(result.tiles[0].entity, 'contested thing');
+    assert.equal(result.tiles[0].isConflicted, true);
+    assert.equal(result.tiles[1].entity, 'fresh thing');
+  });
 });
