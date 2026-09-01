@@ -98,7 +98,23 @@ is traceable in real time.
 
 ## P2 — Smaller, cheap, queued
 
-None open right now.
+### 10. Live mid-session agent updates via Agora's `/update` and `/think` endpoints
+Researched 2026-09-01 (see `docs/agora/RESEARCH.md` §13), schema confirmed against
+official docs, not yet implemented — user said "research more first, don't build
+yet" when offered. `/think` in particular could let the backend push real-time
+incident developments into a live voice session and have the agent proactively
+announce them, rather than only responding when asked. Ask before starting; needs
+a live agent session to verify once implemented (same billed-action category as
+items 4/6).
+
+### 11. Groq model swap for the extraction pipeline
+Recommended 2026-09-01 as a fix for Gemini's aggressive free-tier limit (20
+req/day, already exhausted once this session). User wants "best model, generous
+free tier" — Groq recommended (OpenAI-compatible, ~1000 req/day free). Not yet
+implemented; needs a Groq API key from the user first. Extraction pipeline
+(`backend/app/engine/extraction.py`) is the safe, low-risk target; swapping the
+live voice agent's LLM too would need separate research into whether Agora's
+`vendor: "openai"` accepts a custom base URL for Groq's endpoint.
 
 ---
 

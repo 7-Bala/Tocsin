@@ -576,6 +576,64 @@ not an actual tool call), and whether `/speak` audibly broadcasts into a live ro
 
 ---
 
+## 13. Mid-session agent updates — `update` and `think` endpoints (researched 2026-09-01, not yet implemented)
+
+Surfaced by Agora DevRel's own community resource links (session recap shared in a
+WhatsApp group), which pointed to `recipes.agora.io`'s "Dynamic Tool Sets" and
+"Dynamic Instructions" recipe categories. Confirmed against official docs via the
+same `.md`-suffix direct-fetch pattern used for `/speak` in §10 (the plain URL
+without `.md` only ever returns an overview/index page for these two endpoints,
+not the actual schema — worth remembering for future Agora doc lookups).
+
+**`POST /v2/projects/{appid}/agents/{agentId}/update`** — updates a *running*
+agent's persistent configuration going forward, without restarting it:
+
+```json
+{
+  "properties": {
+    "token": "string",
+    "llm": {
+      "system_messages": [{"role": "string", "content": "string"}],
+      "params": {"model": "string", "max_token": "integer"}
+    },
+    "mllm": {"params": "object"}
+  }
+}
+```
+Response 200: `{"agent_id", "create_ts", "status"}`. Both `llm` (composed_tools
+pipeline) and `mllm` (gemini_live pipeline) blocks are supported, so this endpoint
+works for either of Tocsin's two pipelines. Overwrites the config set at join time
+for whichever field is sent — not documented whether omitted fields are preserved
+or cleared, so a real call is needed to confirm before relying on partial updates.
+
+**`POST /v2/projects/{appid}/agents/{agentId}/think`** — injects a *one-off*
+instruction into the live conversation pipeline as if it were user input; the
+agent processes and responds to it immediately, live in the running session:
+
+```json
+{
+  "text": "string (required)",
+  "on_listening_action": "inject|interrupt|ignore",
+  "on_thinking_action": "interrupt|ignore",
+  "on_speaking_action": "interrupt|ignore",
+  "interruptable": "boolean",
+  "metadata": "object"
+}
+```
+Response 200: `{"agent_id", "channel", "start_ts"}`.
+
+**Why this matters for Tocsin**: `/update` could keep a live agent's system
+prompt in sync as incident evidence changes (new conflict, severity escalation)
+instead of only reflecting what was true at agent-dispatch time. `/think` is the
+more distinctive one — it could let the backend push a real-time development
+into the live voice conversation and have the agent proactively announce it
+("a new conflict was just detected...") without the human asking first, which
+maps more directly onto "AI incident commander" than passive Q&A. Status:
+`OFFICIAL DOCS ONLY` — schema confirmed via direct fetch, neither endpoint has
+been called against a real agent yet. Not yet wired into `backend/app/api/agora.py`.
+
+---
+
 ## Capability matrix
 
 Per the project's status-labeling convention (see `CLAUDE.md`), every row below is
@@ -595,7 +653,8 @@ carries that status, because no live credentialed run was performed in this pass
 | `mllm.mcp_servers` under `gemini_live` pipeline | `NOT USED` (confirmed unsupported) | **Resolved 2026-08-31**: never sent regardless of request — official docs confirm `mcp_servers` belongs under `llm`, not `mllm`. |
 | `llm.mcp_servers` under new `composed_tools` pipeline | `CREDENTIAL REQUIRED` | **Payload acceptance live-verified 2026-08-31** (see §11): Agora accepted the payload with `mcp_enabled: true` echoed back. Actual tool *invocation* through it is still unconfirmed — nothing in the live test window required the agent to call a tool. Stays `CREDENTIAL REQUIRED`, not `VERIFIED IN CODE`, until a tool call is actually observed. |
 | Agora `/speak` TTS broadcast (spoken summaries) | `CREDENTIAL REQUIRED` | **Implemented 2026-08-31**: `POST /api/agora/speak` calls the documented `POST /v2/projects/{appid}/agents/{agentId}/speak` schema (`text`/`priority`/`interruptable`) against the agent tracked for a channel, returning 404 if none is running. Wired into `HandoffPanel`'s "🔊 Broadcast" button, sending the same `spoken_brief` text already generated for problem-statement item 11. Payload shape verified by regression tests; live audio delivery into a real channel not yet observed. |
-| Agora `/think` custom instruction | `OFFICIAL DOCS ONLY` | Documented; not called by Tocsin. |
+| Agora `/think` custom instruction | `OFFICIAL DOCS ONLY` | **Schema confirmed 2026-09-01** (see §13) — full request/response shape fetched directly from official docs. Not called by Tocsin yet; proposed use is pushing real-time incident developments into a live voice session so the agent proactively announces them. |
+| Agora `/update` agent configuration | `OFFICIAL DOCS ONLY` | **Schema confirmed 2026-09-01** (see §13) — supports updating `llm.system_messages`/`params` or `mllm.params` on a running agent without restart. Not called by Tocsin yet; proposed use is keeping a live agent's system prompt in sync as incident evidence changes. |
 | Transcript delivery over RTM (v2.9) | `CREDENTIAL REQUIRED` | **Implemented 2026-08-31** (see §9): `POST /api/agora/rtm-token`, `advanced_features.enable_rtm`/`parameters.data_channel: "rtm"` on agent-join, and a real RTM login/subscribe/parse path on both `/` and `/voice-test`. RTM token issuance and login/subscribe machinery verified against real Agora credentials in a real browser; actual transcript-message delivery from a live speaking agent is not yet observed. |
 | Emergency-intelligence MCP tool server (`mock-services/server.py`, 13 tools) | `CREDENTIAL REQUIRED` | The tool implementations themselves are real code calling real public APIs (USGS, NASA FIRMS, NOAA, OSM, Open-Meteo, GDACS, Copernicus CAMS) and a real/mock Slack path — this is independent of whether Agora ever invokes them via MCP. Live behavior for external-API-backed tools depends on those APIs; `notify_stakeholders` specifically requires `SLACK_WEBHOOK_URL` for live delivery. |
 | Web SDK `stream-message` event subscription | `OFFICIAL DOCS ONLY` | The event itself is documented on Agora's Web SDK API reference. Confirmed present in code; not exercised against a live stream in this pass. |
