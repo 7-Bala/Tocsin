@@ -71,14 +71,14 @@ const UNHEALTHY_VALUES = [
 // renders as a text tile instead of a numeric one, which is a harmless degradation).
 const MEASUREMENT_RE = /(?<![\w./-])(\d+(?:\.\d+)?)\s*(%|percent|ms|s\b|sec|secs|seconds|min|mins|minutes|rps|qps|gb|mb|kb|connections?|requests?|errors?|users?|nodes?|pods?|replicas?)?(?![\w.-]*[a-z])/i;
 
-function normalizePolarity(value: string): 'healthy' | 'unhealthy' | null {
+export function normalizePolarity(value: string): 'healthy' | 'unhealthy' | null {
   const v = value.toLowerCase().trim();
   if (HEALTHY_VALUES.some((h) => v.includes(h))) return 'healthy';
   if (UNHEALTHY_VALUES.some((u) => v.includes(u))) return 'unhealthy';
   return null;
 }
 
-function toTitleCase(entity: string): string {
+export function toTitleCase(entity: string): string {
   return entity
     .trim()
     .split(/\s+/)
@@ -114,7 +114,7 @@ const PREDICATE_MARKERS = [
  * distinct, because deciding those name one service is a judgement about the world,
  * and merging two genuinely different failures would hide one of them.
  */
-function normalizeEntityKey(entity: string): string {
+export function normalizeEntityKey(entity: string): string {
   let text = entity.toLowerCase().trim();
   for (const marker of PREDICATE_MARKERS) {
     const idx = text.indexOf(marker);

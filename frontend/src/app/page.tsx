@@ -9,6 +9,7 @@ import { HypothesesPanel } from '@/components/HypothesesPanel';
 import { TimelineFeed } from '@/components/TimelineFeed';
 import { VoiceHUD } from '@/components/VoiceHUD';
 import { IntelligencePanel } from '@/components/IntelligencePanel';
+import LiveIncidentMap from '@/components/LiveIncidentMap';
 import { DemoModeControl } from '@/components/DemoModeControl';
 
 export default function IncidentCommandDashboard() {
@@ -68,6 +69,15 @@ export default function IncidentCommandDashboard() {
         metrics={activeIncident?.metrics}
         status={activeIncident?.status}
       />
+
+      {/* Live Incident Map — the evidence record drawn as a graph.
+          Sits above the written record deliberately: the shape of the incident
+          (what is broken, what contradicts what, which causes implicate which
+          systems) is the thing a list of claims cannot show. Same data, same
+          WebSocket, dark variant to match this dashboard. */}
+      <div style={{ marginBottom: 16 }}>
+        <LiveIncidentMap incident={activeIncident} theme="dark" />
+      </div>
 
       {/* Shared Intelligence Record */}
       <IntelligencePanel

@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useIncidentState } from '@/hooks/useIncidentState';
 import { DynamicSituationTiles } from '@/components/DynamicSituationTiles';
+import LiveIncidentMap from '@/components/LiveIncidentMap';
 import { startRtmTranscriptSession, RtmTranscriptSession } from '@/lib/agoraRtmTranscripts';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -1433,6 +1434,21 @@ export default function VoiceTestPage() {
           justify-content: center;
           padding: 24px 20px;
           gap: 0;
+          /* The map grows with the incident, so this column needs its own scroll --
+             .vcc-root is height:100vh/overflow:hidden, so without this a busy map
+             would be clipped rather than reachable. */
+          overflow-y: auto;
+          min-height: 0;
+        }
+        .vcc-center-inner::-webkit-scrollbar { width: 8px; }
+        .vcc-center-inner::-webkit-scrollbar-thumb { background: #c4c4c4; border-radius: 4px; }
+        .vcc-center-inner::-webkit-scrollbar-thumb:hover { background: #6b6b6b; }
+        .vcc-center-inner::-webkit-scrollbar-track { background: transparent; }
+        .vcc-map-slot {
+          width: 100%;
+          max-width: 760px;
+          margin-top: 24px;
+          flex-shrink: 0;
         }
 
         /* ── Centered Interaction Cluster (42px Mic + 12px Gap + 310px Dynamic Island) ── */
@@ -2268,6 +2284,16 @@ export default function VoiceTestPage() {
                     </button>
                   )}
                 </div>
+              </div>
+
+              {/* ── Live Incident Map ──
+                  The centre column is where the conversation happens, so this is
+                  where the incident gets drawn. Redraws itself from the evidence
+                  record over the same WebSocket that feeds every other panel — no
+                  refresh, no manual arranging, and nothing on it that a person in
+                  the room didn't actually say. See LiveIncidentMap.tsx. */}
+              <div className="vcc-map-slot">
+                <LiveIncidentMap incident={activeIncident} />
               </div>
             </div>
 
