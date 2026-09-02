@@ -92,6 +92,14 @@ export default function VoiceTestPage() {
   const [agentStatus,        setAgentStatus]       = useState<AgentStatus>('STOPPED');
   const [agentId,            setAgentId]           = useState<string | null>(null);
   const [selectedVoice,      setSelectedVoice]     = useState('Puck');
+  // Pipeline choice, per the hackathon organizers' 2026-09-02 WhatsApp mandate:
+  // Agora Conversational AI is required, and composed_tools + Agora-managed
+  // OpenAI/Deepgram/MiniMax needs no model API key of ours at all. gemini_live
+  // stays the default (lowest latency, unchanged prior behavior); composed_tools
+  // is opt-in because it trades that latency for MCP tool-calling support, which
+  // gemini_live's mllm pipeline does not offer per Agora's own docs.
+  const [voicePipeline,      setVoicePipeline]     = useState<'gemini_live' | 'composed_tools'>('gemini_live');
+  const [llmVendor,          setLlmVendor]         = useState<'openai' | 'gemini'>('openai');
   const [remoteAgentPresent, setRemoteAgentPresent] = useState(false);
   const [logs,               setLogs]              = useState<string[]>([]);
   const [tokenDetails,       setTokenDetails]      = useState<{
@@ -828,11 +836,27 @@ export default function VoiceTestPage() {
       setAgentStatus('STARTING');
       const res  = await fetch(`${API_BASE_URL}/api/agora/start-agent`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ channel_name: channelName.trim(), agent_uid: 9999, voice: selectedVoice }),
+        body: JSON.stringify({
+          channel_name: channelName.trim(),
+          agent_uid: 9999,
+          voice: selectedVoice,
+          voice_pipeline: voicePipeline,
+          ...(voicePipeline === 'composed_tools' ? { composed_tools_llm_vendor: llmVendor } : {}),
+        }),
       });
       const data = await res.json();
+      if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
       setAgentId(data.agent_id); setAgentStatus('RUNNING');
-      addLog('✅ Gemini Live Agent dispatched!');
+      // Report what the backend actually started, not an assumed label — the
+      // backend already distinguishes managed-OpenAI from BYOK-Gemini and flags
+      // when the requested voice was silently ignored (composed_tools synthesizes
+      // via MiniMax, a separate voice_id namespace from the Gemini Live voice enum).
+      const providerLabel = data.llm_provider === 'openai'
+        ? 'Agora-managed OpenAI'
+        : 'Gemini';
+      const modeLabel = data.llm_credential_mode === 'managed' ? ' (managed, keyless)' : '';
+      addLog(`✅ Agent dispatched — ${data.voice_pipeline}, LLM: ${providerLabel}${modeLabel}`);
+      if (data.voice_note) addLog(`ℹ️ ${data.voice_note}`);
     } catch (err: any) { setAgentStatus('ERROR'); addLog(`Agent start failed: ${err.message}`); }
   };
 
@@ -2023,14 +2047,39 @@ export default function VoiceTestPage() {
               {/* Gemini Agent (only when connected) */}
               {isConnected && (
                 <div className="vcc-card-sm">
-                  <div className="vcc-section-label">Gemini Agent</div>
-                  <div className="vcc-btn-row" style={{ alignItems: 'center' }}>
+                  <div className="vcc-section-label">Conversational Agent</div>
+                  <div className="vcc-btn-row" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+                    <select
+                      className="vcc-select"
+                      value={voicePipeline}
+                      onChange={e => setVoicePipeline(e.target.value as 'gemini_live' | 'composed_tools')}
+                      disabled={agentStatus === 'RUNNING' || agentStatus === 'STARTING'}
+                      aria-label="Select conversational pipeline"
+                      title="gemini_live: lowest latency, no MCP tools. composed_tools: Agora-managed Deepgram/OpenAI/MiniMax by default (no model key needed), supports MCP tools."
+                    >
+                      <option value="gemini_live">Gemini Live (low-latency)</option>
+                      <option value="composed_tools">Managed Pipeline (tools-capable)</option>
+                    </select>
+                    {voicePipeline === 'composed_tools' && (
+                      <select
+                        className="vcc-select"
+                        value={llmVendor}
+                        onChange={e => setLlmVendor(e.target.value as 'openai' | 'gemini')}
+                        disabled={agentStatus === 'RUNNING' || agentStatus === 'STARTING'}
+                        aria-label="Select LLM vendor for managed pipeline"
+                        title="openai: Agora-managed credential, no key of ours needed. gemini: our own GEMINI_API_KEY, subject to its quota."
+                      >
+                        <option value="openai">LLM: Agora-managed OpenAI</option>
+                        <option value="gemini">LLM: BYOK Gemini</option>
+                      </select>
+                    )}
                     <select
                       className="vcc-select"
                       value={selectedVoice}
                       onChange={e => setSelectedVoice(e.target.value)}
-                      disabled={agentStatus === 'RUNNING' || agentStatus === 'STARTING'}
+                      disabled={agentStatus === 'RUNNING' || agentStatus === 'STARTING' || voicePipeline === 'composed_tools'}
                       aria-label="Select agent voice"
+                      title={voicePipeline === 'composed_tools' ? 'Ignored on the managed pipeline — MiniMax TTS uses its own voice, not this Gemini Live voice enum.' : undefined}
                     >
                       <option value="Puck">Puck — Energetic</option>
                       <option value="Charon">Charon — Authoritative</option>
