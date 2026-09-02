@@ -17,14 +17,17 @@ from app.engine.incident_derivation import (
     apply_derivations,
     derive_hypotheses,
     derive_severity,
+    derive_status,
     derive_title,
 )
 from app.models.incident import (
+    ActionItem,
     Claim,
     ConflictRecord,
     Hypothesis,
     HypothesisStatus,
     IncidentState,
+    IncidentStatus,
     Observation,
     ObservationCategory,
     SeverityLevel,
@@ -114,6 +117,54 @@ def test_open_conflicts_add_to_severity():
     state = make_state(claims=[make_claim("a", "down")], conflicts=[conflict])
     # 1 unhealthy + 1 open conflict = 2 -> HIGH
     assert derive_severity(state) == SeverityLevel.HIGH
+
+
+# ─── Status ──────────────────────────────────────────────────────────────────
+
+def test_status_is_degrading_while_anything_is_unhealthy():
+    """
+    Regression for the live-reported defect: the header read "RESOLVING" (left over
+    from the seeded demo) while the record showed the CDN offline, payments down and
+    Kafka crashed. A status that contradicts its own evidence is worse than none.
+    """
+    state = make_state(
+        status=IncidentStatus.RESOLVING,
+        claims=[make_claim("cdn edge network", "offline")],
+    )
+    assert derive_status(state) == IncidentStatus.DEGRADING
+
+
+def test_status_is_idle_with_no_claims():
+    assert derive_status(make_state()) == IncidentStatus.IDLE
+
+
+def test_status_is_resolving_when_recovered_but_work_remains():
+    action = ActionItem(
+        id="ai-1",
+        incident_id="inc-1",
+        description="Verify the rollback",
+        status="PENDING",
+    )
+    state = make_state(
+        claims=[make_claim("cdn edge network", "healthy")],
+        action_items=[action],
+    )
+    assert derive_status(state) == IncidentStatus.RESOLVING
+
+
+def test_status_is_stabilized_when_nothing_broken_and_nothing_open():
+    state = make_state(claims=[make_claim("cdn edge network", "healthy")])
+    assert derive_status(state) == IncidentStatus.STABILIZED
+
+
+def test_closed_incident_is_never_reopened_by_new_evidence():
+    """Declaring an incident over is a human judgement; derivation must not undo it."""
+    state = make_state(
+        status=IncidentStatus.CLOSED,
+        claims=[make_claim("cdn edge network", "offline")],
+    )
+    apply_derivations(state)
+    assert state.status == IncidentStatus.CLOSED
 
 
 # ─── Title ───────────────────────────────────────────────────────────────────

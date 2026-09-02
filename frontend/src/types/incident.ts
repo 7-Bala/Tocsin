@@ -237,6 +237,7 @@ export interface IncidentState {
    */
   title_auto_derived?: boolean;
   severity_auto_derived?: boolean;
+  status_auto_derived?: boolean;
   metrics: IncidentMetrics;
   symptoms: Symptom[];
   timeline: TimelineEntry[];

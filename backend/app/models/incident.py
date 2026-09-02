@@ -370,6 +370,7 @@ class IncidentState(BaseModel):
     # explicitly, auto-derivation stops overriding them.
     title_auto_derived: bool = True
     severity_auto_derived: bool = True
+    status_auto_derived: bool = True
 
     # Operational fields
     symptoms: list[Symptom] = Field(default_factory=list)

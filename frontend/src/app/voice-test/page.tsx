@@ -1019,6 +1019,19 @@ export default function VoiceTestPage() {
     }
   };
 
+  // The status chip used to be hardcoded green for every value, so a DEGRADING
+  // incident rendered in reassuring green while the record showed services down.
+  // Colour has to follow the actual lifecycle state or it is worse than no colour.
+  const statusStyle = (s: string): { bg: string; text: string; border: string } => {
+    switch (s) {
+      case 'DEGRADING':  return { bg: '#fef2f2', text: '#dc2626', border: '#fecaca' };
+      case 'RESOLVING':  return { bg: '#fffbeb', text: '#d97706', border: '#fde68a' };
+      case 'STABILIZED': return { bg: '#f0fdf4', text: '#16a34a', border: '#bbf7d0' };
+      case 'CLOSED':     return { bg: '#f4f4f5', text: '#52525b', border: '#e4e4e7' };
+      default:           return { bg: '#f4f4f5', text: '#71717a', border: '#e4e4e7' }; // IDLE
+    }
+  };
+
   // Real ActionApprovalStatus values from the backend state machine (PROPOSED →
   // PENDING_APPROVAL → APPROVED → EXECUTING → VERIFIED | FAILED; REJECTED is
   // terminal). Read-only display — see the note above the Response & Actions section.
@@ -2234,8 +2247,16 @@ export default function VoiceTestPage() {
                       </svg>
                     </div>
                     <div style={{ flex: 1 }}>
-                      <div className="vcc-incident-title">
-                        {activeIncident?.title ?? 'Customer Login and Identity Outage'}
+                      {/* No incident on the record means exactly that. The previous
+                          fallback here rendered the seeded demo story ("Customer Login
+                          and Identity Outage") whenever activeIncident was null, so a
+                          disconnected socket looked identical to a real, live incident
+                          with that title. Showing the absence is the honest state. */}
+                      <div
+                        className="vcc-incident-title"
+                        style={activeIncident ? undefined : { color: '#9b9b9b', fontWeight: 500 }}
+                      >
+                        {activeIncident?.title ?? 'No incident on the record yet'}
                       </div>
                       {/* A machine-derived title must never read as one a commander
                           wrote. The backend re-derives it from the strongest current
@@ -2251,7 +2272,7 @@ export default function VoiceTestPage() {
                         </svg>
                         {activeIncident?.event_type
                           ? activeIncident.event_type.replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase())
-                          : 'Identity service · Multiple regions'}
+                          : 'Awaiting first observation'}
                       </div>
                       <div className="vcc-incident-id">{activeIncident?.incident_id ?? '—'}</div>
                     </div>
@@ -2271,7 +2292,16 @@ export default function VoiceTestPage() {
                       </div>
                       <div className="vcc-chip-group">
                         <span className="vcc-chip-meta">Status</span>
-                        <span className="vcc-chip" style={{ background: '#f0fdf4', color: '#16a34a', border: '1px solid #bbf7d0' }}>{activeIncident.status}</span>
+                        <span
+                          className="vcc-chip"
+                          style={{
+                            background: statusStyle(activeIncident.status).bg,
+                            color: statusStyle(activeIncident.status).text,
+                            border: `1px solid ${statusStyle(activeIncident.status).border}`,
+                          }}
+                        >
+                          {activeIncident.status}
+                        </span>
                       </div>
                       <div className="vcc-chip-group">
                         <span className="vcc-chip-meta">Started</span>

@@ -34,6 +34,7 @@ from app.models.incident import (
     Hypothesis,
     HypothesisStatus,
     IncidentState,
+    IncidentStatus,
     Observation,
     ObservationCategory,
     SeverityLevel,
@@ -105,6 +106,54 @@ def derive_severity(state: IncidentState) -> SeverityLevel:
         if pressure >= threshold:
             return level
     return SeverityLevel.LOW
+
+
+def derive_status(state: IncidentState) -> IncidentStatus:
+    """
+    Where the incident is in its lifecycle, read off the evidence.
+
+    Before this existed, `status` was written only by the seeded demo scenario and
+    the metrics simulator -- so an incident could sit on "RESOLVING" while the
+    record showed the CDN offline, payments down and Kafka crashed. A status that
+    contradicts the evidence under it is worse than no status at all.
+
+    Rules, deliberately coarse and auditable:
+      - nothing on the record yet            -> IDLE
+      - anything currently reported unhealthy -> DEGRADING
+      - nothing unhealthy, but open work left -> RESOLVING
+      - nothing unhealthy, nothing open       -> STABILIZED
+
+    CLOSED is never derived. Declaring an incident over is a human judgement, not
+    something to infer from an absence of new claims.
+    """
+    claims = state.claims or []
+    if not claims:
+        return IncidentStatus.IDLE
+
+    latest_by_entity: dict[str, str] = {}
+    latest_ts: dict[str, str] = {}
+    for claim in claims:
+        entity = (claim.entity or "").lower().strip()
+        if not entity:
+            continue
+        ts = claim.timestamp or ""
+        if entity not in latest_ts or ts > latest_ts[entity]:
+            latest_ts[entity] = ts
+            latest_by_entity[entity] = claim.value or ""
+
+    if any(_is_unhealthy(v) for v in latest_by_entity.values()):
+        return IncidentStatus.DEGRADING
+
+    open_work = (
+        sum(1 for c in (state.conflicts or []) if getattr(c, "status", None) != "RESOLVED")
+        + sum(1 for r in (state.unresolved_risks or []) if getattr(r, "status", None) != "RESOLVED")
+        + sum(
+            1
+            for a in (state.action_items or [])
+            if getattr(a, "status", None) not in ("COMPLETE", "COMPLETED", "VERIFIED")
+        )
+    )
+    return IncidentStatus.RESOLVING if open_work else IncidentStatus.STABILIZED
 
 
 def derive_title(state: IncidentState) -> str | None:
@@ -219,6 +268,17 @@ def apply_derivations(state: IncidentState) -> list[str]:
                 f"Severity re-derived from evidence: {state.severity.value} -> {new_severity.value}"
             )
             state.severity = new_severity
+
+    # A human who has explicitly CLOSED an incident must not have it reopened by a
+    # late-arriving observation, so a closed incident is left alone regardless of
+    # the flag.
+    if state.status_auto_derived and state.status != IncidentStatus.CLOSED:
+        new_status = derive_status(state)
+        if new_status != state.status:
+            changes.append(
+                f"Status re-derived from evidence: {state.status.value} -> {new_status.value}"
+            )
+            state.status = new_status
 
     if state.title_auto_derived:
         new_title = derive_title(state)
