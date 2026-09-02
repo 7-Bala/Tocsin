@@ -29,6 +29,14 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger("tocsin.api.agora")
 
+# Model used when the composed_tools pipeline runs on Agora-managed OpenAI
+# credentials. Not caller-configurable: the managed credential belongs to Agora,
+# so the model choice has to stay inside what Agora's managed OpenAI integration
+# actually covers rather than being whatever string a client sends. This is the
+# model given in Agora's own managed example
+# (docs.agora.io/en/conversational-ai/models/llm/openai).
+COMPOSED_TOOLS_MANAGED_OPENAI_MODEL = "gpt-4o-mini"
+
 router = APIRouter(prefix="/api/agora", tags=["Agora Voice"])
 
 # Regex for safe Agora channel name (alphanumeric, underscore, dash)
@@ -191,6 +199,22 @@ class StartAgentRequest(BaseModel):
     ),
     examples=["gemini-3.6-flash"],
   )
+  composed_tools_llm_vendor: Literal["openai", "gemini"] = Field(
+    default="openai",
+    description=(
+      "Which LLM backs the composed_tools pipeline. 'openai' (default) uses "
+      "Agora's managed OpenAI credentials (credential_mode: 'managed'), so no "
+      "OpenAI key is stored by this project and no Gemini quota is consumed -- "
+      "this is the path the hackathon organizers recommend alongside managed "
+      "Deepgram ASR and MiniMax TTS, and it is the only composed_tools option "
+      "that runs with zero model keys of our own. 'gemini' keeps the previous "
+      "BYOK behavior (vendor 'custom' + style 'gemini' against our own "
+      "GEMINI_API_KEY), which is subject to that key's quota. Ignored entirely "
+      "for voice_pipeline='gemini_live', which always uses Gemini Live. NOT YET "
+      "LIVE-VERIFIED for either vendor -- built per official Agora docs, but no "
+      "credentialed session has confirmed Agora accepts the payload."
+    ),
+  )
   system_prompt: str | None = Field(
     default=None,
     description="Custom system instructions for the conversational agent",
@@ -208,12 +232,11 @@ class StartAgentRequest(BaseModel):
       "'composed_tools': Agora's separate asr+llm+tts pipeline — higher latency (three "
       "hops instead of one native audio model), but this is the pipeline Agora's docs "
       "actually document `llm.mcp_servers` under, so MCP tool-calling can genuinely be "
-      "wired here. Still uses Gemini as the reasoning model (via `style: 'gemini'` "
-      "with our own GEMINI_API_KEY, matching how the gemini_live pipeline builds its "
-      "URL) — ASR and TTS use Agora-managed credentials (credential_mode: 'managed') "
-      "for Deepgram and MiniMax respectively, so no new third-party API keys are "
-      "required, but this does draw on Agora's own managed billing for those two "
-      "steps. NOT YET LIVE-VERIFIED — the request is built per official Agora "
+      "wired here. ASR (Deepgram) and TTS (MiniMax) use Agora-managed credentials "
+      "(credential_mode: 'managed'), and the LLM defaults to managed OpenAI too, so "
+      "this pipeline can run with no model API key of ours at all — see "
+      "composed_tools_llm_vendor to switch the LLM back to BYOK Gemini. All three "
+      "managed steps draw on Agora's own managed billing. NOT YET LIVE-VERIFIED — the request is built per official Agora "
       "documentation, but no live credentialed session has confirmed Agora accepts it "
       "or that the agent actually invokes a tool through it."
     ),
@@ -600,10 +623,22 @@ async def start_conversational_agent(
       ),
     )
 
-  if not gemini_key:
+  # Only the paths that actually call Gemini need our own Gemini key. The
+  # composed_tools pipeline on managed OpenAI reaches the LLM through Agora's own
+  # credentials, so demanding GEMINI_API_KEY there would block the one
+  # configuration that is designed to need no model key of ours at all.
+  uses_gemini = request.voice_pipeline == "gemini_live" or (
+    request.voice_pipeline == "composed_tools"
+    and request.composed_tools_llm_vendor == "gemini"
+  )
+  if uses_gemini and not gemini_key:
     raise HTTPException(
       status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-      detail="GEMINI_API_KEY is not configured on the backend server.",
+      detail=(
+        "GEMINI_API_KEY is not configured on the backend server. Either set it, "
+        "or start the agent with voice_pipeline='composed_tools' and "
+        "composed_tools_llm_vendor='openai' to use Agora-managed models instead."
+      ),
     )
 
   # Generate short-lived RTC token specifically for the agent participant
@@ -748,12 +783,47 @@ async def start_conversational_agent(
     #     docs.agora.io/en/api-reference/api-ref/conversational-ai/join
     # ASR (Deepgram) and TTS (MiniMax) use credential_mode "managed" — Agora supplies
     # those credentials and bills them to the Agora account; no new third-party API key
-    # is added to this project. LLM stays on our own GEMINI_API_KEY (BYOK) so the
-    # actual reasoning model doesn't change, only how tool-calling reaches it.
-    gemini_llm_url = (
-      "https://generativelanguage.googleapis.com/v1beta/models/"
-      f"{request.composed_tools_llm_model}:streamGenerateContent?alt=sse&key={gemini_key}"
-    )
+    # is added to this project. The LLM step is selectable: managed OpenAI (default,
+    # also keyless) or BYOK Gemini — see composed_tools_llm_vendor.
+    # Two documented ways to fill the `llm` block. Note the shape difference from
+    # asr/tts above: the llm block carries `url` at the top level, not under
+    # `params` (docs.agora.io/en/conversational-ai/models/llm/openai).
+    if request.composed_tools_llm_vendor == "openai":
+      # Agora-managed OpenAI: Agora supplies and bills the credential, so no
+      # OpenAI key exists anywhere in this project. Per the managed example in
+      # the docs, "when using managed mode, api_key is not required" -- so it is
+      # deliberately absent rather than sent empty.
+      llm_block = {
+        "credential_mode": "managed",
+        "vendor": "openai",
+        "style": "openai",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "params": {"model": COMPOSED_TOOLS_MANAGED_OPENAI_MODEL},
+      }
+    else:
+      # BYOK Gemini. Gemini is not in Agora's documented `vendor` enum for the llm
+      # block (openai | azure | xai | custom), so "custom" plus style: "gemini" is
+      # the doc-consistent way to point the llm step at our own Gemini endpoint,
+      # matching the same URL-with-embedded-key pattern gemini_live uses above.
+      llm_block = {
+        "vendor": "custom",
+        "style": "gemini",
+        "url": (
+          "https://generativelanguage.googleapis.com/v1beta/models/"
+          f"{request.composed_tools_llm_model}:streamGenerateContent?alt=sse&key={gemini_key}"
+        ),
+        "api_key": gemini_key,
+        "params": {"model": request.composed_tools_llm_model},
+      }
+
+    # Fields that are identical regardless of which vendor answers.
+    llm_block.update({
+      "system_messages": [{"role": "system", "content": prompt}],
+      "max_history": 32,
+      "greeting_message": "Tocsin emergency coordinator active. How can I assist?",
+      "failure_message": "Sorry, I encountered an issue. Please try again.",
+    })
+
     payload = {
       "name": f"tocsin_agent_{channel_name}",
       "properties": {
@@ -780,22 +850,7 @@ async def start_conversational_agent(
             "language": "en",
           },
         },
-        "llm": {
-          # Gemini is not in Agora's documented `vendor` enum for the llm block
-          # (openai | azure | xai | custom) — "custom" plus style: "gemini" is the
-          # doc-consistent way to point the llm step at our own Gemini endpoint,
-          # matching the same BYOK URL-with-embedded-key pattern the gemini_live
-          # pipeline already uses above.
-          "vendor": "custom",
-          "style": "gemini",
-          "url": gemini_llm_url,
-          "api_key": gemini_key,
-          "system_messages": [{"role": "system", "content": prompt}],
-          "max_history": 32,
-          "params": {"model": request.composed_tools_llm_model},
-          "greeting_message": "Tocsin emergency coordinator active. How can I assist?",
-          "failure_message": "Sorry, I encountered an issue. Please try again.",
-        },
+        "llm": llm_block,
         "tts": {
           "credential_mode": "managed",
           "vendor": "minimax",
@@ -894,7 +949,20 @@ async def start_conversational_agent(
         "channel_name": channel_name,
         "agent_uid": request.agent_uid,
         "voice_pipeline": request.voice_pipeline,
-        "llm_provider": "gemini",
+        # Must reflect the block actually sent, not an assumption: composed_tools
+        # can reason through Agora-managed OpenAI, in which case reporting "gemini"
+        # would misdescribe both the model and whose credential paid for it.
+        "llm_provider": (
+          "gemini"
+          if request.voice_pipeline == "gemini_live"
+          else request.composed_tools_llm_vendor
+        ),
+        "llm_credential_mode": (
+          "managed"
+          if request.voice_pipeline == "composed_tools"
+          and request.composed_tools_llm_vendor == "openai"
+          else "byok"
+        ),
         # `voice` is only honored by the gemini_live (mllm) pipeline, whose voice enum
         # (Puck/Charon/Aoede/...) it belongs to. composed_tools synthesizes through
         # MiniMax TTS, which uses its own separate voice_id namespace -- so the

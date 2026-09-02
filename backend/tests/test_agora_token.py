@@ -621,6 +621,12 @@ async def test_composed_tools_pipeline_wires_mcp_servers_under_llm(monkeypatch):
                     "channel_name": "composed_tools_room",
                     "agent_uid": 9999,
                     "voice_pipeline": "composed_tools",
+                    # Pinned to the BYOK-Gemini vendor deliberately: the
+                    # live-only-model assertions below are about Gemini model
+                    # selection, and composed_tools now defaults to managed
+                    # OpenAI. MCP wiring on that default is covered by
+                    # test_mcp_servers_wire_under_managed_openai_llm_too.
+                    "composed_tools_llm_vendor": "gemini",
                     "mcp_server_url": "https://example.com/mcp",
                 },
             )
@@ -721,3 +727,220 @@ async def test_composed_tools_without_mcp_url_omits_mcp_servers(monkeypatch):
             # independent of whether MCP tools were requested.
             assert sent_payload["properties"]["advanced_features"]["enable_rtm"] is True
             assert sent_payload["properties"]["parameters"] == {"data_channel": "rtm"}
+
+
+# ─── Agora-managed model wiring (composed_tools llm vendor) ──────────────────
+#
+# The hackathon organizers confirmed Agora Conversational AI is mandatory and
+# pointed at Agora-managed models (Deepgram STT / OpenAI LLM / MiniMax TTS) as the
+# path that needs no provider keys of your own. ASR and TTS were already managed;
+# the LLM step was BYOK Gemini only, which meant the composed_tools pipeline could
+# not run without a Gemini key and was subject to that key's quota. These lock in
+# the managed-OpenAI option and the honesty of what gets reported back.
+
+
+def _agora_env(monkeypatch):
+    monkeypatch.setenv("AGORA_APP_ID", "mock_app_id_1234567890123456789012")
+    monkeypatch.setenv("AGORA_APP_CERTIFICATE", "mock_cert_1234567890123456789012")
+    monkeypatch.setenv("AGORA_CUSTOMER_ID", "mock_customer_id")
+    monkeypatch.setenv("AGORA_CUSTOMER_SECRET", "mock_customer_secret")
+    monkeypatch.delenv("MCP_SERVER_PUBLIC_URL", raising=False)
+
+
+def _mock_agora_client():
+    mock_client_instance = AsyncMock()
+    mock_client_instance.post.return_value = Response(
+        status_code=200, json={"agent_id": "agent_session_abc123", "status": "idle"}
+    )
+    mock_client_instance.__aenter__.return_value = mock_client_instance
+    mock_client_instance.__aexit__.return_value = None
+    return mock_client_instance
+
+
+async def _start_agent(payload):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as test_client:
+        return await test_client.post("/api/agora/start-agent", json=payload)
+
+
+@pytest.mark.asyncio
+async def test_composed_tools_defaults_to_agora_managed_openai(monkeypatch):
+    """
+    The default composed_tools LLM must be Agora-managed OpenAI: credential_mode
+    'managed', vendor 'openai', and crucially NO api_key -- Agora's managed docs
+    state the key is not required, and sending one would defeat the point.
+    """
+    _agora_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "mock_gemini_api_key")
+    client = _mock_agora_client()
+
+    with patch("app.api.agora.httpx.AsyncClient", return_value=client):
+        resp = await _start_agent(
+            {
+                "channel_name": "emergency_test_room",
+                "agent_uid": 9999,
+                "voice_pipeline": "composed_tools",
+            }
+        )
+
+    assert resp.status_code == 200
+    llm = client.post.call_args.kwargs["json"]["properties"]["llm"]
+    assert llm["credential_mode"] == "managed"
+    assert llm["vendor"] == "openai"
+    assert llm["style"] == "openai"
+    assert llm["url"] == "https://api.openai.com/v1/chat/completions"
+    assert "api_key" not in llm, "managed mode must not send a key"
+    # Shared fields still applied on top of the vendor-specific block.
+    assert llm["system_messages"][0]["role"] == "system"
+    assert llm["max_history"] == 32
+    # Our own Gemini key must not leak into a managed-OpenAI request.
+    assert "mock_gemini_api_key" not in str(client.post.call_args.kwargs["json"])
+
+    data = resp.json()
+    assert data["llm_provider"] == "openai"
+    assert data["llm_credential_mode"] == "managed"
+
+
+@pytest.mark.asyncio
+async def test_composed_tools_managed_openai_needs_no_gemini_key(monkeypatch):
+    """
+    The whole value of the managed path is running with zero model keys of ours.
+    Previously start-agent returned 503 whenever GEMINI_API_KEY was unset, which
+    would have blocked exactly the configuration that does not need it.
+    """
+    _agora_env(monkeypatch)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    client = _mock_agora_client()
+
+    with patch("app.api.agora.httpx.AsyncClient", return_value=client):
+        resp = await _start_agent(
+            {
+                "channel_name": "emergency_test_room",
+                "agent_uid": 9999,
+                "voice_pipeline": "composed_tools",
+            }
+        )
+
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_composed_tools_can_still_opt_back_into_byok_gemini(monkeypatch):
+    """Gemini remains selectable; the managed default must not remove the option."""
+    _agora_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "mock_gemini_api_key")
+    client = _mock_agora_client()
+
+    with patch("app.api.agora.httpx.AsyncClient", return_value=client):
+        resp = await _start_agent(
+            {
+                "channel_name": "emergency_test_room",
+                "agent_uid": 9999,
+                "voice_pipeline": "composed_tools",
+                "composed_tools_llm_vendor": "gemini",
+            }
+        )
+
+    assert resp.status_code == 200
+    llm = client.post.call_args.kwargs["json"]["properties"]["llm"]
+    assert llm["vendor"] == "custom"
+    assert llm["style"] == "gemini"
+    assert "generativelanguage.googleapis.com" in llm["url"]
+    assert resp.json()["llm_credential_mode"] == "byok"
+    # The key belongs in the upstream payload but never in our own response.
+    assert "mock_gemini_api_key" not in str(resp.json())
+
+
+@pytest.mark.asyncio
+async def test_byok_gemini_still_requires_the_gemini_key(monkeypatch):
+    """Relaxing the key check must not let a BYOK request through without a key."""
+    _agora_env(monkeypatch)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    resp = await _start_agent(
+        {
+            "channel_name": "emergency_test_room",
+            "agent_uid": 9999,
+            "voice_pipeline": "composed_tools",
+            "composed_tools_llm_vendor": "gemini",
+        }
+    )
+    assert resp.status_code == 503
+    assert "GEMINI_API_KEY" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_live_still_requires_the_gemini_key(monkeypatch):
+    """gemini_live has no managed option at all -- it must keep failing loudly."""
+    _agora_env(monkeypatch)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    resp = await _start_agent(
+        {"channel_name": "emergency_test_room", "agent_uid": 9999}
+    )
+    assert resp.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_managed_asr_and_tts_stay_managed(monkeypatch):
+    """
+    Deepgram ASR and MiniMax TTS are the other two organizer-recommended managed
+    models, and both need an explicit params.url even in managed mode (confirmed
+    against live HTTP 400s from Agora's join API).
+    """
+    _agora_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "mock_gemini_api_key")
+    client = _mock_agora_client()
+
+    with patch("app.api.agora.httpx.AsyncClient", return_value=client):
+        resp = await _start_agent(
+            {
+                "channel_name": "emergency_test_room",
+                "agent_uid": 9999,
+                "voice_pipeline": "composed_tools",
+            }
+        )
+
+    assert resp.status_code == 200
+    props = client.post.call_args.kwargs["json"]["properties"]
+    assert props["asr"]["credential_mode"] == "managed"
+    assert props["asr"]["vendor"] == "deepgram"
+    assert props["asr"]["params"]["url"] == "wss://api.deepgram.com/v1/listen"
+    assert props["tts"]["credential_mode"] == "managed"
+    assert props["tts"]["vendor"] == "minimax"
+    assert props["tts"]["params"]["url"] == "wss://api.minimax.io/ws/v1/t2a_v2"
+
+
+@pytest.mark.asyncio
+async def test_mcp_servers_wire_under_managed_openai_llm_too(monkeypatch):
+    """
+    MCP tool-calling hangs off the `llm` block, so it must survive the switch to
+    Agora-managed OpenAI -- otherwise the keyless default would silently be the one
+    configuration where tools stop being offered.
+    """
+    _agora_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "mock_gemini_api_key")
+    client = _mock_agora_client()
+
+    with patch("app.api.agora.httpx.AsyncClient", return_value=client):
+        resp = await _start_agent(
+            {
+                "channel_name": "managed_mcp_room",
+                "agent_uid": 9999,
+                "voice_pipeline": "composed_tools",
+                "mcp_server_url": "https://example.com/mcp",
+            }
+        )
+
+    assert resp.status_code == 200
+    props = client.post.call_args.kwargs["json"]["properties"]
+    assert props["llm"]["vendor"] == "openai"
+    assert props["llm"]["credential_mode"] == "managed"
+    assert props["llm"]["mcp_servers"] == [
+        {
+            "name": "tocsin-emergency-tools",
+            "endpoint": "https://example.com/mcp/sse",
+            "transport": "sse",
+        }
+    ]
+    assert props["advanced_features"]["enable_tools"] is True
