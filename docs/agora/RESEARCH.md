@@ -70,22 +70,32 @@ Files inspected in this repo:
   for join and an empty `{}` body for leave. The code reads `agent_id` (with fallbacks
   to `id` or a synthesized string) and treats any `200`/`201`/`204` as success — this is
   defensive but consistent with the documented shape.
-- **Agent status endpoint — resolved (2026-08-31)**: this was previously
-  `/api/agora/agent-status/{channel_name}`, backed only by the in-memory `ACTIVE_AGENTS`
-  dict. Agora does publish a real "Query agent status" REST endpoint
-  (`docs.agora.io/en/conversational-ai/rest-api/agent/query` — its existence is
-  confirmed via search-result titles), but two separate `WebFetch` attempts against
-  that page in this pass could not extract its exact URL path, headers, or response
-  schema (the fetched content described monitoring concepts, not the REST contract).
-  Per this project's "never invent an integration" rule, that endpoint was **not**
-  implemented against a guessed contract. Instead the endpoint was renamed to
-  `GET /api/agora/local-agent-session/{channel_name}` and its response now explicitly
-  states `"source": "tocsin_local_in_memory_registry"`, `"live_agora_state_verified": false`,
-  and a note that it reflects Tocsin's own bookkeeping, not a live Agora query. It is
-  **not authoritative** — if the backend process restarts, or Agora's side terminates
-  the agent server-side (idle timeout, error), the local registry can be stale or wrong.
-  Implementing the real query call remains **NOT USED** (see capability matrix) until
-  its official contract can be confirmed.
+- **Agent status endpoint — implemented and live-verified (2026-09-03)**: the exact
+  contract was provided by an EchoSphere mentor (Nitin) and independently confirmed
+  against a direct `WebFetch` of `docs.agora.io/en/api-reference/api-ref/conversational-ai/query`:
+  `GET /v2/projects/{appid}/agents/{agentId}` (same Basic Auth as join/leave) returns
+  `{message, start_ts, stop_ts, status, name, agent_id}`, with `status` one of
+  `IDLE | STARTING | RUNNING | STOPPING | STOPPED | FAILED`. This is now wired as
+  `GET /api/agora/agent-status/{channel_name}` (resolves `agent_id` from the local
+  `ACTIVE_AGENTS` registry, or accepts `?agent_id=` explicitly so a caller can check a
+  specific agent even after a backend restart wiped the registry). **Live-verified
+  end-to-end 2026-09-03**: started a real agent, queried this endpoint and got back
+  Agora's real `"status": "RUNNING"`, stopped the agent, queried again and got back
+  `"status": "STOPPED"` with a `stop_ts`. Upgraded to **`VERIFIED IN CODE`**.
+  `GET /api/agora/local-agent-session/{channel_name}` (the local-registry-only lookup)
+  is kept as a cheaper, non-network alternative and now points callers at the live
+  endpoint in its own description instead of claiming to be the only option.
+- **Account-wide agent listing — implemented and live-verified (2026-09-03)**: same
+  mentor also pointed at `docs.agora.io/en/api-reference/api-ref/conversational-ai/list`
+  (`GET /v2/projects/{appid}/agents`, filterable by `channel`/`state`/`from_time`/
+  `to_time`/`limit`/`cursor`) as a way to find "zombie" agents left running from
+  earlier test/dev sessions — each one keeps consuming managed-model minutes until
+  explicitly stopped. Wired as `GET /api/agora/agents`, forwarding those filters.
+  **Live-verified 2026-09-03**: returned a real (empty, as it happened) list of
+  currently-running agents on this project's account. This endpoint was already used
+  internally for the duplicate-agent guard in `/start-agent` (see
+  `find_running_agents_in_channel`, live-verified 2026-09-02) — this is the same
+  contract, now also exposed directly for manual zombie-hunting.
 
 ## 3. Gemini Live MLLM payload shape
 
@@ -206,6 +216,63 @@ in this pass — slightly weaker sourcing than the others. The `asr.params` fiel
 (`model: "nova-3"`, `language: "en"`) and `tts.params` fields (voice ID, sample rate)
 are copied from the one confirmed example for each vendor; other valid values were not
 enumerated, so these are "a working example," not "the only correct configuration."
+
+**Managed-model menu confirmed (2026-09-03, mentor-provided)**: previously only one
+example value per managed vendor had been confirmed. A mentor shared the actual menu
+of models available under Agora-managed keys:
+- Managed ASR: Agora's own built-in **ARES** engine, or **Deepgram** (`nova-2`,
+  `nova-3` — this project uses `nova-3`)
+- Managed LLM: **OpenAI** (`gpt-4o-mini`, `gpt-4.1-mini`, `gpt-5-nano`, `gpt-5-mini` —
+  this project defaults to `gpt-4o-mini`)
+- Managed TTS: **MiniMax** (`speech-2.6-turbo`, `speech-2.8-turbo` — this project uses
+  `speech-2.8-turbo`), or **OpenAI** (`tts-1`) as a separate managed TTS vendor
+This project's choices all fall within the confirmed menu. Not independently
+re-verified against an official docs page in this pass — sourced from the mentor
+screen-sharing the actual model list, not a `WebFetch`.
+
+**composed_tools now defaults to managed OpenAI, not BYOK Gemini (2026-09-03)**: added
+`composed_tools_llm_vendor` (`"openai"` default, `"gemini"` opt-in) so the
+`composed_tools` pipeline can run with zero model keys of this project's own —
+matching the EchoSphere organizers' stated preference for Agora-managed models when a
+team has no provider keys of their own. **Live-verified 2026-09-03**: both the managed
+OpenAI variant and the BYOK Gemini variant were each dispatched against the real
+Agora ConvoAI API, both returned HTTP 200 with a real `agent_id` and Agora-reported
+`"status": "RUNNING"`, and both were confirmed `"status": "STOPPED"` after cleanup via
+the newly-wired `GET /api/agora/agent-status/{channel_name}` (see §2 update above).
+Upgraded from `NOT YET LIVE-VERIFIED` to **`VERIFIED IN CODE`** for payload
+acceptance and agent liveness on both vendor choices. Tool *invocation* through
+either remains unverified (see the section immediately below).
+
+**Transcript transport (RTM vs. stream-message) confirmed as either/or (2026-09-03,
+mentor-provided)**: this project had implemented RTM end-to-end but never confirmed
+whether RTM or the legacy stream-message data channel was the "correct" transport, or
+whether the answer differed between `gemini_live` and `composed_tools`. Mentor's
+answer: *"you can use either one, it's up to you — rtm or stream_message. make sure
+you have set `enable_rtm` when starting the agent."* This matches what the code
+already does (`advanced_features.enable_rtm: true` and
+`parameters.data_channel: "rtm"` are both set on every agent join regardless of
+pipeline). No code change required; this raises confidence in the existing RTM wiring
+but does not by itself confirm that a transcript message has ever actually arrived
+from a real speaking agent — that observation is still outstanding (see §9).
+
+### UPDATE 2026-09-03 — mentor gave a conflicting, unconfirmed claim; not acted on
+
+Asked an EchoSphere mentor (Nitin) directly whether `mllm` (Gemini Live) would ever
+get MCP tool support. His answer: *"I think mllm does support MCP the same way as
+llm. I'll check this."* That is the opposite of this document's own finding two
+sections up, which is based on a directly-fetched official release-notes page stating
+`mcp_servers` is supported only under `llm`, not `mllm`.
+
+Recorded here rather than silently believed or silently ignored, per this project's
+"organize evidence without inventing certainty" rule: a mentor's off-the-cuff
+recollection is real evidence, but it is *weaker* sourcing than a directly-fetched,
+quoted official docs page, and it was explicitly hedged ("I think", "I'll check") by
+the person who said it. **No code changed on the basis of this claim.** The `NOT
+SUPPORTED — CONFIRMED BY OFFICIAL DOCS` status two sections up stands until either
+the mentor follows up with something more definite, or a fresh docs fetch/live test
+resolves the conflict one way or the other. If this matters for the demo, re-check
+`docs.agora.io/en/conversational-ai/overview/release-notes` for a newer entry before
+trusting either source over the other.
 
 **This trades Gemini Live's single native-audio hop for three hops (ASR → LLM → TTS),
 a real latency cost** — chosen only when the caller explicitly requests
@@ -648,10 +715,13 @@ carries that status, because no live credentialed run was performed in this pass
 | ConvoAI agent join (`/api/agora/start-agent`), `composed_tools` pipeline | `VERIFIED IN CODE` | **Live-verified 2026-08-31** (see §11): real Agora acceptance, real `agent_id` returned, real RTC audio from the agent played in a live browser. Found and fixed a real bug in this pass (`asr`/`tts` blocks were missing required `params.url`). The `gemini_live` pipeline itself was not re-tested this pass (only `composed_tools` was live-dispatched) — its schema is unchanged from earlier verification. |
 | ConvoAI agent leave (`/api/agora/stop-agent`) | `VERIFIED IN CODE` | **Live-verified 2026-08-31**: stopped the real agent started in §11, confirmed `"status": "stopped"`. |
 | Local agent session lookup (`/api/agora/local-agent-session`) | `VERIFIED IN CODE` | This one only claims to be local bookkeeping (an in-memory dict read), which was exercised indirectly by the existing mocked `/start-agent` and `/stop-agent` tests that populate/clear `ACTIVE_AGENTS`. It makes no live Agora claim, so there is nothing further to verify. |
-| Real Agora "Query agent status" REST endpoint | `VERIFIED IN CODE` (URL confirmed, not yet wired into the app) | **Confirmed live 2026-09-01**: `GET /api/conversational-ai-agent/v2/projects/{appid}/agents/{agentId}` (Basic Auth, same scheme as join/leave) returns `{agent_id, message, name, start_ts, status}` for a real running agent. Discovered while debugging why an agent showed no RTC activity in the browser — this endpoint definitively confirmed the agent was genuinely `RUNNING` server-side even when the browser's own RTC events hadn't shown it yet, which is what proved the browser-side symptom was a timing/observation issue, not an actual agent failure. Not yet wired into `backend/app/api/agora.py`'s `/local-agent-session` endpoint (still local-registry-only) -- that would be the natural next step to make that endpoint's data live instead of just cached. |
+| Real Agora "Query agent status" REST endpoint (`/api/agora/agent-status/{channel_name}`) | `VERIFIED IN CODE` | **Fully wired and live-verified 2026-09-03** (see §2 update): started a real agent, queried this endpoint and got Agora's real `"status": "RUNNING"`, stopped it, queried again and got `"status": "STOPPED"` with a `stop_ts`. Contract provided by an EchoSphere mentor and cross-checked against a direct fetch of the official docs page. |
+| Account-wide agent listing (`/api/agora/agents`) | `VERIFIED IN CODE` | **Live-verified 2026-09-03**: returned a real (empty) list of currently-running agents for this project's Agora account. For finding zombie agents left running from earlier sessions. |
 | Gemini Live `mllm` params, voice enum, `agora_vad` turn detection | `OFFICIAL DOCS ONLY` | Confirmed to match `docs.agora.io/en/conversational-ai/models/mllm/gemini` field-for-field. Not run against a live Gemini Live session in this pass. |
 | `mllm.mcp_servers` under `gemini_live` pipeline | `NOT USED` (confirmed unsupported) | **Resolved 2026-08-31**: never sent regardless of request — official docs confirm `mcp_servers` belongs under `llm`, not `mllm`. |
 | `llm.mcp_servers` under new `composed_tools` pipeline | `CREDENTIAL REQUIRED` | **Payload acceptance live-verified 2026-08-31** (see §11): Agora accepted the payload with `mcp_enabled: true` echoed back. Actual tool *invocation* through it is still unconfirmed — nothing in the live test window required the agent to call a tool. Stays `CREDENTIAL REQUIRED`, not `VERIFIED IN CODE`, until a tool call is actually observed. |
+| `composed_tools` on Agora-managed OpenAI (`composed_tools_llm_vendor="openai"`, default) | `VERIFIED IN CODE` | **Live-verified 2026-09-03**: real Agora acceptance, real `agent_id`, `"status": "RUNNING"` confirmed via the new agent-status endpoint, then confirmed `"status": "STOPPED"` after cleanup. No OpenAI key of this project's own was sent. Tool invocation through it remains unconfirmed (see row above). |
+| `composed_tools` on BYOK Gemini (`composed_tools_llm_vendor="gemini"`) | `VERIFIED IN CODE` | Same live-verification treatment as the managed-OpenAI row, same day — this vendor option was kept, not replaced, when managed OpenAI became the default. |
 | Agora `/speak` TTS broadcast (spoken summaries) | `CREDENTIAL REQUIRED` | **Implemented 2026-08-31**: `POST /api/agora/speak` calls the documented `POST /v2/projects/{appid}/agents/{agentId}/speak` schema (`text`/`priority`/`interruptable`) against the agent tracked for a channel, returning 404 if none is running. Wired into `HandoffPanel`'s "🔊 Broadcast" button, sending the same `spoken_brief` text already generated for problem-statement item 11. Payload shape verified by regression tests; live audio delivery into a real channel not yet observed. |
 | Agora `/think` custom instruction | `OFFICIAL DOCS ONLY` | **Schema confirmed 2026-09-01** (see §13) — full request/response shape fetched directly from official docs. Not called by Tocsin yet; proposed use is pushing real-time incident developments into a live voice session so the agent proactively announces them. |
 | Agora `/update` agent configuration | `OFFICIAL DOCS ONLY` | **Schema confirmed 2026-09-01** (see §13) — supports updating `llm.system_messages`/`params` or `mllm.params` on a running agent without restart. Not called by Tocsin yet; proposed use is keeping a live agent's system prompt in sync as incident evidence changes. |
@@ -673,7 +743,7 @@ carries that status, because no live credentialed run was performed in this pass
 | RTC token 24h max expiry alignment | VERIFIED — MATCHES OFFICIAL DOCS |
 | `agora-token-builder` PyPI package as "the" official tool | UNVERIFIED AGAINST OFFICIAL DOCS (docs name only the GitHub reference repo) |
 | ConvoAI join/leave URLs + Basic Auth scheme | VERIFIED — MATCHES OFFICIAL DOCS |
-| `/api/agora/local-agent-session` reflecting real Agora agent state | Renamed + relabeled as local-only (2026-08-31); real Agora query endpoint contract still unconfirmed |
+| `/api/agora/local-agent-session` reflecting real Agora agent state | Local-only by design, unchanged; the real Agora query endpoint is now separately wired and live-verified as `/api/agora/agent-status/{channel_name}` (2026-09-03) |
 | Gemini `mllm` params/voice enum/turn_detection (`agora_vad`) | VERIFIED — MATCHES OFFICIAL DOCS |
 | `gemini-3.1-flash-live-preview` as current model name | VERIFIED as of this fetch (preview model — expect rotation) |
 | Hand-built Gemini WS URL as `mllm.url` | UNVERIFIED — necessity vs redundancy not confirmed |

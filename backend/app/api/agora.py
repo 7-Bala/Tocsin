@@ -32,9 +32,13 @@ logger = logging.getLogger("tocsin.api.agora")
 # Model used when the composed_tools pipeline runs on Agora-managed OpenAI
 # credentials. Not caller-configurable: the managed credential belongs to Agora,
 # so the model choice has to stay inside what Agora's managed OpenAI integration
-# actually covers rather than being whatever string a client sends. This is the
-# model given in Agora's own managed example
-# (docs.agora.io/en/conversational-ai/models/llm/openai).
+# actually covers rather than being whatever string a client sends. Confirmed
+# 2026-09-02 (mentor-provided) as one of the models Agora's managed keys actually
+# cover: managed OpenAI currently offers gpt-4o-mini, gpt-4.1-mini, gpt-5-nano and
+# gpt-5-mini; managed Deepgram ASR offers nova-2/nova-3 (Agora also has a built-in
+# ARES ASR engine); managed MiniMax TTS offers speech-2.6-turbo/speech-2.8-turbo,
+# and OpenAI's tts-1 is available as a separate managed TTS vendor. This project
+# uses gpt-4o-mini, Deepgram nova-3 and MiniMax speech-2.8-turbo.
 COMPOSED_TOOLS_MANAGED_OPENAI_MODEL = "gpt-4o-mini"
 
 router = APIRouter(prefix="/api/agora", tags=["Agora Voice"])
@@ -402,6 +406,47 @@ async def find_running_agents_in_channel(
       "Proceeding without the duplicate-agent guard."
     )
     return []
+
+
+async def query_agent_status(
+  app_id: str, headers: dict[str, str], agent_id: str
+) -> dict[str, Any] | None:
+  """
+  Live status query against Agora's real Conversational AI agent endpoint.
+
+  Schema confirmed 2026-09-02 (mentor-provided, cross-checked against
+  docs.agora.io/en/api-reference/api-ref/conversational-ai/query):
+    GET /v2/projects/{appid}/agents/{agentId}
+    -> {message, start_ts, stop_ts, status, name, agent_id}
+  status is one of IDLE | STARTING | RUNNING | STOPPING | STOPPED | FAILED.
+
+  This replaces the earlier "could not confirm this endpoint's schema" gap noted
+  in docs/agora/RESEARCH.md -- prior to this, Tocsin could only report its own
+  in-memory record of whether an agent was started, which goes stale the moment
+  the backend restarts or Agora stops the agent server-side without telling us.
+
+  Returns the parsed response dict, or None if the query itself failed (network
+  error, non-200, unparsable body) -- callers must treat None as "unknown", not
+  as "not running", since a failed lookup says nothing about the agent's actual
+  state.
+  """
+  url = (
+    f"https://api.agora.io/api/conversational-ai-agent/v2/projects/{app_id}"
+    f"/agents/{agent_id}"
+  )
+  try:
+    async with httpx.AsyncClient(timeout=8.0) as client:
+      resp = await client.get(url, headers=headers)
+    if resp.status_code != 200:
+      logger.warning(
+        f"Agent status query for '{agent_id}' failed (HTTP {resp.status_code}):"
+        f" {resp.text[:200]}"
+      )
+      return None
+    return resp.json()
+  except (httpx.HTTPError, ValueError) as exc:
+    logger.warning(f"Agent status query for '{agent_id}' failed: {exc}")
+    return None
 
 
 async def leave_agent(app_id: str, headers: dict[str, str], agent_id: str) -> bool:
@@ -1376,13 +1421,11 @@ async def think_into_channel(request: AgentThinkRequest) -> dict[str, Any]:
   summary="Get Locally-Tracked Agent Session State",
   description=(
     "Returns Tocsin's own in-memory record of the last agent_id started for this "
-    "channel. This is NOT a live query against Agora's Conversational AI service: "
-    "Agora publishes a real 'Query agent status' REST endpoint "
-    "(docs.agora.io/en/conversational-ai/rest-api/agent/query), but this pass could "
-    "not confirm its exact URL/response schema from official docs, so it is not "
-    "called here. This endpoint can be stale or wrong if the backend process "
-    "restarted (registry is cleared) or if Agora already stopped the agent "
-    "server-side (idle timeout, error) without Tocsin being told."
+    "channel, with no round trip to Agora. Prefer GET /agent-status/{channel_name} "
+    "for a truthful answer -- this endpoint exists only for the case where you "
+    "want the local guess without paying for a network call, and it can be stale "
+    "or wrong if the backend process restarted (registry cleared) or Agora already "
+    "stopped the agent server-side without telling us."
   ),
 )
 async def get_local_agent_session_state(channel_name: str) -> dict[str, Any]:
@@ -1396,6 +1439,110 @@ async def get_local_agent_session_state(channel_name: str) -> dict[str, Any]:
     "live_agora_state_verified": False,
     "note": (
       "This reflects Tocsin's local record only, not a live Agora query. See "
-      "docs/agora/RESEARCH.md for details."
+      "GET /agent-status/{channel_name} for the real thing."
     ),
   }
+
+
+@router.get(
+  "/agent-status/{channel_name}",
+  summary="Query Live Agent Status From Agora",
+  description=(
+    "Live status query against Agora's own Conversational AI agent endpoint -- "
+    "not a local guess. Resolves the agent_id from Tocsin's local registry for "
+    "this channel (or from ?agent_id= if the caller already knows it, e.g. after "
+    "a backend restart wiped the registry), then calls Agora's real "
+    "GET /v2/projects/{appid}/agents/{agentId}. Schema confirmed 2026-09-02 "
+    "against docs.agora.io/en/api-reference/api-ref/conversational-ai/query."
+  ),
+)
+async def get_live_agent_status(
+  channel_name: str, agent_id: str | None = None
+) -> dict[str, Any]:
+  resolved_agent_id = agent_id or ACTIVE_AGENTS.get(channel_name)
+  if not resolved_agent_id:
+    raise HTTPException(
+      status_code=status.HTTP_404_NOT_FOUND,
+      detail=(
+        f"No agent_id known for channel '{channel_name}' -- no local record, and "
+        "none was passed via ?agent_id="
+      ),
+    )
+
+  app_id = os.getenv("AGORA_APP_ID", "").strip()
+  customer_id = os.getenv("AGORA_CUSTOMER_ID", "").strip()
+  customer_secret = os.getenv("AGORA_CUSTOMER_SECRET", "").strip()
+  if not app_id or not customer_id or not customer_secret:
+    raise HTTPException(
+      status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+      detail="Agora credentials are not configured on the backend server.",
+    )
+  auth_str = f"{customer_id}:{customer_secret}"
+  headers = {
+    "Authorization": f"Basic {base64.b64encode(auth_str.encode('utf-8')).decode('utf-8')}"
+  }
+
+  result = await query_agent_status(app_id, headers, resolved_agent_id)
+  if result is None:
+    raise HTTPException(
+      status_code=status.HTTP_502_BAD_GATEWAY,
+      detail=f"Agora status query failed for agent '{resolved_agent_id}'.",
+    )
+  return {"channel_name": channel_name, "live_agora_state_verified": True, **result}
+
+
+@router.get(
+  "/agents",
+  summary="List Agents Running On This Agora Account",
+  description=(
+    "Account-wide agent listing, not scoped to any one channel -- for finding "
+    "'zombie' agents left running from earlier test sessions (each one still "
+    "consumes managed-model minutes until stopped). Schema confirmed 2026-09-02 "
+    "against docs.agora.io/en/api-reference/api-ref/conversational-ai/list. "
+    "Defaults to RUNNING agents from the last 2 hours, matching Agora's own "
+    "endpoint defaults; pass state/channel/limit/cursor to widen the search."
+  ),
+)
+async def list_agora_agents(
+  channel: str | None = None,
+  state: int | None = None,
+  limit: int | None = None,
+  cursor: str | None = None,
+) -> dict[str, Any]:
+  app_id = os.getenv("AGORA_APP_ID", "").strip()
+  customer_id = os.getenv("AGORA_CUSTOMER_ID", "").strip()
+  customer_secret = os.getenv("AGORA_CUSTOMER_SECRET", "").strip()
+  if not app_id or not customer_id or not customer_secret:
+    raise HTTPException(
+      status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+      detail="Agora credentials are not configured on the backend server.",
+    )
+  auth_str = f"{customer_id}:{customer_secret}"
+  headers = {
+    "Authorization": f"Basic {base64.b64encode(auth_str.encode('utf-8')).decode('utf-8')}"
+  }
+  params: dict[str, Any] = {}
+  if channel:
+    params["channel"] = channel
+  if state is not None:
+    params["state"] = str(state)
+  if limit is not None:
+    params["limit"] = str(limit)
+  if cursor:
+    params["cursor"] = cursor
+
+  url = f"https://api.agora.io/api/conversational-ai-agent/v2/projects/{app_id}/agents"
+  try:
+    async with httpx.AsyncClient(timeout=8.0) as client:
+      resp = await client.get(url, headers=headers, params=params)
+  except httpx.HTTPError as exc:
+    raise HTTPException(
+      status_code=status.HTTP_502_BAD_GATEWAY,
+      detail=f"Network error listing agents from Agora: {exc}",
+    )
+  if resp.status_code != 200:
+    raise HTTPException(
+      status_code=status.HTTP_502_BAD_GATEWAY,
+      detail=f"Agora agent list failed (HTTP {resp.status_code}): {resp.text[:300]}",
+    )
+  return resp.json()

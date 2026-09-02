@@ -944,3 +944,198 @@ async def test_mcp_servers_wire_under_managed_openai_llm_too(monkeypatch):
         }
     ]
     assert props["advanced_features"]["enable_tools"] is True
+
+
+# ─── Live agent status / account-wide listing ────────────────────────────────
+#
+# A mentor pointed us at the real "query agent status" and "list agents"
+# endpoints we had previously flagged in RESEARCH.md as CREDENTIAL REQUIRED /
+# schema-unconfirmed. Tocsin could previously only report its own in-memory
+# guess about whether an agent was still running, which goes stale the moment
+# the backend restarts or Agora stops the agent server-side. These lock in the
+# request/response shape confirmed against
+# docs.agora.io/en/api-reference/api-ref/conversational-ai/query and .../list.
+
+
+@pytest.mark.asyncio
+async def test_agent_status_queries_agora_live_using_local_registry(monkeypatch):
+    _agora_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "mock_gemini_api_key")
+
+    start_client = _mock_agora_client()
+    with patch("app.api.agora.httpx.AsyncClient", return_value=start_client):
+        start_resp = await _start_agent(
+            {"channel_name": "status_check_room", "agent_uid": 9999}
+        )
+    agent_id = start_resp.json()["agent_id"]
+
+    status_client = AsyncMock()
+    status_client.get.return_value = Response(
+        status_code=200,
+        json={
+            "message": "ok",
+            "start_ts": 1735035893,
+            "stop_ts": 0,
+            "status": "RUNNING",
+            "name": "tocsin_agent_status_check_room",
+            "agent_id": agent_id,
+        },
+    )
+    status_client.__aenter__.return_value = status_client
+    status_client.__aexit__.return_value = None
+
+    with patch("app.api.agora.httpx.AsyncClient", return_value=status_client):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(f"/api/agora/agent-status/status_check_room")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["live_agora_state_verified"] is True
+    assert data["status"] == "RUNNING"
+    assert data["agent_id"] == agent_id
+    # Queried the real per-agent endpoint, not the list endpoint.
+    called_url = status_client.get.call_args.args[0]
+    assert called_url.endswith(f"/agents/{agent_id}")
+
+
+@pytest.mark.asyncio
+async def test_agent_status_404s_when_nothing_known_locally(monkeypatch):
+    """No local record and no ?agent_id= given -- must fail loudly, not guess."""
+    _agora_env(monkeypatch)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/agora/agent-status/never_started_room")
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_agent_status_accepts_explicit_agent_id_override(monkeypatch):
+    """Lets a caller check a specific agent_id after a backend restart wiped ACTIVE_AGENTS."""
+    _agora_env(monkeypatch)
+
+    status_client = AsyncMock()
+    status_client.get.return_value = Response(
+        status_code=200,
+        json={
+            "message": "ok",
+            "start_ts": 1735035893,
+            "stop_ts": 0,
+            "status": "STOPPED",
+            "name": "orphaned_agent",
+            "agent_id": "orphan_123",
+        },
+    )
+    status_client.__aenter__.return_value = status_client
+    status_client.__aexit__.return_value = None
+
+    with patch("app.api.agora.httpx.AsyncClient", return_value=status_client):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                "/api/agora/agent-status/some_room", params={"agent_id": "orphan_123"}
+            )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "STOPPED"
+
+
+@pytest.mark.asyncio
+async def test_agent_status_502s_when_agora_query_fails(monkeypatch):
+    """A failed Agora lookup must surface as an error, never as a silent guess."""
+    _agora_env(monkeypatch)
+
+    status_client = AsyncMock()
+    status_client.get.return_value = Response(status_code=500, text="internal error")
+    status_client.__aenter__.return_value = status_client
+    status_client.__aexit__.return_value = None
+
+    with patch("app.api.agora.httpx.AsyncClient", return_value=status_client):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                "/api/agora/agent-status/some_room", params={"agent_id": "whatever"}
+            )
+
+    assert resp.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_list_agents_calls_the_account_wide_endpoint(monkeypatch):
+    """
+    The zombie-hunting use case: list every RUNNING agent on the account, not
+    scoped to a channel we already know about.
+    """
+    _agora_env(monkeypatch)
+
+    list_client = AsyncMock()
+    list_client.get.return_value = Response(
+        status_code=200,
+        json={
+            "data": {
+                "count": 2,
+                "list": [
+                    {"agent_id": "a1", "status": "RUNNING", "start_ts": 111},
+                    {"agent_id": "a2", "status": "RUNNING", "start_ts": 222},
+                ],
+            },
+            "meta": {"cursor": "", "total": 2},
+            "status": "ok",
+        },
+    )
+    list_client.__aenter__.return_value = list_client
+    list_client.__aexit__.return_value = None
+
+    with patch("app.api.agora.httpx.AsyncClient", return_value=list_client):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/agora/agents")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["data"]["count"] == 2
+    called_url = list_client.get.call_args.args[0]
+    assert called_url.endswith("/agents")
+    assert "agents/" not in called_url.rsplit("/agents", 1)[0]
+
+
+@pytest.mark.asyncio
+async def test_list_agents_forwards_filters(monkeypatch):
+    _agora_env(monkeypatch)
+
+    list_client = AsyncMock()
+    list_client.get.return_value = Response(
+        status_code=200,
+        json={"data": {"count": 0, "list": []}, "meta": {"cursor": "", "total": 0}, "status": "ok"},
+    )
+    list_client.__aenter__.return_value = list_client
+    list_client.__aexit__.return_value = None
+
+    with patch("app.api.agora.httpx.AsyncClient", return_value=list_client):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                "/api/agora/agents",
+                params={"channel": "some_room", "state": 4, "limit": 5},
+            )
+
+    assert resp.status_code == 200
+    forwarded_params = list_client.get.call_args.kwargs["params"]
+    assert forwarded_params["channel"] == "some_room"
+    assert forwarded_params["state"] == "4"
+    assert forwarded_params["limit"] == "5"
+
+
+@pytest.mark.asyncio
+async def test_list_agents_blocked_when_credentials_missing(monkeypatch):
+    monkeypatch.delenv("AGORA_APP_ID", raising=False)
+    monkeypatch.delenv("AGORA_CUSTOMER_ID", raising=False)
+    monkeypatch.delenv("AGORA_CUSTOMER_SECRET", raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/agora/agents")
+
+    assert resp.status_code == 503
