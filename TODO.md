@@ -5,12 +5,15 @@ Auto-maintained by Claude: an entry is added when work is identified, and delete
 it's done. Do not treat an entry's presence here as "not started"; check the note for
 current state. This file is the resume point after any session/context reset.
 
-Last updated: 2026-09-01 (live voice-tested with a real microphone in real Chrome;
-found and fixed the actual root cause of "Sorry, I encountered an issue" on every
-turn — composed_tools was defaulting to a WebSocket-only Gemini model against a
-REST-only endpoint. Speaker-labeled transcript delivery confirmed working live.
-Items 4/6's remaining gaps are now narrow: /speak untested, MCP tool invocation
-unconfirmed (discovery confirmed, a call is not).).
+Last updated: 2026-09-03 (wired and live-verified real Agora agent-status/list
+endpoints — closes the "can't tell if an agent is really still running" gap;
+composed_tools now defaults to Agora-managed OpenAI, keyless, live-verified
+against the real API alongside the existing BYOK-Gemini option; fixed a real
+honesty bug where every new incident was seeded with a fabricated "Possible
+Cause" before any evidence existed. Asked the MCP tool-invocation question
+directly in the EchoSphere mentor Q&A — got a debugging path (Agora Skills
+diagnostic + a reference MCP server to diff against), not yet acted on, see
+item 6.).
 
 ---
 
@@ -54,11 +57,39 @@ all day. Fixed with a dedicated `composed_tools_llm_model` field (default
 back-and-forth voice conversation, correctly transcribed both sides. Also newly
 confirmed live: Agora's undocumented-URL "Query agent status" endpoint is
 `GET /api/conversational-ai-agent/v2/projects/{appid}/agents/{agentId}` (previously
-`NOT USED` in RESEARCH.md's capability matrix pending confirmation — now confirmed).
+`NOT USED` in RESEARCH.md's capability matrix pending confirmation — now confirmed;
+now properly wired as `GET /api/agora/agent-status/{channel_name}`, see item below).
 **Still not confirmed:** whether the agent actually invoked an MCP tool through a
 real conversational turn (the live conversation so far covered general Q&A, not a
 tool-triggering question like "what's the weather risk" — `mock-services` logs
 show the agent's `ListToolsRequest` discovery succeeding, but no tool *call* yet).
+
+**2026-09-02/03 — asked mentors directly, got a debugging path, not yet acted on.**
+Asked this exact question live in the EchoSphere mentor Q&A (Nitin read it out:
+"the agent only ever lists our tools, it never actually calls one"). Nitin's answer,
+plus a follow-up WhatsApp exchange:
+- He offered a real reference implementation to compare our MCP server against:
+  `github.com/nitin4real/Dummy-MCP-SSE`. **Not yet cloned or diffed against our own
+  `mock-services/server.py`.**
+- He explicitly recommended asking **Agora Skills** (`npx skills add AgoraIO/skills`,
+  already installable, not yet added to this repo) directly: tell the coding agent
+  "the agent lists MCP tools but never calls one — is this an Agora SDK issue or a
+  tool/triggering issue?" so it can rule Agora's own SDK in or out before we assume
+  the bug is in our server. **Not yet tried.**
+- He offered a live debug call same night ("if you want to debug the mcp server
+  issue right now over a call, I'm available for another half an hour") — declined
+  due to being mid-task; he said "no worries, check in with me tmrw." He separately
+  offered to share "a skill to create an MCP server... you can use it to fix your mcp
+  issue maybe" the next day. **Neither the call nor that skill has happened yet —
+  explicitly the next thing to do, per direct user instruction 2026-09-03.**
+- In the public Q&A he also gave the same general debugging order-of-operations for
+  anyone with latency or misbehavior: use Agora Skills first to rule in/out an
+  Agora-SDK-level cause before assuming it's your own code.
+
+**Next session should:** (1) clone/read `Dummy-MCP-SSE` and diff its shape against
+`mock-services/server.py`'s SSE endpoint and tool schema; (2) install Agora Skills
+and literally ask it the diagnostic question above; (3) follow up with Nitin for the
+promised MCP-server-creation skill and/or the live debug call.
 
 ### 7. Gemini API latency is inconsistent in this environment — worth monitoring
 **Status:** observed, mitigated (not "fixed" — the underlying cause is external).
@@ -126,6 +157,28 @@ None open right now.
 ---
 
 ## Recently completed (kept briefly for context, then deleted next pass)
+
+- ✅ **Real Agora agent-status and account-wide agent-listing endpoints, live-verified**
+  (2026-09-03). Mentor-provided contracts for two endpoints RESEARCH.md had flagged as
+  unconfirmed, cross-checked against a direct fetch of Agora's own docs before wiring:
+  `GET /api/agora/agent-status/{channel_name}` (real Agora status, not a local guess)
+  and `GET /api/agora/agents` (account-wide listing, for finding zombie agents still
+  burning managed-model minutes). Live-verified against the real account: started a
+  real agent, got Agora's own `"RUNNING"` back, stopped it, got `"STOPPED"` with a
+  `stop_ts`; the account-wide list correctly returned zero lingering agents.
+
+- ✅ **`composed_tools` now defaults to Agora-managed OpenAI, needs zero model keys**
+  (2026-09-03), per the EchoSphere organizers' stated preference for managed models.
+  New `composed_tools_llm_vendor` field (`"openai"` default, `"gemini"` still
+  available). Live-verified against the real Agora API: both vendor choices returned
+  HTTP 200 with a real `agent_id` and Agora-reported `"RUNNING"`, confirmed stopped
+  after cleanup. Wired into the `/voice-test` UI's Conversational Agent panel.
+
+- ✅ **Fabricated "Possible Cause" removed from every new incident** (2026-09-03).
+  `simulator.create_incident` seeded a Hypothesis ("Potential TECHNICAL_INCIDENT
+  risk", 35% confidence) before any evidence existed — a direct violation of the
+  project's "organize evidence without inventing certainty" principle, and visibly
+  misleading on a completely fresh incident. Hypotheses now start empty.
 
 - ✅ **Severe, more complete version of a bug found and fixed: `USE_SQLITE_FALLBACK`
   was NOT actually short-circuiting Postgres, so test runs were still silently
