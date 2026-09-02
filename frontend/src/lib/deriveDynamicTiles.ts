@@ -86,8 +86,44 @@ function toTitleCase(entity: string): string {
     .join(' ');
 }
 
+/**
+ * Verb phrases that mark where a subject ends and a predicate begins.
+ *
+ * Mirrors _PREDICATE_MARKERS / _canonical_entity in
+ * backend/app/engine/incident_derivation.py -- kept in sync by hand, as there is no
+ * shared source of truth across the Python and TypeScript runtimes (same caveat as
+ * the UNHEALTHY vocabulary).
+ *
+ * Live-observed 2026-09-02: the extractor emitted "cdn edge network" AND "cdn edge
+ * network is fully" as separate entities, and "login api" alongside "login api is
+ * returning http 503". Keying tiles on the raw string rendered one real service as
+ * two tiles, and a recovery claim never superseded the outage claim it was reporting
+ * on -- so a tile could go red but never green again.
+ */
+const PREDICATE_MARKERS = [
+  ' is ', ' are ', ' was ', ' were ', ' has ', ' have ', ' had ',
+  ' returns ', ' returning ', ' went ', ' goes ', ' became ', ' keeps ',
+];
+
+/**
+ * Reduce an extractor-supplied entity to the subject it names, so the same real
+ * service collapses to one tile across turns.
+ *
+ * Deliberately conservative: trims only at an explicit predicate marker. It does not
+ * attempt semantic aliasing -- "kafka broker" and "kafka event broker cluster" stay
+ * distinct, because deciding those name one service is a judgement about the world,
+ * and merging two genuinely different failures would hide one of them.
+ */
 function normalizeEntityKey(entity: string): string {
-  return entity.toLowerCase().trim();
+  let text = entity.toLowerCase().trim();
+  for (const marker of PREDICATE_MARKERS) {
+    const idx = text.indexOf(marker);
+    if (idx > 0) {
+      text = text.slice(0, idx);
+      break;
+    }
+  }
+  return text.split(/\s+/).join(' ').replace(/^[\s,.;:-]+|[\s,.;:-]+$/g, '');
 }
 
 type Priority = 0 | 1 | 2 | 3 | 4;
@@ -143,7 +179,10 @@ export function deriveDynamicTiles(
     if (!key) continue;
     const existing = groups.get(key);
     if (!existing || new Date(claim.timestamp).getTime() > new Date(existing.latest.timestamp).getTime()) {
-      groups.set(key, { latest: claim, original: claim.entity });
+      // Label from the canonical key, not the raw string: when the extractor leaks
+      // predicate text into the subject, `claim.entity` renders as "Login Api Is
+      // Returning Http 503" while the key it grouped under is "login api".
+      groups.set(key, { latest: claim, original: key });
     }
   }
 

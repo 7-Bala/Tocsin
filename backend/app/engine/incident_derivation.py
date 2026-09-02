@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 
 from app.models.incident import (
+    Claim,
     Hypothesis,
     HypothesisStatus,
     IncidentState,
@@ -65,6 +66,62 @@ def _is_unhealthy(value: str) -> bool:
     return any(token in lowered for token in UNHEALTHY_VALUES)
 
 
+# Verb phrases that mark where a subject ends and a predicate begins. The extractor
+# is supposed to put only the subject in `entity`, but live-observed 2026-09-02 it
+# emitted BOTH "cdn edge network" and "cdn edge network is fully" as separate
+# entities, and both "login api" and "login api is returning http 503".
+#
+# That is not cosmetic. Every function here keys "latest claim per entity" on this
+# string, so a recovery report filed under a slightly different spelling never
+# supersedes the outage claim -- the entity stays unhealthy forever and severity
+# counts one real service twice. It makes the record a ratchet that can only ever
+# get worse, which is the opposite of tracking the conversation.
+_PREDICATE_MARKERS = (
+    " is ", " are ", " was ", " were ", " has ", " have ", " had ",
+    " returns ", " returning ", " went ", " goes ", " became ", " keeps ",
+)
+
+
+def _canonical_entity(entity: str) -> str:
+    """
+    Reduce an extractor-supplied entity to the subject it names, so the same real
+    service collapses to one key across turns.
+
+    Deliberately conservative: it only trims at an explicit predicate marker and
+    strips trailing filler. It does NOT attempt semantic aliasing -- "kafka broker"
+    and "kafka event broker cluster" remain distinct here, because deciding those
+    are the same service is a judgement about the world, not string handling, and
+    guessing it wrong would silently merge two genuinely different failures.
+    """
+    text = (entity or "").lower().strip()
+    if not text:
+        return ""
+    for marker in _PREDICATE_MARKERS:
+        idx = text.find(marker)
+        if idx > 0:
+            text = text[:idx]
+            break
+    return " ".join(text.split()).strip(" ,.;:-")
+
+
+def _latest_value_by_entity(state: IncidentState) -> dict[str, str]:
+    """
+    Latest claim value per canonical entity. Shared by severity, status and any
+    future rule, so they can never disagree about what is currently broken.
+    """
+    latest_value: dict[str, str] = {}
+    latest_ts: dict[str, str] = {}
+    for claim in state.claims or []:
+        entity = _canonical_entity(claim.entity)
+        if not entity:
+            continue
+        ts = claim.timestamp or ""
+        if entity not in latest_ts or ts > latest_ts[entity]:
+            latest_ts[entity] = ts
+            latest_value[entity] = claim.value or ""
+    return latest_value
+
+
 def _title_case(text: str) -> str:
     return " ".join(w[:1].upper() + w[1:] if w else w for w in (text or "").split())
 
@@ -82,17 +139,7 @@ def derive_severity(state: IncidentState) -> SeverityLevel:
     previous behavior of staying at whatever it was seeded with meant a resolved
     incident still screamed CRITICAL forever.
     """
-    latest_by_entity: dict[str, str] = {}
-    latest_ts: dict[str, str] = {}
-    for claim in state.claims or []:
-        entity = (claim.entity or "").lower().strip()
-        if not entity:
-            continue
-        ts = claim.timestamp or ""
-        if entity not in latest_ts or ts > latest_ts[entity]:
-            latest_ts[entity] = ts
-            latest_by_entity[entity] = claim.value or ""
-
+    latest_by_entity = _latest_value_by_entity(state)
     unhealthy_entities = sum(1 for v in latest_by_entity.values() if _is_unhealthy(v))
     open_conflicts = sum(
         1 for c in (state.conflicts or []) if getattr(c, "status", None) != "RESOLVED"
@@ -130,18 +177,7 @@ def derive_status(state: IncidentState) -> IncidentStatus:
     if not claims:
         return IncidentStatus.IDLE
 
-    latest_by_entity: dict[str, str] = {}
-    latest_ts: dict[str, str] = {}
-    for claim in claims:
-        entity = (claim.entity or "").lower().strip()
-        if not entity:
-            continue
-        ts = claim.timestamp or ""
-        if entity not in latest_ts or ts > latest_ts[entity]:
-            latest_ts[entity] = ts
-            latest_by_entity[entity] = claim.value or ""
-
-    if any(_is_unhealthy(v) for v in latest_by_entity.values()):
+    if any(_is_unhealthy(v) for v in _latest_value_by_entity(state).values()):
         return IncidentStatus.DEGRADING
 
     open_work = (
@@ -168,14 +204,33 @@ def derive_title(state: IncidentState) -> str | None:
     Deliberately NOT a diagnosis: "Redis Session Store Down" restates a reported
     claim. It does not assert a cause, which is what `hypotheses` is for.
     """
-    claims = [c for c in (state.claims or []) if c.entity and c.value]
+    # Only the CURRENT claim per entity is eligible. Scanning every claim ever made
+    # (the original behavior) meant the headline could keep asserting an outage that
+    # a later recovery report had already cleared -- live-observed 2026-09-02, the
+    # title read "Cdn Edge Network — Offline In Three Regions" while that entity's
+    # latest claim was "healthy". Severity and status already read latest-per-entity;
+    # sharing that view is what stops the header contradicting the chips beside it.
+    latest_by_entity: dict[str, Claim] = {}
+    for claim in state.claims or []:
+        if not (claim.entity and claim.value):
+            continue
+        key = _canonical_entity(claim.entity)
+        if not key:
+            continue
+        current = latest_by_entity.get(key)
+        if current is None or (claim.timestamp or "") > (current.timestamp or ""):
+            latest_by_entity[key] = claim
+
+    claims = list(latest_by_entity.values())
     if not claims:
         return None
 
     ordered = sorted(claims, key=lambda c: c.timestamp or "", reverse=True)
     chosen = next((c for c in ordered if _is_unhealthy(c.value)), ordered[0])
 
-    entity = _title_case(chosen.entity.strip())
+    # Canonical form here too, so a title never reads "Login Api Is Returning
+    # Http 503 — Error" when the extractor leaks predicate text into the subject.
+    entity = _title_case(_canonical_entity(chosen.entity) or chosen.entity.strip())
     value = (chosen.value or "").strip()
     # Keep the headline short: a title is a label, not the claim's full text.
     if len(value) > 42:

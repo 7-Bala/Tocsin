@@ -338,3 +338,70 @@ describe('deriveDynamicTiles — priority ordering (plan §6.1)', () => {
     assert.equal(result.tiles[1].entity, 'fresh thing');
   });
 });
+
+describe('entity canonicalization — extractor name drift', () => {
+  // Live-observed 2026-09-02 against the running backend: the extractor emitted
+  // "cdn edge network" AND "cdn edge network is fully" as separate entities, and
+  // "login api" alongside "login api is returning http 503". Grouping on the raw
+  // string rendered one real service as two tiles, and a recovery claim never
+  // superseded the outage claim it reported on — so a tile could go red but never
+  // green again. Mirrors test_incident_derivation.py.
+
+  test('a drifted entity name collapses into one tile, not two', () => {
+    const tiles = deriveDynamicTiles(
+      makeState({
+        claims: [
+          makeClaim({ entity: 'login api', value: 'down', timestamp: '2026-09-02T10:00:00Z' }),
+          makeClaim({
+            entity: 'login api is returning http 503',
+            value: 'error',
+            timestamp: '2026-09-02T11:00:00Z',
+          }),
+        ],
+      }),
+      new Date('2026-09-02T11:05:00Z')
+    ).tiles;
+    assert.equal(tiles.length, 1);
+  });
+
+  test('a recovery filed under a drifted name still supersedes the outage claim', () => {
+    const tiles = deriveDynamicTiles(
+      makeState({
+        claims: [
+          makeClaim({ entity: 'cdn edge network', value: 'offline', timestamp: '2026-09-02T10:00:00Z' }),
+          makeClaim({
+            entity: 'cdn edge network is fully',
+            value: 'healthy',
+            timestamp: '2026-09-02T11:00:00Z',
+          }),
+        ],
+      }),
+      new Date('2026-09-02T11:05:00Z')
+    ).tiles;
+    assert.equal(tiles.length, 1);
+    assert.equal(tiles[0].value, 'Healthy', 'the newer recovery claim must win');
+  });
+
+  test('the label drops predicate text leaked into the entity', () => {
+    const tiles = deriveDynamicTiles(
+      makeState({
+        claims: [makeClaim({ entity: 'login api is returning http 503', value: 'down' })],
+      }),
+      new Date('2026-09-02T11:05:00Z')
+    ).tiles;
+    assert.equal(tiles[0].label, 'Login Api');
+  });
+
+  test('genuinely distinct services are never merged', () => {
+    const tiles = deriveDynamicTiles(
+      makeState({
+        claims: [
+          makeClaim({ entity: 'kafka broker', value: 'crashed' }),
+          makeClaim({ entity: 'payment gateway', value: 'down' }),
+        ],
+      }),
+      new Date('2026-09-02T11:05:00Z')
+    ).tiles;
+    assert.equal(tiles.length, 2);
+  });
+});

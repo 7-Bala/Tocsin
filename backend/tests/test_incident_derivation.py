@@ -285,3 +285,75 @@ def test_apply_derivations_reports_no_changes_when_nothing_moved():
     state = make_state(claims=[make_claim("redis", "down")], observations=[make_obs("a guess")])
     apply_derivations(state)
     assert apply_derivations(state) == []
+
+
+# ─── Entity canonicalization ─────────────────────────────────────────────────
+#
+# Live-observed 2026-09-02 against the running backend: the extractor emitted
+# "cdn edge network" and "cdn edge network is fully" as two separate entities,
+# and "login api" alongside "login api is returning http 503". Because every rule
+# here keys "latest claim per entity" on that raw string, a recovery report filed
+# under the drifted spelling never superseded the outage claim. The entity stayed
+# unhealthy forever and severity counted one real service twice -- a ratchet that
+# could only ever get worse. These lock the collapse in.
+
+def test_recovery_clears_an_entity_even_when_the_extractor_drifts_the_name():
+    """The exact live failure: recovery filed under a drifted name must still count."""
+    state = make_state(claims=[
+        make_claim("cdn edge network", "offline", ts="2026-09-02T10:00:00Z"),
+        make_claim("cdn edge network is fully", "healthy", ts="2026-09-02T11:00:00Z"),
+    ])
+    assert derive_severity(state) == SeverityLevel.LOW
+    assert derive_status(state) == IncidentStatus.STABILIZED
+
+
+def test_drifted_names_are_not_counted_as_two_broken_services():
+    state = make_state(claims=[
+        make_claim("login api", "down"),
+        make_claim("login api is returning http 503", "error"),
+    ])
+    # One real service, so MEDIUM -- not the HIGH that double-counting produced.
+    assert derive_severity(state) == SeverityLevel.MEDIUM
+
+
+def test_title_drops_predicate_text_leaked_into_the_entity():
+    state = make_state(claims=[make_claim("login api is returning http 503", "down")])
+    assert derive_title(state) == "Login Api — Down"
+
+
+def test_genuinely_distinct_services_are_never_merged():
+    """
+    Canonicalization must not become semantic aliasing. Deciding that "kafka broker"
+    and "payment gateway" are one service is a judgement about the world; silently
+    merging two real failures would hide one of them.
+    """
+    state = make_state(claims=[
+        make_claim("kafka broker", "crashed"),
+        make_claim("payment gateway", "down"),
+    ])
+    assert derive_severity(state) == SeverityLevel.HIGH
+
+
+def test_title_ignores_an_outage_a_later_recovery_already_cleared():
+    """
+    Live-observed 2026-09-02: the header read "Cdn Edge Network — Offline In Three
+    Regions" while that entity's latest claim was "healthy", because derive_title
+    scanned every claim ever made while severity/status read latest-per-entity. Two
+    definitions of "what's broken" in one module let the title contradict the chips
+    beside it.
+    """
+    state = make_state(claims=[
+        make_claim("cdn edge network", "offline", ts="2026-09-02T10:00:00Z"),
+        make_claim("cdn edge network", "healthy", ts="2026-09-02T11:00:00Z"),
+        make_claim("login api", "error", ts="2026-09-02T10:30:00Z"),
+    ])
+    # The only thing still broken is the login api.
+    assert derive_title(state) == "Login Api — Error"
+
+
+def test_title_falls_back_to_the_latest_claim_when_nothing_is_broken():
+    state = make_state(claims=[
+        make_claim("cdn edge network", "offline", ts="2026-09-02T10:00:00Z"),
+        make_claim("cdn edge network", "healthy", ts="2026-09-02T11:00:00Z"),
+    ])
+    assert derive_title(state) == "Cdn Edge Network — Healthy"
