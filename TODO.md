@@ -5,15 +5,15 @@ Auto-maintained by Claude: an entry is added when work is identified, and delete
 it's done. Do not treat an entry's presence here as "not started"; check the note for
 current state. This file is the resume point after any session/context reset.
 
-Last updated: 2026-09-03 (wired and live-verified real Agora agent-status/list
-endpoints — closes the "can't tell if an agent is really still running" gap;
-composed_tools now defaults to Agora-managed OpenAI, keyless, live-verified
-against the real API alongside the existing BYOK-Gemini option; fixed a real
-honesty bug where every new incident was seeded with a fabricated "Possible
-Cause" before any evidence existed. Asked the MCP tool-invocation question
-directly in the EchoSphere mentor Q&A — got a debugging path (Agora Skills
-diagnostic + a reference MCP server to diff against), not yet acted on, see
-item 6.).
+Last updated: 2026-09-03 (installed Agora Skills on a mentor's recommendation and
+found the real root cause of the long-standing "MCP tools get listed but never
+called" mystery: transport was the undocumented "sse" instead of the only
+documented value, "streamable_http" — fixed on both sides and live-verified a
+genuine tool call for the first time, USGS earthquake API and all. Also this
+session: wired and live-verified real Agora agent-status/list endpoints;
+composed_tools now defaults to Agora-managed OpenAI, keyless, live-verified;
+fixed a real honesty bug where every new incident was seeded with a fabricated
+"Possible Cause" before any evidence existed.).
 
 ---
 
@@ -44,52 +44,6 @@ speaker-correct transcript delivery is working end-to-end, through either RTM or
 the legacy stream-message fallback (both call the same labeling path; which one
 fired specifically was not pinned down this pass due to console-log capture
 unreliability in this environment — worth confirming precisely next session).
-
-### 6. MCP tool-calling via the composed pipeline — payload accepted, real bug fixed
-**Status:** live-verified 2026-09-01. Found and fixed a second real bug beyond the
-asr/tts.params.url one: `composed_tools_llm_model` was defaulting to
-`gemini-3.1-flash-live-preview` (a WebSocket-Live-only model), but composed_tools
-calls the plain `streamGenerateContent` REST endpoint — confirmed via direct curl
-that Agora's real backend (and Google's own API) rejects that combination with
-HTTP 400. This is what caused "Sorry, I encountered an issue" on every single turn
-all day. Fixed with a dedicated `composed_tools_llm_model` field (default
-`gemini-3.6-flash`, confirmed working live). After the fix: the agent held a real
-back-and-forth voice conversation, correctly transcribed both sides. Also newly
-confirmed live: Agora's undocumented-URL "Query agent status" endpoint is
-`GET /api/conversational-ai-agent/v2/projects/{appid}/agents/{agentId}` (previously
-`NOT USED` in RESEARCH.md's capability matrix pending confirmation — now confirmed;
-now properly wired as `GET /api/agora/agent-status/{channel_name}`, see item below).
-**Still not confirmed:** whether the agent actually invoked an MCP tool through a
-real conversational turn (the live conversation so far covered general Q&A, not a
-tool-triggering question like "what's the weather risk" — `mock-services` logs
-show the agent's `ListToolsRequest` discovery succeeding, but no tool *call* yet).
-
-**2026-09-02/03 — asked mentors directly, got a debugging path, not yet acted on.**
-Asked this exact question live in the EchoSphere mentor Q&A (Nitin read it out:
-"the agent only ever lists our tools, it never actually calls one"). Nitin's answer,
-plus a follow-up WhatsApp exchange:
-- He offered a real reference implementation to compare our MCP server against:
-  `github.com/nitin4real/Dummy-MCP-SSE`. **Not yet cloned or diffed against our own
-  `mock-services/server.py`.**
-- He explicitly recommended asking **Agora Skills** (`npx skills add AgoraIO/skills`,
-  already installable, not yet added to this repo) directly: tell the coding agent
-  "the agent lists MCP tools but never calls one — is this an Agora SDK issue or a
-  tool/triggering issue?" so it can rule Agora's own SDK in or out before we assume
-  the bug is in our server. **Not yet tried.**
-- He offered a live debug call same night ("if you want to debug the mcp server
-  issue right now over a call, I'm available for another half an hour") — declined
-  due to being mid-task; he said "no worries, check in with me tmrw." He separately
-  offered to share "a skill to create an MCP server... you can use it to fix your mcp
-  issue maybe" the next day. **Neither the call nor that skill has happened yet —
-  explicitly the next thing to do, per direct user instruction 2026-09-03.**
-- In the public Q&A he also gave the same general debugging order-of-operations for
-  anyone with latency or misbehavior: use Agora Skills first to rule in/out an
-  Agora-SDK-level cause before assuming it's your own code.
-
-**Next session should:** (1) clone/read `Dummy-MCP-SSE` and diff its shape against
-`mock-services/server.py`'s SSE endpoint and tool schema; (2) install Agora Skills
-and literally ask it the diagnostic question above; (3) follow up with Nitin for the
-promised MCP-server-creation skill and/or the live debug call.
 
 ### 7. Gemini API latency is inconsistent in this environment — worth monitoring
 **Status:** observed, mitigated (not "fixed" — the underlying cause is external).
@@ -157,6 +111,30 @@ None open right now.
 ---
 
 ## Recently completed (kept briefly for context, then deleted next pass)
+
+- ✅ **MCP tool invocation actually confirmed working — root cause of "lists tools,
+  never calls one" found and fixed** (2026-09-03). This had been open since
+  2026-08-31. Asked it directly in the live EchoSphere mentor Q&A; Nitin's answer
+  was to install Agora Skills (`npx skills add AgoraIO/skills`) and consult it
+  rather than guess. Its bundled reference for Agora's own official MCP server
+  (`server-mcp.md`) mentioned "MCP Streamable HTTP protocol" — this project was
+  sending `"transport": "sse"` against a `/sse` endpoint, neither of which is a
+  documented value. Confirmed directly against Agora's own join-API docs: the
+  `transport` field only documents one valid value, `"streamable_http"`. Fixed
+  both sides of the connection together: `mock-services/server.py`'s
+  `mcp.run(transport="sse", ...)` → `transport="http"` (FastMCP's Streamable HTTP,
+  serving at `/mcp` not `/sse`), and `backend/app/api/agora.py`'s payload to match.
+  **Live-verified end-to-end**: started a real `composed_tools` agent through a
+  public ngrok tunnel to the corrected mock-services container, confirmed the
+  Streamable HTTP handshake succeeded from Agora's real infrastructure, then used
+  `POST /api/agora/agent-think` (also live-verifying TODO item 9 as a side effect)
+  to inject an earthquake-activity question. Mock-services' log showed, for the
+  first time ever, `Processing request of type CallToolRequest`, immediately
+  followed by a real call to USGS's live earthquake API returning `200 OK`. Agent
+  confirmed `STOPPED` afterward, ngrok torn down. Upgraded from `CREDENTIAL
+  REQUIRED` to `VERIFIED IN CODE` in RESEARCH.md. `github.com/nitin4real/Dummy-MCP-SSE`
+  was offered as a comparison reference but turned out unnecessary — the docs
+  fetch alone found the exact cause.
 
 - ✅ **Real Agora agent-status and account-wide agent-listing endpoints, live-verified**
   (2026-09-03). Mentor-provided contracts for two endpoints RESEARCH.md had flagged as

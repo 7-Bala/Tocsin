@@ -759,7 +759,7 @@ async def start_conversational_agent(
   if mcp_requested and not request.system_prompt:
     prompt = f"{prompt}\n\n{MCP_TOOL_ROSTER_NOTICE}"
 
-  sse_endpoint: str | None = None
+  mcp_endpoint: str | None = None
   payload: dict[str, Any]
 
   if request.voice_pipeline == "gemini_live":
@@ -913,16 +913,29 @@ async def start_conversational_agent(
       },
     }
     if mcp_requested:
-      sse_endpoint = mcp_url if mcp_url.endswith("/sse") else f"{mcp_url.rstrip('/')}/sse"
+      # transport must be "streamable_http" -- confirmed 2026-09-03 against a direct
+      # fetch of docs-md.agora.io/en/conversational-ai/rest-api/agent/join.md, which
+      # documents this field as accepting only that one value. Previously sent
+      # "sse" (undocumented) against a URL suffixed "/sse"; switched together with
+      # mock-services/server.py's own transport (see that file's comment) since
+      # both sides of the connection have to agree. Leading suspect for the
+      # long-standing "agent lists tools via ListToolsRequest but never calls one"
+      # symptom -- Agora's join API accepted the old undocumented "sse" value
+      # without error, so payload acceptance alone never proved it was correct.
+      # FastMCP's Streamable HTTP transport serves at "/mcp" by default
+      # (fastmcp.settings.streamable_http_path), not "/sse".
+      mcp_endpoint = mcp_url if mcp_url.endswith("/mcp") else f"{mcp_url.rstrip('/')}/mcp"
       payload["properties"]["llm"]["mcp_servers"] = [
         {
           "name": "tocsin-emergency-tools",
-          "endpoint": sse_endpoint,
-          "transport": "sse",
+          "endpoint": mcp_endpoint,
+          "transport": "streamable_http",
         }
       ]
       payload["properties"]["advanced_features"]["enable_tools"] = True
-      logger.info(f"Configured MCP server for agent: {sse_endpoint} (transport: sse)")
+      logger.info(
+        f"Configured MCP server for agent: {mcp_endpoint} (transport: streamable_http)"
+      )
 
   agora_url = (
     f"https://api.agora.io/api/conversational-ai-agent/v2/projects/{app_id}/join"
@@ -1035,7 +1048,7 @@ async def start_conversational_agent(
           )
         ),
         "mcp_enabled": mcp_requested,
-        "mcp_server_url": sse_endpoint,
+        "mcp_server_url": mcp_endpoint,
         "mcp_tool_calling_status": mcp_status,
       }
   except httpx.HTTPError as exc:

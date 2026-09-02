@@ -282,10 +282,51 @@ a real latency cost** — chosen only when the caller explicitly requests
 DOCS — NOT YET LIVE-VERIFIED"` for `composed_tools`. Regression tests
 (`test_agora_token.py`) assert the actual outbound JSON payload matches this
 documented shape and that `mllm.mcp_servers` is never sent regardless of pipeline
-choice. **What remains genuinely unverified: whether Agora's servers accept this
-exact payload, and whether the agent actually invokes a tool through it** — both
-require a live credentialed session (real `AGORA_CUSTOMER_ID`/`SECRET` +
-`GEMINI_API_KEY` + a running voice room), which was not performed in this pass.
+choice.
+
+### UPDATE 2026-09-03 — root cause of "lists tools, never calls one" found and fixed; live-verified
+
+Installed the official Agora Skills package (`npx skills add AgoraIO/skills`, per a
+mentor's direct recommendation in the EchoSphere Q&A) and consulted its bundled
+references rather than guessing. `references/conversational-ai/server-mcp.md`
+mentioned Agora's own official reference MCP server uses "MCP Streamable HTTP
+protocol" — not SSE. This project's `mcp_servers` payload was sending
+`"transport": "sse"` against an endpoint suffixed `/sse`, both undocumented.
+
+Confirmed directly against a fetch of
+`docs-md.agora.io/en/conversational-ai/rest-api/agent/join.md`: the `transport`
+field under `llm.mcp_servers` **only documents one valid value,
+`"streamable_http"`** — quoting the docs: *"transport (string, optional, possible
+values: streamable_http): Transport protocol type."* `"sse"` was never a
+documented value; Agora's join API simply accepted it without validation error,
+which is exactly why payload acceptance was never proof of correctness.
+
+Fixed both sides of the connection together (they have to agree):
+- `mock-services/server.py`: `mcp.run(transport="sse", ...)` → `mcp.run(transport="http", ...)`
+  (FastMCP's Streamable HTTP transport; confirmed via the installed `fastmcp==3.4.7`
+  source that this serves at path `/mcp` by default, not `/sse`).
+- `backend/app/api/agora.py`: `mcp_servers[0].transport` → `"streamable_http"`,
+  endpoint suffix `/sse` → `/mcp`.
+
+**Live-verified end-to-end 2026-09-03** — the first genuine tool *invocation* this
+project has ever observed, not just discovery: started a real `composed_tools`
+agent against the corrected config (via a public ngrok tunnel to the rebuilt
+mock-services container), confirmed the Streamable HTTP handshake succeeded from
+Agora's real infrastructure (`POST /mcp` 200, `POST /mcp` 202, `GET /mcp` 200 —
+the session-open sequence), confirmed `ListToolsRequest` succeeded (as always),
+then used `POST /api/agora/agent-think` to inject an unambiguous tool-triggering
+instruction ("check current earthquake activity near San Francisco using your
+earthquake monitoring tool"). Mock-services' log then showed, for the first time
+ever, `Processing request of type CallToolRequest`, immediately followed by a real
+outbound call to `earthquake.usgs.gov`'s live API returning `HTTP 200 OK`. Cleaned
+up: agent confirmed `STOPPED` via the new agent-status endpoint, ngrok tunnel torn
+down.
+
+Upgraded from `CREDENTIAL REQUIRED` to **`VERIFIED IN CODE`**: both Agora's
+acceptance of the corrected payload and the agent's actual tool invocation are now
+directly observed, not inferred. This also incidentally live-verified
+`POST /api/agora/agent-think` (TODO.md item 9) for the first time, since it was the
+mechanism used to trigger the test.
 
 ### Other findings from the 2026-08-31 release-notes pass
 
@@ -719,7 +760,7 @@ carries that status, because no live credentialed run was performed in this pass
 | Account-wide agent listing (`/api/agora/agents`) | `VERIFIED IN CODE` | **Live-verified 2026-09-03**: returned a real (empty) list of currently-running agents for this project's Agora account. For finding zombie agents left running from earlier sessions. |
 | Gemini Live `mllm` params, voice enum, `agora_vad` turn detection | `OFFICIAL DOCS ONLY` | Confirmed to match `docs.agora.io/en/conversational-ai/models/mllm/gemini` field-for-field. Not run against a live Gemini Live session in this pass. |
 | `mllm.mcp_servers` under `gemini_live` pipeline | `NOT USED` (confirmed unsupported) | **Resolved 2026-08-31**: never sent regardless of request — official docs confirm `mcp_servers` belongs under `llm`, not `mllm`. |
-| `llm.mcp_servers` under new `composed_tools` pipeline | `CREDENTIAL REQUIRED` | **Payload acceptance live-verified 2026-08-31** (see §11): Agora accepted the payload with `mcp_enabled: true` echoed back. Actual tool *invocation* through it is still unconfirmed — nothing in the live test window required the agent to call a tool. Stays `CREDENTIAL REQUIRED`, not `VERIFIED IN CODE`, until a tool call is actually observed. |
+| `llm.mcp_servers` under new `composed_tools` pipeline | `VERIFIED IN CODE` | **Root cause of "discovery only, no invocation" found and fixed 2026-09-03**: transport was `"sse"` (undocumented) against a `/sse` endpoint; official docs only document `"streamable_http"`. Fixed on both sides (this project's MCP server + the join payload) and live-verified: Agora's real infra completed the Streamable HTTP handshake, `ListToolsRequest` succeeded, and — for the first time — a `CallToolRequest` fired and the invoked tool made a real call to USGS's live earthquake API. |
 | `composed_tools` on Agora-managed OpenAI (`composed_tools_llm_vendor="openai"`, default) | `VERIFIED IN CODE` | **Live-verified 2026-09-03**: real Agora acceptance, real `agent_id`, `"status": "RUNNING"` confirmed via the new agent-status endpoint, then confirmed `"status": "STOPPED"` after cleanup. No OpenAI key of this project's own was sent. Tool invocation through it remains unconfirmed (see row above). |
 | `composed_tools` on BYOK Gemini (`composed_tools_llm_vendor="gemini"`) | `VERIFIED IN CODE` | Same live-verification treatment as the managed-OpenAI row, same day — this vendor option was kept, not replaced, when managed OpenAI became the default. |
 | Agora `/speak` TTS broadcast (spoken summaries) | `CREDENTIAL REQUIRED` | **Implemented 2026-08-31**: `POST /api/agora/speak` calls the documented `POST /v2/projects/{appid}/agents/{agentId}/speak` schema (`text`/`priority`/`interruptable`) against the agent tracked for a channel, returning 404 if none is running. Wired into `HandoffPanel`'s "🔊 Broadcast" button, sending the same `spoken_brief` text already generated for problem-statement item 11. Payload shape verified by regression tests; live audio delivery into a real channel not yet observed. |
@@ -748,7 +789,7 @@ carries that status, because no live credentialed run was performed in this pass
 | `gemini-3.1-flash-live-preview` as current model name | VERIFIED as of this fetch (preview model — expect rotation) |
 | Hand-built Gemini WS URL as `mllm.url` | UNVERIFIED — necessity vs redundancy not confirmed |
 | `mllm.mcp_servers` for tool-calling on Gemini Live | **CONFIRMED UNSUPPORTED, never sent** (2026-08-31) — docs describe `llm.mcp_servers` instead |
-| `llm.mcp_servers` via new `composed_tools` pipeline | **IMPLEMENTED 2026-08-31** per confirmed schema — `CREDENTIAL REQUIRED` for live verification (Agora acceptance + actual tool invocation both unverified) |
+| `llm.mcp_servers` via new `composed_tools` pipeline | **VERIFIED IN CODE (2026-09-03)** — transport fixed from undocumented `"sse"` to documented `"streamable_http"`; Agora acceptance AND actual tool invocation both directly observed live |
 | Web SDK `stream-message` event usage | VERIFIED — MATCHES OFFICIAL DOCS |
 | `agoraStreamDecoder.ts` exact wire format | UNVERIFIED AGAINST OFFICIAL DOCS — now has fixture tests proving fail-safe (`null`) behavior on unrecognized payloads; wire format itself still unconfirmed |
 | `.env.example` completeness for Agora vars | RESOLVED (2026-08-31) — `AGORA_CUSTOMER_ID`, `AGORA_CUSTOMER_SECRET`, `MCP_SERVER_PUBLIC_URL` now documented there |

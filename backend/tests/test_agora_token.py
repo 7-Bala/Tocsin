@@ -634,7 +634,7 @@ async def test_composed_tools_pipeline_wires_mcp_servers_under_llm(monkeypatch):
             data = resp.json()
             assert data["voice_pipeline"] == "composed_tools"
             assert data["mcp_enabled"] is True
-            assert data["mcp_server_url"] == "https://example.com/mcp/sse"
+            assert data["mcp_server_url"] == "https://example.com/mcp"
             assert "WIRED PER OFFICIAL DOCS" in data["mcp_tool_calling_status"]
             assert "NOT YET LIVE-VERIFIED" in data["mcp_tool_calling_status"]
 
@@ -666,8 +666,8 @@ async def test_composed_tools_pipeline_wires_mcp_servers_under_llm(monkeypatch):
             assert props["llm"]["mcp_servers"] == [
                 {
                     "name": "tocsin-emergency-tools",
-                    "endpoint": "https://example.com/mcp/sse",
-                    "transport": "sse",
+                    "endpoint": "https://example.com/mcp",
+                    "transport": "streamable_http",
                 }
             ]
 
@@ -939,8 +939,8 @@ async def test_mcp_servers_wire_under_managed_openai_llm_too(monkeypatch):
     assert props["llm"]["mcp_servers"] == [
         {
             "name": "tocsin-emergency-tools",
-            "endpoint": "https://example.com/mcp/sse",
-            "transport": "sse",
+            "endpoint": "https://example.com/mcp",
+            "transport": "streamable_http",
         }
     ]
     assert props["advanced_features"]["enable_tools"] is True

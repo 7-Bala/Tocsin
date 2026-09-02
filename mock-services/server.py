@@ -1783,7 +1783,18 @@ async def search_emergency_infrastructure(
 if __name__ == "__main__":
     port: int = int(os.getenv("PORT", "8001"))
     host: str = os.getenv("HOST", "0.0.0.0")
+    # transport="http" runs FastMCP's Streamable HTTP protocol at the default
+    # path "/mcp" (fastmcp.settings.streamable_http_path). Switched from "sse"
+    # 2026-09-03: Agora's official join-API docs document `transport` under
+    # `llm.mcp_servers` as accepting only "streamable_http" -- "sse" was never a
+    # documented value there. This is the leading suspect for the long-standing
+    # "agent discovers our tools (ListToolsRequest succeeds) but never actually
+    # invokes one" symptom (see docs/agora/RESEARCH.md §4, TODO.md item 6):
+    # ConvoAI's real MCP client may only be fully wired for the documented
+    # transport, with SSE tolerated for the initial handshake but not for
+    # dispatching a call. Not yet live-confirmed as the fix -- see TODO.md.
     logger.info(
-        f"Starting Tocsin Mock Services MCP Server on {host}:{port} (SSE transport) with 13 specialized tools..."
+        f"Starting Tocsin Mock Services MCP Server on {host}:{port} "
+        "(Streamable HTTP transport, path /mcp) with 13 specialized tools..."
     )
-    mcp.run(transport="sse", host=host, port=port)
+    mcp.run(transport="http", host=host, port=port)
