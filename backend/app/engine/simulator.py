@@ -121,15 +121,14 @@ class IncidentSimulator:
                         actor="SYSTEM",
                     )
                 ],
-                hypotheses=[
-                    Hypothesis(
-                        id="hypo-1",
-                        title=f"Potential {ev_type.value} risk",
-                        description="Initial sensor and dispatch assessment pending voice confirmation.",
-                        confidence=0.35,
-                        status=HypothesisStatus.PROPOSED,
-                    )
-                ],
+                # No seeded hypothesis here. A "Potential X risk" guess invented at
+                # creation time, before anyone has said anything, is exactly the kind
+                # of manufactured certainty the project's evidence model exists to
+                # avoid (see incident_derivation.derive_hypotheses -- hypotheses come
+                # only from utterances a human actually framed as one). Live-reported
+                # 2026-09-02: a judge opening a brand-new incident saw a confident
+                # 35%-labeled "Possible Cause" that nobody had proposed.
+                hypotheses=[],
                 actions_taken=[],
                 participants=[
                     Participant(
