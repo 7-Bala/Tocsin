@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field
 
 from fastapi import APIRouter, Header, HTTPException, status
 
+from app.engine.connection_manager import ws_manager
+from app.engine.repositories import incident_repo
 from app.engine.simulator import simulator
 from app.models.incident import (
     ApproveActionRequest,
@@ -17,6 +19,8 @@ from app.models.incident import (
     IncidentState,
     ProposeActionRequest,
     RejectActionRequest,
+    RenameIncidentRequest,
+    TimelineEntry,
     TriggerEventRequest,
     TriggerResolutionRequest,
 )
@@ -84,6 +88,48 @@ async def create_incident(request: CreateIncidentRequest) -> IncidentState:
         incident_id=request.incident_id,
         initial_symptoms=request.initial_symptoms,
     )
+
+
+@router.post(
+    "/{incident_id}/rename",
+    response_model=IncidentState,
+    summary="Rename an incident (pins the title against auto-derivation)",
+)
+async def rename_incident(incident_id: str, request: RenameIncidentRequest) -> IncidentState:
+    """
+    Set the incident title explicitly, as a human.
+
+    This also sets `title_auto_derived = False`, which permanently stops the
+    evidence-driven re-derivation in app/engine/incident_derivation.py from
+    overwriting it. A commander's chosen name outranks anything the system infers.
+    """
+    state = await simulator.get_incident(incident_id)
+    if not state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident '{incident_id}' not found.",
+        )
+
+    previous = state.title
+    state.title = request.title.strip()
+    state.title_auto_derived = False
+    state.timeline.append(TimelineEntry(
+        event_type="INCIDENT_RENAMED",
+        description=(
+            f"Incident renamed by {request.renamed_by}: '{previous}' -> "
+            f"'{state.title}'. Auto-derivation of the title is now disabled."
+        ),
+        actor=request.renamed_by,
+    ))
+
+    try:
+        await incident_repo.upsert(state)
+    except Exception as e:  # persistence failure must be visible, not silent
+        logger.warning(f"Failed to persist incident {incident_id} after rename: {e}")
+
+    dump = state.model_dump()
+    await ws_manager.broadcast_state(incident_id, dump)
+    return state
 
 
 @router.get(

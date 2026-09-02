@@ -1,0 +1,236 @@
+"""
+Evidence-driven derivation of an incident's headline fields.
+
+Before this module (reported live 2026-09-02): only claims, conflicts, action items
+and the timeline responded to what people actually said. The incident's *identity* --
+its title, its severity, and its "Possible Causes" list -- was written once at
+creation (or by the seeded demo scenario) and never touched again. An operator could
+report a completely different failure and the header would still read "Customer Login
+and Identity Outage" with a hypothesis nobody had mentioned in minutes.
+
+This module re-derives those three things from the evidence record itself, so the
+incident record tracks the conversation instead of the moment it was opened.
+
+Design constraints, per the project's core principle ("organize evidence without
+inventing certainty"):
+
+  - Derivation is *descriptive*, never predictive. A derived title restates the
+    strongest claim already on the record; it does not diagnose a root cause.
+  - Nothing derived is ever presented as human-authored. IncidentState carries
+    `title_auto_derived` / `severity_auto_derived` so the UI can label it, and an
+    explicit human rename pins the field and stops auto-derivation permanently.
+  - Hypotheses come only from utterances a human actually framed as a hypothesis
+    (ObservationCategory.HYPOTHESIS). This module never invents a candidate cause
+    that nobody proposed.
+  - Every function is pure: state in, values out, no I/O. That keeps the whole
+    ruleset unit-testable without a database or a live model.
+"""
+
+from __future__ import annotations
+
+import hashlib
+
+from app.models.incident import (
+    Hypothesis,
+    HypothesisStatus,
+    IncidentState,
+    Observation,
+    ObservationCategory,
+    SeverityLevel,
+)
+
+# Mirrors the polarity vocabulary used by extraction.py and deriveDynamicTiles.ts so
+# an "unhealthy" claim means the same thing to the tiles, the conflict detector and
+# the severity calculation. Kept in sync by hand -- there is no shared source of
+# truth across the Python and TypeScript runtimes.
+UNHEALTHY_VALUES = frozenset({
+    "down", "failing", "failed", "error", "unavailable", "offline", "broken",
+    "degraded", "unresponsive", "critical", "red", "dead", "crashed",
+})
+
+# How many distinct unhealthy entities it takes to reach each severity band. These
+# are deliberately coarse: severity here is a summary of how much is currently
+# reported broken, not a risk model, and pretending to finer granularity than the
+# evidence supports would be its own kind of invention.
+SEVERITY_THRESHOLDS: list[tuple[int, SeverityLevel]] = [
+    (3, SeverityLevel.CRITICAL),
+    (2, SeverityLevel.HIGH),
+    (1, SeverityLevel.MEDIUM),
+]
+
+
+def _is_unhealthy(value: str) -> bool:
+    lowered = (value or "").lower()
+    return any(token in lowered for token in UNHEALTHY_VALUES)
+
+
+def _title_case(text: str) -> str:
+    return " ".join(w[:1].upper() + w[1:] if w else w for w in (text or "").split())
+
+
+def derive_severity(state: IncidentState) -> SeverityLevel:
+    """
+    Severity as a function of how much is currently reported broken.
+
+    Inputs, in order of weight:
+      - distinct entities with an unhealthy latest claim
+      - open (unresolved) conflicts, which each add one "unknown" to the pile
+      - unresolved risks
+
+    An incident with nothing unhealthy on the record is LOW, not CRITICAL -- the
+    previous behavior of staying at whatever it was seeded with meant a resolved
+    incident still screamed CRITICAL forever.
+    """
+    latest_by_entity: dict[str, str] = {}
+    latest_ts: dict[str, str] = {}
+    for claim in state.claims or []:
+        entity = (claim.entity or "").lower().strip()
+        if not entity:
+            continue
+        ts = claim.timestamp or ""
+        if entity not in latest_ts or ts > latest_ts[entity]:
+            latest_ts[entity] = ts
+            latest_by_entity[entity] = claim.value or ""
+
+    unhealthy_entities = sum(1 for v in latest_by_entity.values() if _is_unhealthy(v))
+    open_conflicts = sum(
+        1 for c in (state.conflicts or []) if getattr(c, "status", None) != "RESOLVED"
+    )
+    open_risks = sum(
+        1 for r in (state.unresolved_risks or []) if getattr(r, "status", None) != "RESOLVED"
+    )
+
+    pressure = unhealthy_entities + open_conflicts + open_risks
+    for threshold, level in SEVERITY_THRESHOLDS:
+        if pressure >= threshold:
+            return level
+    return SeverityLevel.LOW
+
+
+def derive_title(state: IncidentState) -> str | None:
+    """
+    A title that restates the strongest thing currently on the record.
+
+    Picks the most recent unhealthy claim (that is what an incident is *about*),
+    falling back to the most recent claim of any polarity. Returns None when there
+    is no claim to describe, so the caller keeps whatever title already exists
+    rather than blanking it.
+
+    Deliberately NOT a diagnosis: "Redis Session Store Down" restates a reported
+    claim. It does not assert a cause, which is what `hypotheses` is for.
+    """
+    claims = [c for c in (state.claims or []) if c.entity and c.value]
+    if not claims:
+        return None
+
+    ordered = sorted(claims, key=lambda c: c.timestamp or "", reverse=True)
+    chosen = next((c for c in ordered if _is_unhealthy(c.value)), ordered[0])
+
+    entity = _title_case(chosen.entity.strip())
+    value = (chosen.value or "").strip()
+    # Keep the headline short: a title is a label, not the claim's full text.
+    if len(value) > 42:
+        value = value[:39].rstrip() + "..."
+    return f"{entity} — {_title_case(value)}" if value else entity
+
+
+# Both categories are things a human actually said speculatively -- "I suspect X" /
+# "it might be Y" -- so both belong in "Possible Causes" as PROPOSED. Restricting to
+# HYPOTHESIS alone was too narrow in practice: live-observed 2026-09-02, the
+# extractor classified "I suspect the Kafka broker ran out of disk space" as
+# ASSUMPTION, so a genuinely-voiced candidate cause never reached the panel.
+# Including ASSUMPTION surfaces what people said; it does not invent anything they
+# didn't say.
+SPECULATIVE_CATEGORIES = frozenset({
+    ObservationCategory.HYPOTHESIS,
+    ObservationCategory.ASSUMPTION,
+})
+
+
+def derive_hypotheses(state: IncidentState) -> list[Hypothesis]:
+    """
+    Build the "Possible Causes" list from utterances people actually framed
+    speculatively (HYPOTHESIS or ASSUMPTION). Nothing here is generated: if
+    nobody proposed a cause, the list is empty, which is the honest answer.
+
+    Confidence carries the extractor's own confidence for that utterance -- so a
+    tentative "I suspect..." does not render at the same weight as a strong one.
+    Existing hypotheses keep their id (stable across re-derivation, so the UI does
+    not churn) and any status a human already set (CONFIRMED / DISPROVEN survives).
+    """
+    existing_by_key: dict[str, Hypothesis] = {}
+    for h in state.hypotheses or []:
+        existing_by_key[(h.title or "").lower().strip()] = h
+
+    derived: list[Hypothesis] = []
+    seen: set[str] = set()
+
+    hypothesis_obs: list[Observation] = [
+        o
+        for o in (state.observations or [])
+        if o.category in SPECULATIVE_CATEGORIES and (o.content or o.raw_utterance)
+    ]
+    # Newest first, so the most recent thinking leads the panel.
+    hypothesis_obs.sort(key=lambda o: o.timestamp or "", reverse=True)
+
+    for obs in hypothesis_obs:
+        text = (obs.content or obs.raw_utterance or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+
+        prior = existing_by_key.get(key)
+        # Stable id derived from the text, so repeated derivation of the same
+        # hypothesis does not produce a new React key on every observation.
+        hid = prior.id if prior else f"hyp-{hashlib.sha1(key.encode()).hexdigest()[:10]}"
+        derived.append(
+            Hypothesis(
+                id=hid,
+                title=text if len(text) <= 90 else text[:87].rstrip() + "...",
+                description=obs.raw_utterance or text,
+                confidence=float(obs.confidence if obs.confidence is not None else 0.5),
+                # A human verdict on a hypothesis outlives re-derivation.
+                status=prior.status if prior else HypothesisStatus.PROPOSED,
+                updated_at=obs.timestamp or (prior.updated_at if prior else None) or "",
+            )
+        )
+
+    return derived
+
+
+def apply_derivations(state: IncidentState) -> list[str]:
+    """
+    Re-derive title, severity and hypotheses in place.
+
+    Respects human authorship: a field whose `*_auto_derived` flag is False was set
+    by a person and is left alone. Returns a list of human-readable change
+    descriptions, so the caller can write timeline entries for what actually moved
+    (and write none at all when nothing did).
+    """
+    changes: list[str] = []
+
+    if state.severity_auto_derived:
+        new_severity = derive_severity(state)
+        if new_severity != state.severity:
+            changes.append(
+                f"Severity re-derived from evidence: {state.severity.value} -> {new_severity.value}"
+            )
+            state.severity = new_severity
+
+    if state.title_auto_derived:
+        new_title = derive_title(state)
+        if new_title and new_title != state.title:
+            changes.append(f"Title re-derived from evidence: '{state.title}' -> '{new_title}'")
+            state.title = new_title
+
+    new_hypotheses = derive_hypotheses(state)
+    if [h.title for h in new_hypotheses] != [h.title for h in (state.hypotheses or [])]:
+        added = len(new_hypotheses) - len(state.hypotheses or [])
+        if added > 0:
+            changes.append(f"Possible causes updated from evidence ({added} new)")
+        state.hypotheses = new_hypotheses
+
+    return changes

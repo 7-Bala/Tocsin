@@ -323,9 +323,12 @@ describe('deriveDynamicTiles — priority ordering (plan §6.1)', () => {
       entity: 'contested thing',
       claim_a_id: 'a',
       claim_b_id: 'b',
-      description: 'contradiction',
+      value_a: 'normal',
+      value_b: 'overloaded',
+      source_a: 'voice_transcript',
+      source_b: 'voice_transcript',
       status: 'OPEN',
-      detected_at: new Date('2026-09-02T10:00:00Z').toISOString(),
+      created_at: new Date('2026-09-02T10:00:00Z').toISOString(),
     } as ConflictRecord;
     const state = makeState({ claims: [staleConflicted, freshReported], conflicts: [conflict] });
     const result = deriveDynamicTiles(state, now);

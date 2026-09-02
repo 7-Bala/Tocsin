@@ -21,6 +21,7 @@ from app.engine.conflict_detector import detect_conflicts
 from app.engine.connection_manager import ws_manager
 from app.engine.database import new_id
 from app.engine.extraction import extract_intelligence
+from app.engine.incident_derivation import apply_derivations
 from app.engine.repositories import (
     action_item_repo,
     claim_repo,
@@ -368,6 +369,22 @@ async def ingest_observation(
                     "action_items_created": len(created_action_items),
                 },
             ))
+
+            # Re-derive the incident's headline fields from the evidence that now
+            # includes this observation (added 2026-09-02). Without this, title,
+            # severity and "Possible Causes" stayed frozen at whatever the incident
+            # was created with, so the header could describe a completely different
+            # failure from the one being discussed. Only fields still flagged
+            # auto-derived are touched -- a human rename pins them permanently.
+            # See app/engine/incident_derivation.py for the rules.
+            for change in apply_derivations(state):
+                state.timeline.append(TimelineEntry(
+                    timestamp=now,
+                    event_type="INCIDENT_REDERIVED",
+                    description=change,
+                    actor="SYSTEM",
+                    metadata={"trigger_observation_id": obs_id},
+                ))
 
             dump = state.model_dump()
     try:

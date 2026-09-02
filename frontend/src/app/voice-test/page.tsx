@@ -1709,6 +1709,19 @@ export default function VoiceTestPage() {
           margin-bottom: 3px;
           line-height: 1.3;
         }
+        .vcc-title-derived {
+          font-size: 9.5px;
+          font-weight: 600;
+          letter-spacing: 0.03em;
+          color: #9b7ba8;
+          background: #f6f2f8;
+          border: 1px solid #e8dced;
+          border-radius: 4px;
+          padding: 1px 5px;
+          display: inline-block;
+          margin-bottom: 4px;
+          cursor: help;
+        }
         .vcc-incident-loc {
           font-size: 11.5px;
           color: #6b6b6b;
@@ -2224,6 +2237,14 @@ export default function VoiceTestPage() {
                       <div className="vcc-incident-title">
                         {activeIncident?.title ?? 'Customer Login and Identity Outage'}
                       </div>
+                      {/* A machine-derived title must never read as one a commander
+                          wrote. The backend re-derives it from the strongest current
+                          claim (see incident_derivation.py) and flags it here. */}
+                      {activeIncident?.title_auto_derived && (
+                        <div className="vcc-title-derived" title="This title restates the strongest claim currently on the evidence record. Rename the incident to pin it.">
+                          ⟳ auto-derived from evidence
+                        </div>
+                      )}
                       <div className="vcc-incident-loc">
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#9b9b9b" strokeWidth="2.5">
                           <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/>

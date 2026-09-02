@@ -229,6 +229,14 @@ export interface IncidentState {
   event_type: EventType;
   status: IncidentStatus;
   severity: SeverityLevel;
+  /**
+   * False once a human has explicitly named/graded the incident, which pins the
+   * field against the backend's evidence-driven re-derivation. Used by the UI to
+   * mark a machine-derived title so it is never mistaken for a commander's own.
+   * See backend/app/engine/incident_derivation.py.
+   */
+  title_auto_derived?: boolean;
+  severity_auto_derived?: boolean;
   metrics: IncidentMetrics;
   symptoms: Symptom[];
   timeline: TimelineEntry[];

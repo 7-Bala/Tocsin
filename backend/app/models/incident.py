@@ -362,6 +362,15 @@ class IncidentState(BaseModel):
     severity: SeverityLevel = SeverityLevel.LOW
     metrics: IncidentMetrics = Field(default_factory=IncidentMetrics)
 
+    # Evidence-driven derivation (added 2026-09-02). The incident's headline fields
+    # (title, severity) and its hypotheses are re-derived from accumulated evidence
+    # as observations arrive, instead of being frozen at whatever they were created
+    # with. These flags keep that honest: a machine-derived title must never be
+    # mistaken for one a human commander wrote, and once a human names an incident
+    # explicitly, auto-derivation stops overriding them.
+    title_auto_derived: bool = True
+    severity_auto_derived: bool = True
+
     # Operational fields
     symptoms: list[Symptom] = Field(default_factory=list)
     timeline: list[TimelineEntry] = Field(default_factory=list)
@@ -390,6 +399,16 @@ class CreateIncidentRequest(BaseModel):
     title: str = Field(min_length=3, max_length=100)
     event_type: EventType = EventType.FLOOD_SURGE
     initial_symptoms: list[str] | None = None
+
+
+class RenameIncidentRequest(BaseModel):
+    """
+    An explicit human rename. Pins the title: once a person names an incident,
+    evidence-driven re-derivation stops overriding it (see
+    app/engine/incident_derivation.py).
+    """
+    title: str = Field(min_length=3, max_length=100)
+    renamed_by: str = Field(min_length=1, max_length=80)
 
 
 class TriggerEventRequest(BaseModel):
