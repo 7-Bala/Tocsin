@@ -5,15 +5,19 @@ Auto-maintained by Claude: an entry is added when work is identified, and delete
 it's done. Do not treat an entry's presence here as "not started"; check the note for
 current state. This file is the resume point after any session/context reset.
 
-Last updated: 2026-09-03 (installed Agora Skills on a mentor's recommendation and
-found the real root cause of the long-standing "MCP tools get listed but never
-called" mystery: transport was the undocumented "sse" instead of the only
-documented value, "streamable_http" — fixed on both sides and live-verified a
-genuine tool call for the first time, USGS earthquake API and all. Also this
-session: wired and live-verified real Agora agent-status/list endpoints;
-composed_tools now defaults to Agora-managed OpenAI, keyless, live-verified;
-fixed a real honesty bug where every new incident was seeded with a fabricated
-"Possible Cause" before any evidence existed.).
+Last updated: 2026-09-03 (real Chrome connected with real mic access for the first
+time this session — confirmed `/speak` actually produces audible output, not just
+an accepted API call, by tapping the page's own audio analyser and catching a real
+speech envelope; found and fixed a stale hardcoded "Gemini Live Agent" join-log
+message that didn't reflect the actual running pipeline. Earlier this session:
+installed Agora Skills on a mentor's recommendation and found the real root cause
+of the long-standing "MCP tools get listed but never called" mystery (undocumented
+"sse" transport instead of the documented "streamable_http") — fixed and
+live-verified a genuine tool call, USGS earthquake API and all; wired and
+live-verified real Agora agent-status/list endpoints; composed_tools now defaults
+to Agora-managed OpenAI, keyless, live-verified; fixed a real honesty bug where
+every new incident was seeded with a fabricated "Possible Cause" before any
+evidence existed.).
 
 ---
 
@@ -24,13 +28,6 @@ None open right now.
 ---
 
 ## P1 — Real but narrower
-
-### 4. Spoken/audio summary broadcast — still not exercised live
-**Status:** implemented, request-building curl-verified for the 404 (no-agent) path.
-Two live agent sessions ran 2026-09-01 (real mic, real Chrome — see items 5/6) but
-`/speak` specifically still wasn't called during either. Needs one more live session
-segment: with an agent already running, call `POST /api/agora/speak` and confirm
-audio is actually heard. See `docs/agora/RESEARCH.md` §10.
 
 ### 5. RTM transcript delivery — now producing correctly-labeled agent transcripts
 **Status:** substantially more verified 2026-09-01. Root cause of the whole day's
@@ -102,6 +99,20 @@ None open right now.
 ---
 
 ## Recently completed (kept briefly for context, then deleted next pass)
+
+- ✅ **Spoken audio summary broadcast (`/speak`) confirmed actually audible** (2026-09-03).
+  Open since 2026-08-31 as the one remaining live gap: `/speak` was implemented and
+  curl-verified for the 404 (no-agent) path, but real audio delivery had never been
+  observed. Real Chrome + real mic connected this session; started a real agent,
+  called `POST /api/agora/speak` against it, and Agora accepted it (HTTP 200,
+  `"status": "spoken"`). Payload acceptance alone isn't proof of audible output, so
+  verified further: temporarily tapped the page's own Web Audio analyser (already
+  wired to the agent's real RTC audio track for the "AI speaking" UI indicator) via
+  console injection, not a source change. Polled it through the broadcast window and
+  got a real speech envelope — silent for ~3.9s (network + TTS synthesis latency),
+  then `0 → 177 → 181 → 159 → 137 → 126 → 105` across the frequency spectrum, a clean
+  attack/peak/decay shape, not noise. Cleaned up: agent confirmed `STOPPED` via the
+  live agent-status endpoint, zero agents left running on the account afterward.
 
 - ✅ **Groq fallback tier live-verified** (closed 2026-09-03, verified 2026-09-01 —
   the entry was simply left stale). Commit `4e5946a` records the actual live run:

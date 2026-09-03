@@ -559,9 +559,36 @@ just be copy-pasted.
 Verified: 2 new regression tests assert the outbound URL and JSON body match the
 documented schema exactly, and that a channel with no tracked agent returns 404 —
 curl-verified against the real running backend and real Agora credentials (correct
-404 for a channel with no active agent). **Not verified:** whether Agora's real
-`/speak` endpoint accepts this call and audio is actually heard in a live channel —
-requires an active agent (a billed live session) to test.
+404 for a channel with no active agent).
+
+### UPDATE 2026-09-03 — audio delivery live-verified, real Chrome + real mic
+
+The one thing this section had flagged as unverified since 2026-08-31: whether
+Agora's real `/speak` endpoint accepts the call *and* audio is actually heard, not
+just accepted. Real Chrome connected with real microphone access this session
+(the first time this pass had it), so this was finally testable end to end.
+
+Started a real `gemini_live` agent in the demo channel, confirmed `RUNNING` via
+`GET /api/agora/agent-status/{channel}`, then called `POST /api/agora/speak` with
+a distinctive test sentence. Agora returned HTTP 200, `"status": "spoken"` — but
+payload acceptance alone was already known to be an unreliable signal of real
+behavior (see §4's transport bug), so acceptance was not treated as proof.
+
+Verified further: the `/voice-test` page already wires the agent's real RTC audio
+track to a Web Audio `AnalyserNode` for its "AI speaking" visual indicator
+(`aiAnalyser.fftSize = 1024`, `frontend/src/app/voice-test/page.tsx`). Temporarily
+tapped that analyser via a console-injected `AudioContext.prototype.createAnalyser`
+monkey-patch (debugging instrumentation only, not a source change) and polled it
+through the broadcast window. Result: silent for ~3.9 seconds (network + TTS
+synthesis latency), then a real speech envelope —
+`max: 0 → 177 → 181 → 159 → 137 → 126 → 105` across the frequency spectrum, a clean
+attack/peak/decay shape distinguishing genuine audio from noise or a false
+positive. Cleaned up: agent confirmed `STOPPED` via the same live status endpoint,
+zero agents left running on the account afterward (`GET /api/agora/agents` count 0).
+
+**Upgraded from `NOT YET LIVE-VERIFIED` to `VERIFIED IN CODE`** — this is the first
+confirmed instance of Tocsin's spoken-summary path actually producing audible
+output in a real channel, not merely an accepted API call.
 
 ---
 
@@ -763,7 +790,7 @@ carries that status, because no live credentialed run was performed in this pass
 | `llm.mcp_servers` under new `composed_tools` pipeline | `VERIFIED IN CODE` | **Root cause of "discovery only, no invocation" found and fixed 2026-09-03**: transport was `"sse"` (undocumented) against a `/sse` endpoint; official docs only document `"streamable_http"`. Fixed on both sides (this project's MCP server + the join payload) and live-verified: Agora's real infra completed the Streamable HTTP handshake, `ListToolsRequest` succeeded, and — for the first time — a `CallToolRequest` fired and the invoked tool made a real call to USGS's live earthquake API. |
 | `composed_tools` on Agora-managed OpenAI (`composed_tools_llm_vendor="openai"`, default) | `VERIFIED IN CODE` | **Live-verified 2026-09-03**: real Agora acceptance, real `agent_id`, `"status": "RUNNING"` confirmed via the new agent-status endpoint, then confirmed `"status": "STOPPED"` after cleanup. No OpenAI key of this project's own was sent. Tool invocation through it remains unconfirmed (see row above). |
 | `composed_tools` on BYOK Gemini (`composed_tools_llm_vendor="gemini"`) | `VERIFIED IN CODE` | Same live-verification treatment as the managed-OpenAI row, same day — this vendor option was kept, not replaced, when managed OpenAI became the default. |
-| Agora `/speak` TTS broadcast (spoken summaries) | `CREDENTIAL REQUIRED` | **Implemented 2026-08-31**: `POST /api/agora/speak` calls the documented `POST /v2/projects/{appid}/agents/{agentId}/speak` schema (`text`/`priority`/`interruptable`) against the agent tracked for a channel, returning 404 if none is running. Wired into `HandoffPanel`'s "🔊 Broadcast" button, sending the same `spoken_brief` text already generated for problem-statement item 11. Payload shape verified by regression tests; live audio delivery into a real channel not yet observed. |
+| Agora `/speak` TTS broadcast (spoken summaries) | `VERIFIED IN CODE` | **Implemented 2026-08-31, audio delivery live-verified 2026-09-03** (see §10 update): `POST /api/agora/speak` calls the documented `POST /v2/projects/{appid}/agents/{agentId}/speak` schema against a real running agent; Agora accepted it (HTTP 200) and a real speech envelope was captured from the agent's actual RTC audio track via the page's own Web Audio analyser — silent for ~3.9s then a clean attack/peak/decay amplitude curve, not noise. Wired into `HandoffPanel`'s "🔊 Broadcast" button, sending the same `spoken_brief` text already generated for problem-statement item 11. |
 | Agora `/think` custom instruction | `OFFICIAL DOCS ONLY` | **Schema confirmed 2026-09-01** (see §13) — full request/response shape fetched directly from official docs. Not called by Tocsin yet; proposed use is pushing real-time incident developments into a live voice session so the agent proactively announces them. |
 | Agora `/update` agent configuration | `OFFICIAL DOCS ONLY` | **Schema confirmed 2026-09-01** (see §13) — supports updating `llm.system_messages`/`params` or `mllm.params` on a running agent without restart. Not called by Tocsin yet; proposed use is keeping a live agent's system prompt in sync as incident evidence changes. |
 | Transcript delivery over RTM (v2.9) | `CREDENTIAL REQUIRED` | **Implemented 2026-08-31** (see §9): `POST /api/agora/rtm-token`, `advanced_features.enable_rtm`/`parameters.data_channel: "rtm"` on agent-join, and a real RTM login/subscribe/parse path on both `/` and `/voice-test`. RTM token issuance and login/subscribe machinery verified against real Agora credentials in a real browser; actual transcript-message delivery from a live speaking agent is not yet observed. |
@@ -772,7 +799,7 @@ carries that status, because no live credentialed run was performed in this pass
 | `agoraStreamDecoder.ts` wire-format parsing (pipe/base64/JSON patterns) | `UNVERIFIED` | No official Agora page confirms this exact wire format. Now covered by fixture tests (`transcript_hardening.test.ts`) proving deterministic, fail-safe (`null`) behavior on anything that doesn't match, but the format itself remains empirical. |
 | Agora RTC channel-name policy (local regex) | `VERIFIED IN CODE` | Deliberately stricter than Agora's documented allowed character set; this is a local safety choice, not a claim about Agora's behavior, so it needed no live verification. |
 | `agora-token-builder` (PyPI) as the token-generation implementation | `UNVERIFIED` | Functions correctly in this repo's own mocked tests; official docs name only the reference GitHub repo, not this specific PyPI package, as canonical. |
-| Spoken audio summary broadcast into an active Agora channel | `CREDENTIAL REQUIRED` | See the `/speak` row above — implemented 2026-08-31, not yet live-verified. |
+| Spoken audio summary broadcast into an active Agora channel | `VERIFIED IN CODE` | See the `/speak` row above — implemented 2026-08-31, audio delivery live-verified 2026-09-03. |
 
 ---
 
