@@ -100,6 +100,11 @@ export default function VoiceTestPage() {
   // is opt-in because it trades that latency for MCP tool-calling support, which
   // gemini_live's mllm pipeline does not offer per Agora's own docs.
   const [voicePipeline,      setVoicePipeline]     = useState<'gemini_live' | 'composed_tools'>('gemini_live');
+  // What the *running* agent actually is, per the backend's own start-agent response --
+  // not the dropdown selection, which can be changed after dispatch. Read by the RTC
+  // join/leave handlers below so their log lines never say "Gemini Live" for an agent
+  // that's actually running composed_tools/managed-OpenAI (or vice versa).
+  const activeAgentLabelRef = useRef<string>('Voice Agent');
   const [llmVendor,          setLlmVendor]         = useState<'openai' | 'gemini'>('openai');
   const [remoteAgentPresent, setRemoteAgentPresent] = useState(false);
   const [logs,               setLogs]              = useState<string[]>([]);
@@ -610,7 +615,7 @@ export default function VoiceTestPage() {
       audioCtxRef.current = audioCtx;
 
       client.on('user-published', async (user: any, mediaType: string) => {
-        if (Number(user.uid) === 9999) { setRemoteAgentPresent(true); addLog('✨ [Agora ConvoAI] Gemini Live Agent (UID 9999) joined.'); }
+        if (Number(user.uid) === 9999) { setRemoteAgentPresent(true); addLog(`✨ [Agora ConvoAI] ${activeAgentLabelRef.current} (UID 9999) joined.`); }
         await client.subscribe(user, mediaType as 'audio' | 'video');
         if (mediaType === 'audio' && user.audioTrack) {
           user.audioTrack.play();
@@ -657,7 +662,7 @@ export default function VoiceTestPage() {
           aiTimeDataRef.current = null;
           aiFreqDataRef.current = null;
           if (aiSpeakingTimerRef.current) { clearTimeout(aiSpeakingTimerRef.current); aiSpeakingTimerRef.current = null; }
-          addLog('ℹ️ Gemini Live Agent (UID 9999) left the channel.');
+          addLog(`ℹ️ ${activeAgentLabelRef.current} (UID 9999) left the channel.`);
         }
       });
 
@@ -858,6 +863,9 @@ export default function VoiceTestPage() {
       const modeLabel = data.llm_credential_mode === 'managed' ? ' (managed, keyless)' : '';
       addLog(`✅ Agent dispatched — ${data.voice_pipeline}, LLM: ${providerLabel}${modeLabel}`);
       if (data.voice_note) addLog(`ℹ️ ${data.voice_note}`);
+      activeAgentLabelRef.current = data.voice_pipeline === 'gemini_live'
+        ? 'Gemini Live Agent'
+        : `Managed Agent (${providerLabel})`;
     } catch (err: any) { setAgentStatus('ERROR'); addLog(`Agent start failed: ${err.message}`); }
   };
 
