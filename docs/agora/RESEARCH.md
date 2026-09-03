@@ -532,6 +532,63 @@ from reading Agora's own source, not from running it — treat this as
 `CREDENTIAL REQUIRED`, not `VERIFIED IN CODE`, until a live session with an active
 agent confirms a transcript actually renders.
 
+### UPDATE 2026-09-04 — now live-tested exhaustively; still zero transcript messages ever observed
+
+Ran the exact live session this section says was needed. Correction to the record
+below, then the actual finding.
+
+**Correction:** this section's "reference implementation" research pointed at
+`AgoraIO-Community/Conversational-AI-Demo`, a demo app whose toolkit source has to be
+copied in by hand. That was incomplete — Agora also publishes a proper installable
+package, `agora-agent-client-toolkit` (npm) /
+[`agent-client-toolkit-ts`](https://github.com/AgoraIO-Conversational-AI/agent-client-toolkit-ts)
+(source), which this project does not use (it reuses the RTM login/subscribe +
+`decodeAgoraStreamMessage` approach built from reading the demo app instead). Reading
+the *published* toolkit's own source turned up something this project's approach had
+wrong: its `subscribeMessage()` never calls `rtmEngine.subscribe(channel)` — it only
+registers an `RTMEventType.MESSAGE` listener after login — and its own `init()`
+example comments that the RTM login identity "must match the RTM token subject;
+often `String(rtcUid)`". This project's RTM login identity was
+`` `tocsin-voicetest-${uid}` ``, not the bare uid. `agora-rtm`'s own `ChannelType`
+enum (`'MESSAGE' | 'STREAM' | 'USER'`, confirmed in the installed `agora-rtm@2.3.0`
+type definitions) confirms `'USER'` is a private/peer-to-peer channel type distinct
+from the `'MESSAGE'` type this project subscribes to — consistent with transcripts
+arriving as messages addressed to the participant's own RTC uid rather than as a
+channel-wide broadcast. **Fixed**: `frontend/src/app/voice-test/page.tsx`'s RTM login
+now uses `String(uid)` (the same numeric id passed to `client.join()`), not a
+prefixed label.
+
+**The finding, after fixing that and testing exhaustively:** it did not close the gap.
+Real Chrome, real microphone, real Agora account, both pipelines, the corrected RTM
+identity, `agent-think`, and `/speak` (which forces guaranteed verbatim playback,
+unlike `agent-think`) were all exercised in the same live session. Audio was
+independently confirmed genuine on **multiple separate occasions** two different
+ways: tapping the actual Web Audio `AnalyserNode` already wired to the agent's RTC
+track (clean attack/decay envelopes, not noise) and, separately, Agora's own RTC SDK
+emitting real `AUDIO_OUTPUT_LEVEL_TOO_LOW` / `..._RECOVER` exception events for
+uid 9999 at the exact moments speech was triggered. RTM login and channel subscribe
+both completed successfully every time (confirmed by bypassing a console-log capture
+tool that turned out to have its own dedup quirk — direct in-page interception of
+`console.log` was used instead once that quirk was found, to remove all doubt).
+**Across all of it, zero `assistant.transcription` (or any) RTM messages were ever
+received, and the legacy RTC `stream-message` fallback also received nothing.**
+
+Conclusion: transcript delivery over RTM/Signaling for this project's Conversational
+AI agents has never been observed working, on any pipeline, under any RTM identity
+tried, despite the join payload matching every documented requirement
+(`advanced_features.enable_rtm: true`, `parameters.data_channel: "rtm"`) and the RTM
+connection itself working perfectly. This is now the single most load-bearing
+unresolved item in the whole integration — it is why the voice room's "Live
+Conversation" panel never shows the agent's spoken replies, and why nothing the agent
+*says* (as opposed to what the operator says, which reaches evidence independently via
+the browser's own `SpeechRecognition`, unrelated to RTM) ever becomes a structured
+observation. Given docs.agora.io's own transcripts page admits it does not document
+the wire format, and the published toolkit's source only confirms *how a client should
+listen*, not *what makes the agent actually publish* — this looks like it needs an
+answer from Agora directly (mentor channel or support), with this section handed over
+as the precise, already-isolated repro: RTM connects, subscribes, agent audibly
+speaks, nothing arrives.
+
 ## 10. Spoken audio summary broadcast — now IMPLEMENTED (2026-08-31)
 
 Official schema (`docs.agora.io/en/api-reference/api-ref/conversational-ai/speak`,

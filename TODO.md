@@ -23,7 +23,39 @@ evidence existed.).
 
 ## P0 — Breaks the demo / actively misleading
 
-None open right now.
+### The agent's spoken replies never become transcript text or evidence — corrects an earlier overclaim
+**Status:** re-opened and downgraded 2026-09-04 after exhaustive live testing. The
+2026-09-01 entry below this one claimed RTM transcript delivery was "producing
+correctly-labeled agent transcripts," verified by one agent response appearing
+correctly labeled TOCSIN in the transcript panel. That was **not actually proof of
+RTM delivery** — a fresh, much more careful live session tonight (real Chrome, real
+mic, real Agora account, both pipelines, `agent-think` and `/speak`) found that
+**zero RTM (or RTC stream-message fallback) transcript messages have ever been
+received from the agent**, despite: the join payload matching every documented
+requirement (`enable_rtm: true`, `data_channel: "rtm"`); RTM login and channel
+subscribe both completing successfully every single time; and the agent **audibly
+speaking**, independently confirmed two different ways (a direct Web Audio analyser
+tap on its RTC track showing real speech envelopes, and Agora's own SDK emitting
+real `AUDIO_OUTPUT_LEVEL_TOO_LOW`/`RECOVER` events at the right moments).
+
+Also fixed in the same pass, per the official `agora-agent-client-toolkit`'s own
+documented requirement ("RTM identity must match the RTM token subject; often
+`String(rtcUid)`"): the RTM login identity was `tocsin-voicetest-<uid>`, not the
+bare uid. Corrected to `String(uid)` in `voice-test/page.tsx`. This did **not**
+close the gap — transcripts still never arrive, so the identity mismatch was a real
+bug worth fixing but not the (or not the only) root cause.
+
+**What this means concretely:** the operator's own spoken words still work — they
+reach evidence via the browser's own `SpeechRecognition`, entirely independent of
+RTM — so tiles/map/timeline do update from what a human says. What's actually
+broken is one direction only: nothing Tocsin *says back* ever becomes transcript
+text or feeds back into the evidence record structurally.
+
+**Recommended next step:** this looks like it needs an answer from Agora directly —
+docs.agora.io's own transcripts page admits it doesn't document the wire format, and
+the official toolkit's source only shows how a client should *listen*, not what
+makes the agent actually *publish*. See `docs/agora/RESEARCH.md` §9's 2026-09-04
+update for the full isolated repro to hand to a mentor or Agora support.
 
 ---
 

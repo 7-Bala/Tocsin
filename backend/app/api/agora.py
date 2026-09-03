@@ -23,7 +23,7 @@ import time
 from typing import Any, Literal
 
 import httpx
-from agora_token_builder import RtcTokenBuilder, RtmTokenBuilder  # type: ignore[import-untyped]
+from agora_token_builder import AccessToken, RtcTokenBuilder, RtmTokenBuilder  # type: ignore[import-untyped]
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
@@ -686,17 +686,24 @@ async def start_conversational_agent(
       ),
     )
 
-  # Generate short-lived RTC token specifically for the agent participant
+  # Generate short-lived combined RTC+RTM token specifically for the agent participant.
+  # Per official Agora join.md docs, the agent joins the RTM channel by reusing
+  # properties.token, which requires both RTC (publisher/subscriber) and RTM privileges.
   expire_seconds = 3600
   current_timestamp = int(time.time())
-  agent_token = RtcTokenBuilder.buildTokenWithUid(
-    appId=app_id,
-    appCertificate=app_certificate,
-    channelName=channel_name,
-    uid=request.agent_uid,
-    role=1,  # Role_Publisher
-    privilegeExpiredTs=current_timestamp + expire_seconds,
+  privilege_expired_ts = current_timestamp + expire_seconds
+  tok = AccessToken.AccessToken(
+    app_id,
+    app_certificate,
+    channel_name,
+    str(request.agent_uid),
   )
+  tok.addPrivilege(AccessToken.kJoinChannel, privilege_expired_ts)
+  tok.addPrivilege(AccessToken.kPublishAudioStream, privilege_expired_ts)
+  tok.addPrivilege(AccessToken.kPublishVideoStream, privilege_expired_ts)
+  tok.addPrivilege(AccessToken.kPublishDataStream, privilege_expired_ts)
+  tok.addPrivilege(AccessToken.kRtmLogin, privilege_expired_ts)
+  agent_token = tok.build()
 
   # Construct Basic Auth header
   auth_str = f"{customer_id}:{customer_secret}"
@@ -833,23 +840,23 @@ async def start_conversational_agent(
     # Two documented ways to fill the `llm` block. Note the shape difference from
     # asr/tts above: the llm block carries `url` at the top level, not under
     # `params` (docs.agora.io/en/conversational-ai/models/llm/openai).
+    preset_components = ["deepgram_nova_3", "minimax_speech_2_8_turbo"]
+
     if request.composed_tools_llm_vendor == "openai":
-      # Agora-managed OpenAI: Agora supplies and bills the credential, so no
-      # OpenAI key exists anywhere in this project. Per the managed example in
-      # the docs, "when using managed mode, api_key is not required" -- so it is
-      # deliberately absent rather than sent empty.
+      # Agora-managed OpenAI: Agora supplies and bills the credential via the
+      # root `preset` field ("openai_gpt_4o_mini"). Per official Agora docs
+      # (docs.agora.io/en/conversational-ai/models/llm/openai), when a preset
+      # is used, url, api_key, and model are omitted.
+      preset_components.append("openai_gpt_4o_mini")
       llm_block = {
-        "credential_mode": "managed",
-        "vendor": "openai",
-        "style": "openai",
-        "url": "https://api.openai.com/v1/chat/completions",
-        "params": {"model": COMPOSED_TOOLS_MANAGED_OPENAI_MODEL},
+        "system_messages": [{"role": "system", "content": prompt}],
+        "max_history": 32,
+        "greeting_message": "Tocsin emergency coordinator active. How can I assist?",
+        "failure_message": "Sorry, I encountered an issue. Please try again.",
       }
     else:
-      # BYOK Gemini. Gemini is not in Agora's documented `vendor` enum for the llm
-      # block (openai | azure | xai | custom), so "custom" plus style: "gemini" is
-      # the doc-consistent way to point the llm step at our own Gemini endpoint,
-      # matching the same URL-with-embedded-key pattern gemini_live uses above.
+      # BYOK Gemini: uses custom vendor + style "gemini" pointing at Google
+      # streamGenerateContent REST endpoint with GEMINI_API_KEY.
       llm_block = {
         "vendor": "custom",
         "style": "gemini",
@@ -859,18 +866,15 @@ async def start_conversational_agent(
         ),
         "api_key": gemini_key,
         "params": {"model": request.composed_tools_llm_model},
+        "system_messages": [{"role": "system", "content": prompt}],
+        "max_history": 32,
+        "greeting_message": "Tocsin emergency coordinator active. How can I assist?",
+        "failure_message": "Sorry, I encountered an issue. Please try again.",
       }
-
-    # Fields that are identical regardless of which vendor answers.
-    llm_block.update({
-      "system_messages": [{"role": "system", "content": prompt}],
-      "max_history": 32,
-      "greeting_message": "Tocsin emergency coordinator active. How can I assist?",
-      "failure_message": "Sorry, I encountered an issue. Please try again.",
-    })
 
     payload = {
       "name": f"tocsin_agent_{channel_name}",
+      "preset": ",".join(preset_components),
       "properties": {
         "channel": channel_name,
         "token": agent_token,
@@ -881,31 +885,11 @@ async def start_conversational_agent(
         "advanced_features": {"enable_rtm": True},
         "parameters": {"data_channel": "rtm"},
         "asr": {
-          "credential_mode": "managed",
-          "vendor": "deepgram",
-          # `url` is required even in managed-credential mode -- confirmed against a
-          # live HTTP 400 from Agora's real join API ("Invalid value at
-          # properties.asr.params.url: required field is missing") and against
-          # docs.agora.io/en/conversational-ai/models/asr/overview, which gives this
-          # exact literal value for Deepgram. `credential_mode: "managed"` only means
-          # Agora supplies the API key/auth, not that the endpoint URL is implied.
-          "params": {
-            "url": "wss://api.deepgram.com/v1/listen",
-            "model": "nova-3",
-            "language": "en",
-          },
+          "language": "en-US",
         },
         "llm": llm_block,
         "tts": {
-          "credential_mode": "managed",
-          "vendor": "minimax",
-          # `url` is required even in managed mode -- same finding as the asr block
-          # above, confirmed against a live HTTP 400 from Agora's real join API and
-          # against docs.agora.io/en/conversational-ai/models/tts/minimax's managed
-          # example (this is the managed-mode URL; BYOK uses a different host).
           "params": {
-            "url": "wss://api.minimax.io/ws/v1/t2a_v2",
-            "model": "speech-2.8-turbo",
             "voice_setting": {"voice_id": "English_captivating_female1", "speed": 1.0},
             "audio_setting": {"sample_rate": 44100},
           },

@@ -5,6 +5,7 @@ import { useIncidentState } from '@/hooks/useIncidentState';
 import { DynamicSituationTiles } from '@/components/DynamicSituationTiles';
 import LiveIncidentMap from '@/components/LiveIncidentMap';
 import { startRtmTranscriptSession, RtmTranscriptSession } from '@/lib/agoraRtmTranscripts';
+import { decodeAgoraStreamMessage } from '@/lib/agoraStreamDecoder';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -208,6 +209,24 @@ export default function VoiceTestPage() {
     console.log(`[voice-test] ${msg}`);
   }, []);
 
+  // A rejected promise nobody attached a .catch()/try-catch to normally prints as
+  // "Uncaught (in promise)" in the console and is easy to miss during a live debug
+  // session, especially one relying on remote console capture. Live-observed
+  // 2026-09-03: RTM login appeared to hang past its own 10s timeout with zero log
+  // output either way -- turned out the timeout's rejection *was* firing, but from
+  // inside a detached promise chain whose rejection was never awaited by anything,
+  // so it surfaced only as a silent unhandled rejection. This makes that class of
+  // failure impossible to miss again.
+  useEffect(() => {
+    const handler = (event: PromiseRejectionEvent) => {
+      const reason = event?.reason;
+      const detail = reason instanceof Error ? `${reason.message}\n${reason.stack}` : String(reason);
+      addLog(`🛑 [Unhandled promise rejection] ${detail}`);
+    };
+    window.addEventListener('unhandledrejection', handler);
+    return () => window.removeEventListener('unhandledrejection', handler);
+  }, [addLog]);
+
   // ── Transcript entry ───────────────────────────────────────────────────
   const addTranscriptEntry = useCallback((speaker: 'You' | 'AI Agent', text: string) => {
     const cleanText = text.trim();
@@ -224,6 +243,41 @@ export default function VoiceTestPage() {
 
   const addTranscriptEntryRef = useRef(addTranscriptEntry);
   useEffect(() => { addTranscriptEntryRef.current = addTranscriptEntry; }, [addTranscriptEntry]);
+
+  // ── Unified Observation Ingestion (Agora RTM + Browser Speech) ───────────
+  const recentUtterancesRef = useRef<Map<string, number>>(new Map());
+
+  const ingestObservation = useCallback((speaker: 'You' | 'AI Agent', rawText: string) => {
+    const text = rawText.trim();
+    if (text.length < 2) return;
+
+    // Deduplicate identical utterances arriving within 8 seconds (e.g. Agora RTM + browser SpeechRecognition)
+    const normKey = `${speaker}:${text.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+    const now = Date.now();
+    for (const [k, ts] of recentUtterancesRef.current.entries()) {
+      if (now - ts > 8000) recentUtterancesRef.current.delete(k);
+    }
+    if (recentUtterancesRef.current.has(normKey)) return;
+    recentUtterancesRef.current.set(normKey, now);
+
+    addTranscriptEntryRef.current(speaker, text);
+
+    const incId = channelName.trim() || 'inc-demo-identity-outage';
+    fetch(`${API_BASE_URL}/api/incidents/${incId}/observations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        raw_utterance: text,
+        speaker: speaker === 'AI Agent' ? 'AI Agent' : 'Operator',
+        source: speaker === 'AI Agent' ? 'agora_voice_agent' : 'voice_transcript',
+      }),
+    }).catch((err) => {
+      console.warn('[voice-test] Observation ingestion failed:', err);
+    });
+  }, [channelName]);
+
+  const ingestObservationRef = useRef(ingestObservation);
+  useEffect(() => { ingestObservationRef.current = ingestObservation; }, [ingestObservation]);
 
   // ── Auto-scroll transcript ─────────────────────────────────────────────
   useEffect(() => {
@@ -675,8 +729,23 @@ export default function VoiceTestPage() {
       // parameters.data_channel: "rtm" on agent-join, which is what actually
       // selects the transcript transport. Login failure here does not block the
       // voice call; only the "AI Agent" transcript lines below depend on it.
+      //
+      // RTM identity MUST be the bare stringified RTC uid, not a prefixed label.
+      // Live-observed 2026-09-04: RTM login and channel subscribe both succeeded
+      // cleanly every time, yet zero transcript messages ever arrived, on either
+      // pipeline, even while the agent was audibly speaking (confirmed by tapping
+      // the real Web Audio analyser on its RTC track directly). The official
+      // agent-client-toolkit's own init() example flags exactly this: RTM_USER_ID
+      // "must match the RTM token subject; often String(rtcUid)" -- and its
+      // subscribeMessage() doesn't call channel.subscribe() at all, it only
+      // registers a message listener, implying Agora delivers transcripts
+      // point-to-point to the RTM identity matching the participant's own RTC
+      // uid, not as a channel-wide broadcast. `remote_rtc_uids` in the join
+      // payload is likewise keyed by bare RTC uid. A prefixed identity like
+      // "tocsin-voicetest-<uid>" is simply the wrong mailbox -- the agent would
+      // address messages to "<uid>", which nothing was ever logged in as.
       try {
-        const rtmUserAccount = `tocsin-voicetest-${uid}`;
+        const rtmUserAccount = String(uid);
         const rtmTokenRes = await fetch(`${API_BASE_URL}/api/agora/rtm-token`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -690,14 +759,11 @@ export default function VoiceTestPage() {
           userAccount: rtmUserAccount,
           channelName,
           onEvent: (decoded) => {
-            if (decoded.speaker !== 'TOCSIN' || !decoded.isFinal) return;
-            addTranscriptEntryRef.current('AI Agent', decoded.text);
-            const incId = channelName.trim() || 'inc-demo-identity-outage';
-            fetch(`${API_BASE_URL}/api/incidents/${incId}/observations`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ raw_utterance: decoded.text, speaker: 'AI Agent', source: 'agora_voice_agent' }),
-            }).catch(() => {});
+            if (!decoded.text) return;
+            const speakerLabel: 'You' | 'AI Agent' = decoded.speaker === 'TOCSIN' ? 'AI Agent' : 'You';
+            if (decoded.isFinal || decoded.text.length > 5) {
+              ingestObservationRef.current(speakerLabel, decoded.text);
+            }
           },
           onLog: addLog,
         });
@@ -765,20 +831,17 @@ export default function VoiceTestPage() {
       // Legacy/fallback transport — primary transcript delivery is now RTM (above).
       // Kept in case Agora ever delivers over RTC stream-message again.
       client.on('stream-message', (uid: number, data: Uint8Array) => {
-        const raw = new TextDecoder('utf-8').decode(data);
         try {
-          const msg = JSON.parse(raw);
-          const content = msg.text ?? msg.transcript ?? null;
-          if (content && content.length > 3) {
-            addTranscriptEntryRef.current('AI Agent', content);
-            const incId = channelName.trim() || 'inc-demo-identity-outage';
-            fetch(`${API_BASE_URL}/api/incidents/${incId}/observations`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ raw_utterance: content, speaker: 'AI Agent', source: 'agora_voice_agent' }),
-            }).catch(() => {});
+          const raw = new TextDecoder('utf-8').decode(data);
+          addLog(`📡 [Stream Message] from UID ${uid} (${data.length} bytes): ${raw.slice(0, 100)}`);
+          const decoded = decodeAgoraStreamMessage(uid, data);
+          if (decoded && decoded.text) {
+            const speakerLabel: 'You' | 'AI Agent' = decoded.speaker === 'TOCSIN' ? 'AI Agent' : 'You';
+            ingestObservationRef.current(speakerLabel, decoded.text);
           }
-        } catch {}
+        } catch (err: any) {
+          addLog(`⚠️ [Stream Message error] ${err?.message}`);
+        }
       });
 
       const SpeechRecognitionClass = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition || null;
@@ -803,14 +866,8 @@ export default function VoiceTestPage() {
             if (aiSpeakingRef.current) continue;
             if (Date.now() - aiSpeechEndedAtRef.current < 3000) continue;
             const text = event.results[i][0].transcript.trim();
-            if (text.length < 3) continue;
-            addTranscriptEntryRef.current('You', text);
-            const incId = channelName.trim() || 'inc-demo-identity-outage';
-            fetch(`${API_BASE_URL}/api/incidents/${incId}/observations`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ raw_utterance: text, speaker: 'Operator', source: 'voice_transcript' }),
-            }).catch(() => {});
+            if (text.length < 2) continue;
+            ingestObservationRef.current('You', text);
           }
         };
         rec.onerror = (e: any) => { if (e.error !== 'no-speech' && e.error !== 'aborted') addLog(`⚠️ [Speech recognition] ${e.error}`); };

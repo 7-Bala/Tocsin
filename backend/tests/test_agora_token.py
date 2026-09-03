@@ -642,13 +642,9 @@ async def test_composed_tools_pipeline_wires_mcp_servers_under_llm(monkeypatch):
             props = sent_payload["properties"]
             assert "mllm" not in props
 
-            assert props["asr"]["vendor"] == "deepgram"
-            assert props["asr"]["credential_mode"] == "managed"
-            # Confirmed against a live HTTP 400 from Agora's real join API on
-            # 2026-08-31 ("Invalid value at properties.asr.params.url: required
-            # field is missing") -- managed credential_mode does not imply the
-            # endpoint URL is implied, only that Agora supplies the API key.
-            assert props["asr"]["params"]["url"] == "wss://api.deepgram.com/v1/listen"
+            assert "deepgram_nova_3" in sent_payload["preset"]
+            assert "minimax_speech_2_8_turbo" in sent_payload["preset"]
+            assert props["asr"]["language"] == "en-US"
 
             assert props["llm"]["vendor"] == "custom"
             assert props["llm"]["style"] == "gemini"
@@ -671,11 +667,7 @@ async def test_composed_tools_pipeline_wires_mcp_servers_under_llm(monkeypatch):
                 }
             ]
 
-            assert props["tts"]["vendor"] == "minimax"
-            assert props["tts"]["credential_mode"] == "managed"
-            # Same finding as the asr assertion above, confirmed against a live
-            # HTTP 400 for properties.tts.params.url on the same live test.
-            assert props["tts"]["params"]["url"] == "wss://api.minimax.io/ws/v1/t2a_v2"
+            assert props["tts"]["params"]["voice_setting"]["voice_id"] == "English_captivating_female1"
 
             assert props["advanced_features"]["enable_tools"] is True
             assert props["advanced_features"]["enable_rtm"] is True
@@ -784,17 +776,18 @@ async def test_composed_tools_defaults_to_agora_managed_openai(monkeypatch):
         )
 
     assert resp.status_code == 200
-    llm = client.post.call_args.kwargs["json"]["properties"]["llm"]
-    assert llm["credential_mode"] == "managed"
-    assert llm["vendor"] == "openai"
-    assert llm["style"] == "openai"
-    assert llm["url"] == "https://api.openai.com/v1/chat/completions"
+    sent_payload = client.post.call_args.kwargs["json"]
+    assert "openai_gpt_4o_mini" in sent_payload["preset"]
+    assert "deepgram_nova_3" in sent_payload["preset"]
+    assert "minimax_speech_2_8_turbo" in sent_payload["preset"]
+    llm = sent_payload["properties"]["llm"]
     assert "api_key" not in llm, "managed mode must not send a key"
+    assert "url" not in llm, "preset mode must not send url"
     # Shared fields still applied on top of the vendor-specific block.
     assert llm["system_messages"][0]["role"] == "system"
     assert llm["max_history"] == 32
     # Our own Gemini key must not leak into a managed-OpenAI request.
-    assert "mock_gemini_api_key" not in str(client.post.call_args.kwargs["json"])
+    assert "mock_gemini_api_key" not in str(sent_payload)
 
     data = resp.json()
     assert data["llm_provider"] == "openai"
@@ -902,13 +895,13 @@ async def test_managed_asr_and_tts_stay_managed(monkeypatch):
         )
 
     assert resp.status_code == 200
-    props = client.post.call_args.kwargs["json"]["properties"]
-    assert props["asr"]["credential_mode"] == "managed"
-    assert props["asr"]["vendor"] == "deepgram"
-    assert props["asr"]["params"]["url"] == "wss://api.deepgram.com/v1/listen"
-    assert props["tts"]["credential_mode"] == "managed"
-    assert props["tts"]["vendor"] == "minimax"
-    assert props["tts"]["params"]["url"] == "wss://api.minimax.io/ws/v1/t2a_v2"
+    sent_payload = client.post.call_args.kwargs["json"]
+    assert "deepgram_nova_3" in sent_payload["preset"]
+    assert "minimax_speech_2_8_turbo" in sent_payload["preset"]
+    props = sent_payload["properties"]
+    assert props["asr"]["language"] == "en-US"
+    assert "params" in props["tts"]
+    assert props["tts"]["params"]["voice_setting"]["voice_id"] == "English_captivating_female1"
 
 
 @pytest.mark.asyncio
@@ -933,9 +926,9 @@ async def test_mcp_servers_wire_under_managed_openai_llm_too(monkeypatch):
         )
 
     assert resp.status_code == 200
-    props = client.post.call_args.kwargs["json"]["properties"]
-    assert props["llm"]["vendor"] == "openai"
-    assert props["llm"]["credential_mode"] == "managed"
+    sent_payload = client.post.call_args.kwargs["json"]
+    assert "openai_gpt_4o_mini" in sent_payload["preset"]
+    props = sent_payload["properties"]
     assert props["llm"]["mcp_servers"] == [
         {
             "name": "tocsin-emergency-tools",

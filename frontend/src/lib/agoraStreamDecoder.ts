@@ -98,7 +98,7 @@ export function decodeAgoraStreamMessage(
     }
 
     // If nothing valid was parsed or not an object, discard
-    if (!parsed || typeof parsed !== 'object') {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return null;
     }
 
@@ -107,9 +107,12 @@ export function decodeAgoraStreamMessage(
       Number(msgUid) === 9999 ||
       parsed.object === 'assistant.transcription' ||
       parsed.role === 'assistant' ||
+      parsed.role === 'model' ||
       parsed.speaker === 'TOCSIN' ||
+      parsed.speaker === 'agent' ||
       parsed.sender === 'assistant' ||
-      parsed.name === 'agent';
+      parsed.name === 'agent' ||
+      Boolean(parsed.serverContent?.modelTurn);
 
     const speaker: 'YOU' | 'TOCSIN' = isAgent ? 'TOCSIN' : 'YOU';
 
@@ -132,6 +135,20 @@ export function decodeAgoraStreamMessage(
       text = parsed.data.text;
     } else if (parsed.data && typeof parsed.data.content === 'string') {
       text = parsed.data.content;
+    } else if (parsed.serverContent) {
+      const modelParts = parsed.serverContent.modelTurn?.parts;
+      if (Array.isArray(modelParts)) {
+        text = modelParts.map((p: any) => (typeof p === 'string' ? p : p.text || '')).filter(Boolean).join(' ');
+      }
+      const userParts = parsed.serverContent.userTurn?.parts;
+      if (Array.isArray(userParts)) {
+        text = userParts.map((p: any) => (typeof p === 'string' ? p : p.text || '')).filter(Boolean).join(' ');
+      }
+    } else if (Array.isArray(parsed.choices) && parsed.choices.length > 0) {
+      const choice = parsed.choices[0];
+      if (choice.delta?.content) text = choice.delta.content;
+      else if (choice.message?.content) text = choice.message.content;
+      else if (choice.text) text = choice.text;
     }
 
     text = text.trim();
@@ -143,13 +160,26 @@ export function decodeAgoraStreamMessage(
 
     // Determine finality:
     // Agora ConvoAI provides `is_final` (bool / 0/1), `final`, `end_of_turn`, or `end_of_utterance`.
-    // If not explicitly true/1, it represents an in-progress partial streaming delta.
+    // In assistant.transcription: Agora sends `turn_status`: 0 = IN_PROGRESS, 1 = END, 2 = INTERRUPTED.
+    // In user.transcription: Agora provides `final: true`.
     let isFinal = false;
     if (parsed.is_final === true || parsed.is_final === 1 || parsed.is_final === 'true') {
       isFinal = true;
     } else if (parsed.final === true || parsed.final === 1 || parsed.final === 'true') {
       isFinal = true;
+    } else if (
+      parsed.turn_status === 1 ||
+      parsed.turn_status === '1' ||
+      parsed.turn_status === 'END' ||
+      parsed.turn_status === 'end' ||
+      parsed.turn_status === 2 ||
+      parsed.turn_status === '2' ||
+      parsed.turn_status === 'INTERRUPTED'
+    ) {
+      isFinal = true;
     } else if (parsed.end_of_turn === true || parsed.end_of_utterance === true) {
+      isFinal = true;
+    } else if (parsed.turnComplete === true || parsed.turn_complete === true || parsed.serverContent?.turnComplete === true) {
       isFinal = true;
     } else if (parsed.status === 'completed' || parsed.type === 'final') {
       isFinal = true;

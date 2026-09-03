@@ -61,6 +61,7 @@ export async function startRtmTranscriptSession(options: {
         typeof raw === 'string' ? raw : new TextDecoder('utf-8').decode(raw as Uint8Array);
       const bytes = new TextEncoder().encode(text);
       const publisher = event?.publisher ?? 'agora_rtm';
+      onLog(`📡 [RTM Message Received] From ${publisher} (${text.length} chars)`);
 
       const decoded: DecodedStreamEvent | null = decodeAgoraStreamMessage(publisher, bytes);
       if (!decoded || !decoded.text) return;
