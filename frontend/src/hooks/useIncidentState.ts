@@ -12,15 +12,22 @@ const DEMO_INCIDENT_ID = 'inc-demo-identity-outage';
  * dashboard does instead of maintaining a second, independent implementation that can
  * silently drift out of sync (see docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md).
  *
- * Behavior preserved from the original inline implementation:
- * - On mount, fetch the incident list; if the canonical identity-outage demo incident
- *   doesn't exist yet, create it so the app is immediately demo-ready.
+ * Behavior, current:
+ * - On mount, fetch the incident list; if the canonical demo incident id doesn't
+ *   exist yet, create it -- genuinely empty (no title story, no seeded symptoms, no
+ *   claims). Live-reported 2026-09-03: this used to pre-populate a scripted
+ *   "Customer Login and Identity Outage" scenario with two hardcoded symptoms on
+ *   every fresh install, which looked indistinguishable from fabricated evidence to
+ *   someone opening the app to test whether it derives things from real input. The
+ *   incident's actual title, severity and status are meant to come from
+ *   incident_derivation.py reacting to real claims, not from a value written here.
  * - Select the demo incident by default (or the first incident if it's absent for
  *   some other reason).
  * - Subscribe to that incident's WebSocket for live updates.
  * - If the initial fetch fails entirely (backend unreachable), fall back to a
- *   hardcoded standby IncidentState so the page still renders something coherent
- *   rather than a blank screen.
+ *   neutral standby IncidentState -- explicitly labeled as a disconnected
+ *   placeholder, not a scenario -- so the page still renders something coherent
+ *   rather than a blank screen, without parading fabricated severity or metrics.
  */
 export function useIncidentState() {
   const [incidentsList, setIncidentsList] = useState<IncidentState[]>([]);
@@ -44,15 +51,13 @@ export function useIncidentState() {
         let list = await fetchIncidents();
         const identityIncident = list.find((incident) => incident.incident_id === DEMO_INCIDENT_ID);
         if (!identityIncident) {
-          // Initialize default identity outage incident for immediate demo readiness
+          // Genuinely empty on creation -- no title story, no seeded symptoms. The
+          // room's own evidence is what should ever populate this, via
+          // incident_derivation.py reacting to real claims as they come in.
           const defaultInc = await createIncident({
-            title: 'Customer Login and Identity Outage',
+            title: 'Untitled Incident — Awaiting Reports',
             event_type: 'TECHNICAL_INCIDENT',
             incident_id: DEMO_INCIDENT_ID,
-            initial_symptoms: [
-              'HTTP 503 error surge on /api/v1/login across multiple regions',
-              'Customer login success rate dropped to 60%',
-            ],
           });
           list = [defaultInc, ...list];
         }
@@ -61,33 +66,29 @@ export function useIncidentState() {
         setSelectedIncidentId(selected.incident_id);
         setIncidentState(() => selected);
       } catch {
-        // Fallback demo state if backend connection fails on initial render
+        // Backend unreachable -- a neutral disconnected placeholder, not a scenario.
+        // Severity/metrics read as "nothing wrong" (LOW, full health) rather than
+        // fabricating an outage the app has no evidence for; the title says plainly
+        // that this is standby state, not a derived or reported incident.
         const fallback: IncidentState = {
           incident_id: DEMO_INCIDENT_ID,
-          title: 'Customer Login and Identity Outage',
+          title: 'No Incident Loaded (Backend Unreachable)',
           event_type: 'TECHNICAL_INCIDENT',
           status: 'IDLE',
-          severity: 'HIGH',
+          severity: 'LOW',
           metrics: {
-            severity_score: 55,
-            water_safety_index: 45,
+            severity_score: 0,
+            water_safety_index: 100,
             flood_depth_meters: 0,
-            affected_population: 8500,
-            infrastructure_integrity_pct: 70,
+            affected_population: 0,
+            infrastructure_integrity_pct: 100,
           },
-          symptoms: [
-            {
-              id: 'sym-1',
-              description: 'Initial alert: 503 errors on login API',
-              severity: 'HIGH',
-              reported_at: new Date().toISOString(),
-            },
-          ],
+          symptoms: [],
           timeline: [
             {
               timestamp: new Date().toISOString(),
-              event_type: 'INCIDENT_INITIALIZED',
-              description: 'Identity outage incident initialized in standby mode.',
+              event_type: 'BACKEND_UNREACHABLE',
+              description: 'Could not reach the backend -- showing a local standby placeholder, not live evidence.',
               actor: 'SYSTEM',
             },
           ],
