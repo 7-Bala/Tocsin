@@ -2343,8 +2343,15 @@ export default function VoiceTestPage() {
                       </div>
                       {/* A machine-derived title must never read as one a commander
                           wrote. The backend re-derives it from the strongest current
-                          claim (see incident_derivation.py) and flags it here. */}
-                      {activeIncident?.title_auto_derived && (
+                          claim (see incident_derivation.py) and flags it here.
+                          title_auto_derived only means "not pinned by a human" -- it
+                          is true from the moment an incident is created, before any
+                          claim exists to derive anything from. Gating on claims.length
+                          too, so a placeholder creation title is never mislabeled as
+                          reflecting evidence that doesn't exist yet (live-reported
+                          2026-09-03: a freshly-reset incident with zero claims still
+                          showed this badge on its plain creation title). */}
+                      {activeIncident?.title_auto_derived && (activeIncident?.claims?.length ?? 0) > 0 && (
                         <div className="vcc-title-derived" title="This title restates the strongest claim currently on the evidence record. Rename the incident to pin it.">
                           ⟳ auto-derived from evidence
                         </div>
