@@ -81,26 +81,17 @@ is traceable in real time.
 
 ---
 
-### 9. Agora `agent-update`/`agent-think` endpoints — implemented, needs a live test
-**Status:** implemented 2026-09-01. `POST /api/agora/agent-update` (push a new
-system prompt into a running agent without restarting it) and
-`POST /api/agora/agent-think` (inject a one-off instruction, agent responds live)
-both wired per the confirmed schema (`docs/agora/RESEARCH.md` §13), regression
-tested (payload shape, 404-when-no-agent), curl-verified for the 404 path against
-the real backend. **Not yet confirmed:** whether Agora accepts either call
-against a real running agent, and whether the agent's behavior/speech actually
-reflects the pushed prompt or injected instruction. Needs a live agent session —
-ask before running (same billed-action category as items 4/6).
+### 9. Agora `agent-update` — implemented, still not exercised live
+**Status:** narrowed 2026-09-03. `POST /api/agora/agent-think` is now
+**live-verified** — it was the mechanism used to trigger the MCP tool call in the
+transport fix (Agora accepted the injection and the agent acted on it by calling a
+tool). What remains is only `POST /api/agora/agent-update` (push a new system
+prompt into a running agent without restarting it): wired per the confirmed schema
+(`docs/agora/RESEARCH.md` §13), regression tested, curl-verified for the
+404-no-agent path, but never called against a real running agent, so it is
+unconfirmed whether Agora accepts it and whether the agent's later behavior
+actually reflects the pushed prompt. Needs a live agent session (billed).
 
-### 10. Groq extraction tier — implemented, needs a real API key to verify
-**Status:** implemented 2026-09-01 (`backend/app/engine/extraction.py`).
-`extract_intelligence()` now tries Groq first when `GROQ_API_KEY` is set
-(structured-output JSON schema enforcement, default model
-`openai/gpt-oss-120b`), falling through to Gemini then the heuristic extractor
-exactly as before when unset. 6 new regression tests pass (mocked HTTP calls).
-**Not yet confirmed:** whether Groq's real API accepts this exact payload shape
-and returns valid structured JSON — needs the user to get a free key from
-console.groq.com and set `GROQ_API_KEY` before this can be live-verified.
 
 ---
 
@@ -111,6 +102,32 @@ None open right now.
 ---
 
 ## Recently completed (kept briefly for context, then deleted next pass)
+
+- ✅ **Groq fallback tier live-verified** (closed 2026-09-03, verified 2026-09-01 —
+  the entry was simply left stale). Commit `4e5946a` records the actual live run:
+  called `extract_with_groq()` against the real Groq API with a real key (response
+  parsed, labeled `"llm"`), then verified the full `extract_intelligence()` chain by
+  simulating a Gemini failure and confirming Groq picked up seamlessly. Gemini stays
+  primary; Groq fires only when Gemini is unconfigured or fails (including quota
+  exhaustion, which is the scenario it exists for).
+
+- ✅ **`POST /api/agora/agent-think` live-verified** (2026-09-03). Used to inject a
+  tool-triggering instruction into a real running agent during the MCP transport
+  fix; Agora accepted the call and the agent acted on it. Item 9 narrowed to
+  `agent-update`, which is still untested live.
+
+- ✅ **Live Incident Map — the incident drawn as a graph as people speak**
+  (2026-09-03). Built in response to the mentors' stated brownie-point criterion
+  (generative UI reacting to the conversation, not just chat). Renders systems,
+  proposed causes, and the links between them from the evidence record over the
+  existing WebSocket. Honesty rules enforced in a pure, tested derivation module:
+  nodes only where someone made a claim, edges only where a human's own hypothesis
+  names that system, every edge dashed with a "?" and labelled "proposed link, not
+  established", ruled-out causes kept and struck through, contradicted systems
+  ranked first and shown split with both sources. Pure SVG, no graph library
+  (~6 kB). Live-verified: posted an observation naming a new system and watched
+  the map add it and flip its failing counter with no refresh. Light on
+  `/voice-test`, dark on `/`. 19 new tests.
 
 - ✅ **MCP tool invocation actually confirmed working — root cause of "lists tools,
   never calls one" found and fixed** (2026-09-03). This had been open since
