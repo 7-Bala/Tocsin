@@ -249,7 +249,12 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
       // does not tear down the voice call — voice audio still works either way,
       // only live transcript rendering/observation-ingestion depends on this.
       try {
-        const rtmUserAccount = `tocsin-viewer-${uid}`;
+        // Must be the bare stringified RTC uid, matching the subject the RTM
+        // token is minted for. A prefixed label like "tocsin-viewer-<uid>" is
+        // the wrong mailbox: the agent addresses messages to "<uid>", which
+        // nothing is then logged in as. voice-test/page.tsx was corrected for
+        // this on 2026-09-04; this second call site was missed at the time.
+        const rtmUserAccount = String(uid);
         const rtmTokenRes = await fetch(`${API_BASE_URL}/api/agora/rtm-token`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -265,6 +270,7 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
           rtmToken: rtmTokenData.token,
           userAccount: rtmUserAccount,
           channelName: channel_name,
+          rtcClient: client,
           onEvent: (decoded) => handleDecodedTranscriptEvent(decoded, decoded.speaker === 'TOCSIN' ? 'agora_rtm_agent' : 'agora_rtm_user'),
           onLog: addLog,
         });

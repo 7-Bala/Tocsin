@@ -787,7 +787,13 @@ async def start_conversational_agent(
         "enable_string_uid": False,
         "idle_timeout": 120,
         "advanced_features": {"enable_rtm": True},
-        "parameters": {"data_channel": "rtm"},
+        # data_channel "rtm" + advanced_features.enable_rtm are BOTH required for
+        # any client-side agent event (transcripts, state) to be delivered at all;
+        # with only one, events silently route elsewhere and no handler fires.
+        # enable_error_message surfaces pipeline failures (ASR/LLM/TTS) to the
+        # client via AGENT_ERROR -- without it the agent fails quietly, which is
+        # precisely the failure mode that made transcript debugging so opaque.
+        "parameters": {"data_channel": "rtm", "enable_error_message": True},
         "mllm": {
           "enable": True,
           "vendor": "gemini",
@@ -883,7 +889,13 @@ async def start_conversational_agent(
         "enable_string_uid": False,
         "idle_timeout": 120,
         "advanced_features": {"enable_rtm": True},
-        "parameters": {"data_channel": "rtm"},
+        # data_channel "rtm" + advanced_features.enable_rtm are BOTH required for
+        # any client-side agent event (transcripts, state) to be delivered at all;
+        # with only one, events silently route elsewhere and no handler fires.
+        # enable_error_message surfaces pipeline failures (ASR/LLM/TTS) to the
+        # client via AGENT_ERROR -- without it the agent fails quietly, which is
+        # precisely the failure mode that made transcript debugging so opaque.
+        "parameters": {"data_channel": "rtm", "enable_error_message": True},
         "asr": {
           "language": "en-US",
         },

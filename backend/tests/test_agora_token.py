@@ -590,7 +590,7 @@ async def test_gemini_live_pipeline_never_sends_mcp_servers_even_when_requested(
             # every pipeline, gemini_live included -- it is the transport, not a
             # pipeline-specific feature.
             assert sent_payload["properties"]["advanced_features"]["enable_rtm"] is True
-            assert sent_payload["properties"]["parameters"] == {"data_channel": "rtm"}
+            assert sent_payload["properties"]["parameters"] == {"data_channel": "rtm", "enable_error_message": True}
 
 
 @pytest.mark.asyncio
@@ -671,7 +671,7 @@ async def test_composed_tools_pipeline_wires_mcp_servers_under_llm(monkeypatch):
 
             assert props["advanced_features"]["enable_tools"] is True
             assert props["advanced_features"]["enable_rtm"] is True
-            assert props["parameters"] == {"data_channel": "rtm"}
+            assert props["parameters"] == {"data_channel": "rtm", "enable_error_message": True}
 
             # No secrets leaked into the app's own logs via sanitize_payload.
             from app.api.agora import sanitize_payload
@@ -718,7 +718,7 @@ async def test_composed_tools_without_mcp_url_omits_mcp_servers(monkeypatch):
             # RTM transcript delivery is unconditional (see docs/agora/RESEARCH.md §5),
             # independent of whether MCP tools were requested.
             assert sent_payload["properties"]["advanced_features"]["enable_rtm"] is True
-            assert sent_payload["properties"]["parameters"] == {"data_channel": "rtm"}
+            assert sent_payload["properties"]["parameters"] == {"data_channel": "rtm", "enable_error_message": True}
 
 
 # ─── Agora-managed model wiring (composed_tools llm vendor) ──────────────────

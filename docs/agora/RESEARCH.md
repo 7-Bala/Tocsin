@@ -532,6 +532,48 @@ from reading Agora's own source, not from running it — treat this as
 `CREDENTIAL REQUIRED`, not `VERIFIED IN CODE`, until a live session with an active
 agent confirms a transcript actually renders.
 
+### UPDATE 2026-09-04 (later) — migrated to the official toolkit; RTM delivery now demonstrably works, transcripts still unconfirmed
+
+Supersedes the two updates below on one specific point: **RTM message delivery to
+this client is no longer zero.** It was, until the missing piece below was found.
+
+**What was wrong.** The update immediately below correctly observed that the
+official toolkit's `subscribeMessage()` "never calls `rtmEngine.subscribe(channel)`",
+but drew the wrong conclusion from it — that transcripts must therefore be delivered
+point-to-point to the bare RTC uid. Verified against the installed package
+(`node_modules/agora-agent-client-toolkit@2.9.1/dist/index.js`): the string
+`.subscribe(` appears **zero times in the entire bundle**. `subscribeMessage()` only
+calls `bindRtcEvents()` / `bindRtmEvents()` and stores the channel name. The toolkit
+does not open the transport at all — *the application must subscribe the RTM client
+to the channel itself*, which matches the documented instruction to "subscribe the
+RTM client to the same channel name you passed to the agent's `properties.channel`".
+
+So both halves are required, and either alone yields silence:
+  1. `rtmClient.subscribe(channel, { withMessage: true })` — opens the transport.
+  2. `ai.subscribeMessage(channel)` — binds the handlers.
+
+**Status change (live-observed).** With the channel subscription restored alongside
+the toolkit, the client now receives RTM events from Agora for the first time in this
+project's history — toolkit debug output shows `presence Publisher:` events arriving
+on the subscribed channel. Previously *nothing* arrived. RTM transport is therefore
+`VERIFIED IN CODE`.
+
+**Still unconfirmed: agent transcript messages.** No `assistant.transcription`
+message has yet been observed. Two confounds prevent calling this settled, and both
+are environmental rather than code:
+  - The verification browser blocks microphone access, so the local user never
+    publishes audio and no genuine ASR→LLM→TTS turn occurs.
+  - `/speak` is raw TTS passthrough and plausibly emits no transcript by design,
+    since no LLM turn happens; `/agent-think` was already recorded below as
+    unreliable at producing a spoken reply on `gemini_live`.
+
+The earlier conclusion that "zero RTM messages ever arrive" is now known to have been
+caused, at least in part, by the missing channel subscription. Whether transcripts
+flow once a real microphone turn occurs is the remaining open question. Verification
+step: join `/voice-test` in a browser with a working microphone, start an agent,
+speak a sentence aloud, and check for `assistant.transcription` in the console.
+Status: `CREDENTIAL REQUIRED` (microphone), not `NOT USED` and not `VERIFIED`.
+
 ### UPDATE 2026-09-04 — now live-tested exhaustively; still zero transcript messages ever observed
 
 Ran the exact live session this section says was needed. Correction to the record

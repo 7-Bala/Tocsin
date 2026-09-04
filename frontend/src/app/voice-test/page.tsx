@@ -776,6 +776,9 @@ export default function VoiceTestPage() {
           rtmToken,
           userAccount: rtmUserAccount,
           channelName,
+          // The toolkit attaches to the RTC client we already joined with; it
+          // does not create or join one of its own.
+          rtcClient: client,
           onEvent: (decoded) => {
             if (!decoded.text) return;
             const speakerLabel: 'You' | 'AI Agent' = decoded.speaker === 'TOCSIN' ? 'AI Agent' : 'You';
@@ -783,6 +786,7 @@ export default function VoiceTestPage() {
               ingestObservationRef.current(speakerLabel, decoded.text);
             }
           },
+          onAgentState: (state) => addLog(`🤖 Agent state: ${state}`),
           onLog: addLog,
         });
       } catch (rtmErr: any) {
