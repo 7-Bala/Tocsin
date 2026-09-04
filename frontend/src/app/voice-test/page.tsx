@@ -2096,6 +2096,15 @@ export default function VoiceTestPage() {
           border-color: #cbd5e1;
           box-sizing: border-box;
           border-radius: 8px;
+          /* Flex items (this and vcc-input-compact) default to min-width: auto,
+             which refuses to shrink below content width even with flex-shrink
+             set. With three selects in .vcc-deck-inline-row (pipeline, LLM
+             vendor when composed_tools is active, voice) plus the Start/Stop
+             button, that pushed the button off the visible row entirely once
+             the vendor select appeared -- the row's total intrinsic width
+             exceeded the container and nothing was actually allowed to
+             shrink. min-width: 0 lets these genuinely shrink to fit. */
+          min-width: 0;
         }
         .vcc-deck-footer {
           display: flex;
@@ -2915,6 +2924,7 @@ export default function VoiceTestPage() {
                                 variant="destructive"
                                 onClick={handleStopAgent}
                                 disabled={agentStatus === 'STOPPING'}
+                                style={{ flexShrink: 0 }}
                               >
                                 {agentStatus === 'STOPPING' ? 'Stopping…' : '■ Stop'}
                               </Button>
@@ -2925,6 +2935,7 @@ export default function VoiceTestPage() {
                                 onClick={handleStartAgent}
                                 disabled={!isConnected || agentStatus === 'STARTING'}
                                 title={!isConnected ? 'Connect voice channel first' : undefined}
+                                style={{ flexShrink: 0 }}
                               >
                                 {agentStatus === 'STARTING' ? 'Starting…' : '▶ Start'}
                               </Button>
