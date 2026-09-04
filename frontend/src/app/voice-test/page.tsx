@@ -2228,31 +2228,65 @@ export default function VoiceTestPage() {
         }
         .vcc-conflict-rec { font-size: 10px; color: #64748b; font-style: italic; }
 
-        /* Action items */
-        .vcc-ai-row {
+        /* Action items — Notion-style checklist */
+        .vcc-todo-group { display: flex; flex-direction: column; }
+        .vcc-todo-group-done {
+          margin-top: 6px;
+          padding-top: 6px;
+          border-top: 1px solid #f1f5f9;
+        }
+        .vcc-todo-group-label {
+          font-size: 10px;
+          font-weight: 600;
+          color: #94a3b8;
+          margin-bottom: 2px;
+        }
+        .vcc-todo-row {
           display: flex;
           align-items: flex-start;
-          justify-content: space-between;
-          gap: 10px;
-          padding: 9px 0;
-          border-bottom: 1px solid #f1f5f9;
+          gap: 9px;
+          padding: 6px 4px;
+          border-radius: 5px;
+          transition: background-color 0.12s ease;
         }
-        .vcc-ai-row:last-child { border-bottom: none; padding-bottom: 0; }
-        .vcc-ai-main { flex: 1; min-width: 0; }
-        .vcc-ai-desc { font-size: 11.5px; color: #1e293b; line-height: 1.4; }
-        .vcc-ai-desc.done { text-decoration: line-through; color: #94a3b8; }
-        .vcc-ai-meta { font-size: 10px; color: #64748b; margin-top: 2px; display: flex; gap: 4px; flex-wrap: wrap; }
-        .vcc-ai-side { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; flex-shrink: 0; }
-        .vcc-ai-status {
-          font-size: 9px;
-          font-weight: 700;
-          padding: 2px 7px;
-          border-radius: 3px;
-          background: #f1f5f9;
-          color: #64748b;
+        .vcc-todo-row:hover { background: #f8fafc; }
+        .vcc-todo-checkbox {
+          appearance: none;
+          -webkit-appearance: none;
+          flex-shrink: 0;
+          width: 16px;
+          height: 16px;
+          margin-top: 1.5px;
+          border-radius: 4px;
+          border: 1.5px solid #cbd5e1;
+          background: #ffffff;
+          cursor: pointer;
+          padding: 0;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          color: #ffffff;
+          transition: background-color 0.12s ease, border-color 0.12s ease;
         }
-        .vcc-ai-status.ok  { background: #dcfce7; color: #15803d; }
-        .vcc-ai-status.bad { background: #fee2e2; color: #dc2626; }
+        .vcc-todo-checkbox:hover:not(:disabled) { border-color: #94a3b8; background: #f8fafc; }
+        .vcc-todo-checkbox:disabled { opacity: 0.5; cursor: not-allowed; }
+        .vcc-todo-checkbox.checked {
+          background: #0f172a;
+          border-color: #0f172a;
+          cursor: default;
+        }
+        .vcc-todo-body { flex: 1; min-width: 0; }
+        .vcc-todo-desc { font-size: 11.5px; color: #1e293b; line-height: 1.4; }
+        .vcc-todo-desc.done { text-decoration: line-through; color: #94a3b8; }
+        .vcc-todo-meta {
+          font-size: 10px;
+          color: #94a3b8;
+          margin-top: 1px;
+          display: flex;
+          gap: 4px;
+          flex-wrap: wrap;
+        }
+        .vcc-todo-overdue { color: #b91c1c; font-weight: 600; }
 
         /* Risks */
         .vcc-risk {
@@ -3066,52 +3100,83 @@ export default function VoiceTestPage() {
                   </div>
                 )}
 
-                {/* ── Action items: who owes what, by when ── */}
-                {(activeIncident?.action_items?.length ?? 0) > 0 && (
-                  <div className="vcc-section-card">
-                    <div className="vcc-section-label">
-                      Action Items
-                      <span className="vcc-count-pill">{activeIncident!.action_items!.length}</span>
-                    </div>
-                    {activeIncident!.action_items!.map((item) => {
-                      const done = item.status === 'COMPLETE';
-                      return (
-                        <div className="vcc-ai-row" key={item.id}>
-                          <div className="vcc-ai-main">
-                            <div className={`vcc-ai-desc ${done ? 'done' : ''}`}>{item.description}</div>
-                            <div className="vcc-ai-meta">
-                              <span>{item.owner_name || 'Unassigned'}</span>
-                              {item.due_at && isMounted && (
-                                <span>
-                                  · due{' '}
-                                  {new Date(item.due_at).toLocaleTimeString([], {
-                                    hour: '2-digit',
-                                    minute: '2-digit',
-                                  })}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                          <div className="vcc-ai-side">
-                            <span className={`vcc-ai-status ${done ? 'ok' : item.status === 'OVERDUE' ? 'bad' : ''}`}>
-                              {item.status}
-                            </span>
-                            {!done && (
-                              <Button
-                                size="xs"
-                                variant="outline"
-                                disabled={busyId === item.id}
-                                onClick={() => handleCompleteItem(item.id)}
-                              >
-                                {busyId === item.id ? '…' : 'Complete'}
-                              </Button>
-                            )}
-                          </div>
+                {/* ── Action items: a Notion-style checklist ──
+                    Grouped into To do / Completed rather than one flat list,
+                    with a real checkbox (checking it off IS the complete
+                    action -- no separate button) matching how a to-do list
+                    is actually used. Read the same activeIncident.action_items
+                    array as before; this is presentation only, no new state. */}
+                {(activeIncident?.action_items?.length ?? 0) > 0 && (() => {
+                  const items = activeIncident!.action_items!;
+                  const openItems = items.filter((i) => i.status !== 'COMPLETE');
+                  const doneItems = items.filter((i) => i.status === 'COMPLETE');
+                  const dueLabel = (item: typeof items[number]) =>
+                    item.due_at && isMounted
+                      ? new Date(item.due_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                      : null;
+
+                  return (
+                    <div className="vcc-section-card">
+                      <div className="vcc-section-label">
+                        Action Items
+                        <span className="vcc-count-pill">{openItems.length}</span>
+                      </div>
+
+                      {openItems.length > 0 && (
+                        <div className="vcc-todo-group">
+                          {openItems.map((item) => {
+                            const overdue = item.status === 'OVERDUE';
+                            const due = dueLabel(item);
+                            return (
+                              <div className="vcc-todo-row" key={item.id}>
+                                <button
+                                  type="button"
+                                  role="checkbox"
+                                  aria-checked={false}
+                                  aria-label={`Mark "${item.description}" complete`}
+                                  className="vcc-todo-checkbox"
+                                  disabled={busyId === item.id}
+                                  onClick={() => handleCompleteItem(item.id)}
+                                />
+                                <div className="vcc-todo-body">
+                                  <div className="vcc-todo-desc">{item.description}</div>
+                                  <div className="vcc-todo-meta">
+                                    <span>{item.owner_name || 'Unassigned'}</span>
+                                    {due && (
+                                      <span className={overdue ? 'vcc-todo-overdue' : undefined}>
+                                        · due {due}{overdue ? ' (overdue)' : ''}
+                                      </span>
+                                    )}
+                                    {item.status === 'BLOCKED' && <span className="vcc-todo-overdue">· blocked</span>}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
+                      )}
+
+                      {doneItems.length > 0 && (
+                        <div className="vcc-todo-group vcc-todo-group-done">
+                          <div className="vcc-todo-group-label">Completed ({doneItems.length})</div>
+                          {doneItems.map((item) => (
+                            <div className="vcc-todo-row" key={item.id}>
+                              <span className="vcc-todo-checkbox checked" aria-hidden="true">
+                                <CheckIcon size={11} />
+                              </span>
+                              <div className="vcc-todo-body">
+                                <div className="vcc-todo-desc done">{item.description}</div>
+                                <div className="vcc-todo-meta">
+                                  <span>{item.owner_name || 'Unassigned'}</span>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {/* ── Unresolved risks: what could still go wrong ── */}
                 {(activeIncident?.unresolved_risks?.length ?? 0) > 0 && (
