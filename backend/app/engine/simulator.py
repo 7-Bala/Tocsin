@@ -172,6 +172,35 @@ class IncidentSimulator:
         """List all stored incidents."""
         return list(self._incidents.values())
 
+    async def delete_incident(self, incident_id: str) -> bool:
+        """
+        Permanently delete an incident from both the database and memory.
+
+        Returns True if the incident existed, False if there was nothing to delete.
+        The in-memory eviction happens even when the database delete fails, so a
+        purged room can never keep serving stale state out of the process cache.
+        """
+        existed = incident_id in self._incidents
+        try:
+            persisted = await incident_repo.get(incident_id)
+            existed = existed or persisted is not None
+        except Exception as e:
+            logger.debug(f"DB lookup during delete of {incident_id} failed: {e}")
+
+        # Cancel any background loop still running for this incident first. Those
+        # loops re-`upsert` the state they hold, so leaving one alive would let it
+        # write the incident back into the database moments after it was purged.
+        task = self._tasks.pop(incident_id, None)
+        if task and not task.done():
+            task.cancel()
+
+        try:
+            await incident_repo.delete(incident_id)
+        finally:
+            self._incidents.pop(incident_id, None)
+            self._locks.pop(incident_id, None)
+        return existed
+
     async def trigger_event(
         self, incident_id: str, request: TriggerEventRequest
     ) -> IncidentState:

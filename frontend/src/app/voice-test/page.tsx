@@ -12,6 +12,7 @@ import {
   getFinalSummary,
   runIdentityOutageDemo,
   createIncident,
+  deleteIncident,
   simulateTranscript,
   recordDecision,
   supersedeDecision,
@@ -38,6 +39,20 @@ import { Button } from '@/components/ui/button';
 import type { Claim } from '@/types/incident';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+/**
+ * A room id unique to this page load.
+ *
+ * Doubles as the Agora channel name and the Tocsin incident id (the app treats
+ * them as the same string). The date part makes rooms legible in logs and in the
+ * database; the random suffix keeps two people opening the app in the same minute
+ * from colliding into one another's incident.
+ */
+function newRoomId(): string {
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+  const suffix = Math.random().toString(36).slice(2, 7);
+  return `room-${stamp}-${suffix}`;
+}
 
 function estimateDominantFrequency(data: Uint8Array, sampleRate: number, fftSize: number): number {
   if (data.length < 3) return 0;
@@ -108,13 +123,12 @@ type TranscriptEntry = { id: string; speaker: 'You' | 'AI Agent'; text: string; 
 export default function VoiceTestPage() {
 
   // ── Core session state ─────────────────────────────────────────────────
-  // Default matches the canonical demo incident ID (same convention the root
-  // dashboard's VoiceHUD uses: `activeIncident?.incident_id || 'inc-demo-identity-outage'`).
-  // Previously defaulted to 'tocsin-emergency-room', which is not a real incident ID —
-  // every /observations POST from this page 404'd silently against it. Agora channel
-  // names and Tocsin incident IDs are treated as the same string throughout this app,
-  // so reusing the incident ID here is consistent with the rest of the codebase.
-  const [channelName,        setChannelName]       = useState('inc-demo-identity-outage');
+  // Agora channel names and Tocsin incident IDs are the same string throughout this
+  // app: the room *is* the incident. The value starts empty and is filled with a
+  // freshly generated room id in the mount effect below -- generating it in this
+  // initializer would run once during SSR and again during hydration, producing two
+  // different ids for the same render (React hydration mismatch #418/#425).
+  const [channelName,        setChannelName]       = useState('');
   const [connectionState,    setConnectionState]   = useState<ConnectionState>('DISCONNECTED');
   const [isMuted,            setIsMuted]           = useState(false);
   const [isSpeaking,         setIsSpeaking]        = useState(false);
@@ -160,14 +174,22 @@ export default function VoiceTestPage() {
   // completely disconnected from the real backend evidence engine) with the exact
   // same live incident state the root dashboard (`/`) uses. See
   // frontend/src/hooks/useIncidentState.ts and TODO.md item 1 for the full history.
+  // The incident id of the room currently joined, or null when not in one.
+  //
+  // This is the whole session model: joining a channel creates a brand-new, empty
+  // incident and starts gathering evidence into it; leaving purges it. Nothing is
+  // loaded on mount and there is no incident picker, because an incident that
+  // outlives its conversation shows accumulated evidence that the person looking at
+  // the screen never said -- which is indistinguishable from the product making
+  // things up. Everything on this page reads from this one id.
+  const [sessionIncidentId, setSessionIncidentId] = useState<string | null>(null);
+
   const {
     activeIncident,
     wsStatus,
     refreshActiveIncident,
-    incidentsList,
-    handleSelectIncident,
     handleIncidentUpdated,
-  } = useIncidentState();
+  } = useIncidentState(sessionIncidentId);
 
   // ── Commander console state (merged in from the root dashboard) ─────────
   // The commander key is held in component state ONLY, never persisted to
@@ -194,16 +216,6 @@ export default function VoiceTestPage() {
   // rather than silently discarded when / was deleted; kept native to this
   // page's light design system instead of importing the old dark-themed
   // components wholesale.
-
-  // Incident switcher + minimal creation (no flood-scenario event-type
-  // picker -- IncidentHeader's original modal offered FLOOD_SURGE /
-  // WATER_CONTAMINATION / etc., which CLAUDE.md explicitly says must never
-  // resurface in the identity-outage product).
-  const [showNewIncidentForm, setShowNewIncidentForm] = useState(false);
-  const [newIncidentTitle, setNewIncidentTitle] = useState('');
-  const [newIncidentSymptom, setNewIncidentSymptom] = useState('');
-  const [isCreatingIncident, setIsCreatingIncident] = useState(false);
-  const [createIncidentError, setCreateIncidentError] = useState<string | null>(null);
 
   // Manual utterance simulator (DemoModeControl) -- types a line as a named
   // role without needing a working microphone.
@@ -331,6 +343,12 @@ export default function VoiceTestPage() {
     return () => window.removeEventListener('unhandledrejection', handler);
   }, [addLog]);
 
+  // Mirrors sessionIncidentId into a ref. The Agora RTM and browser-speech
+  // callbacks that feed observations in are registered once at join time and would
+  // otherwise close over whatever the id was at that moment.
+  const sessionIncidentIdRef = useRef<string | null>(null);
+  useEffect(() => { sessionIncidentIdRef.current = sessionIncidentId; }, [sessionIncidentId]);
+
   // ── Transcript entry ───────────────────────────────────────────────────
   const addTranscriptEntry = useCallback((speaker: 'You' | 'AI Agent', text: string) => {
     const cleanText = text.trim();
@@ -366,7 +384,12 @@ export default function VoiceTestPage() {
 
     addTranscriptEntryRef.current(speaker, text);
 
-    const incId = channelName.trim() || 'inc-demo-identity-outage';
+    // No session, nowhere to put it. This used to fall back to a hardcoded
+    // 'inc-demo-identity-outage' id, which quietly wrote speech from an
+    // un-joined page into a long-lived shared incident.
+    const incId = sessionIncidentIdRef.current;
+    if (!incId) return;
+
     fetch(`${API_BASE_URL}/api/incidents/${incId}/observations`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -378,7 +401,7 @@ export default function VoiceTestPage() {
     }).catch((err) => {
       console.warn('[voice-test] Observation ingestion failed:', err);
     });
-  }, [channelName]);
+  }, []);
 
   const ingestObservationRef = useRef(ingestObservation);
   useEffect(() => { ingestObservationRef.current = ingestObservation; }, [ingestObservation]);
@@ -426,15 +449,49 @@ export default function VoiceTestPage() {
     barColorsRef.current.forEach(c => { c[0] = 75; c[1] = 85; c[2] = 99; });
     displayedSpeechProbRef.current = 0;
     displayedMicLevelRef.current = 0;
-    addLog('Left voice channel. Dashboard data retained.');
+
+    // ── Wipe the incident record this session produced ────────────────────
+    // Leaving the room ends the incident. The evidence belonged to this
+    // conversation and does not outlive it, so the server-side record is purged
+    // and every local panel is emptied. This is irreversible and deliberate: the
+    // alternative (the previous behavior, "Dashboard data retained") meant the
+    // next person to open the page inherited someone else's accumulated claims,
+    // conflicts and action items with nothing marking them as stale.
+    const endedIncidentId = sessionIncidentIdRef.current;
+    setSessionIncidentId(null);
+    sessionIncidentIdRef.current = null;
+    setTranscript([]);
+    recentUtterancesRef.current.clear();
+
+    if (endedIncidentId) {
+      try {
+        const result = await deleteIncident(endedIncidentId);
+        addLog(
+          result.existed
+            ? `Left channel. Incident '${endedIncidentId}' and all its evidence were purged.`
+            : `Left channel. Nothing to purge for '${endedIncidentId}'.`
+        );
+      } catch (e: any) {
+        // A failed wipe must be stated, not swallowed -- otherwise the record is
+        // still on the server while the UI implies it is gone.
+        addLog(`Left channel, but purging '${endedIncidentId}' FAILED: ${e.message}`);
+      }
+    } else {
+      addLog('Left voice channel.');
+    }
   }, [addLog]);
 
   // ── Mount effect ───────────────────────────────────────────────────────
   useEffect(() => {
     setIsMounted(true);
     setCurrentTime(new Date());
+    // A fresh room id per page load, so "join" can never land in a room that
+    // already holds someone else's conversation. Generated here rather than in the
+    // useState initializer to keep the first client render byte-identical to the
+    // server-rendered HTML.
+    setChannelName(newRoomId());
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
-    addLog('Voice Command Center ready.');
+    addLog('Incident room ready. Join a channel to open an incident record.');
     return () => { clearInterval(timer); handleLeave(); };
   }, [addLog, handleLeave]);
 
@@ -734,12 +791,32 @@ export default function VoiceTestPage() {
   // ── handleJoin ─────────────────────────────────────────────────────────
   const handleJoin = async () => {
     if (!channelName.trim()) { addLog('Error: Channel name cannot be empty.'); return; }
-    // Clear the local transcript display on join — the backend incident record itself
-    // is real, persisted data and is intentionally left untouched.
+    const roomId = channelName.trim();
     setTranscript([]);
+    recentUtterancesRef.current.clear();
     try {
+      // ── Open a genuinely empty incident record for this room ────────────
+      // Purge first: if this room id was used before (a reload mid-session, or a
+      // reused name), its leftovers would otherwise read as evidence from the
+      // conversation about to happen. Then create the incident with no title
+      // story and no seeded symptoms -- title, severity, status and hypotheses
+      // are derived server-side from real claims by incident_derivation.py as
+      // people actually speak.
       setConnectionState('FETCHING_TOKEN');
-      addLog(`Requesting RTC token for '${channelName}'...`);
+      addLog(`Opening a fresh incident record for '${roomId}'...`);
+      await deleteIncident(roomId).catch(() => {
+        // Nothing to purge is the normal case for a new room id.
+      });
+      await createIncident({
+        title: 'Untitled Incident — Awaiting Reports',
+        event_type: 'TECHNICAL_INCIDENT',
+        incident_id: roomId,
+      });
+      setSessionIncidentId(roomId);
+      sessionIncidentIdRef.current = roomId;
+      addLog(`Incident '${roomId}' opened. Gathering evidence from this conversation.`);
+
+      addLog(`Requesting RTC token for '${roomId}'...`);
       const randomUid = Math.floor(1000 + Math.random() * 9000);
       const tokenRes  = await fetch(`${API_BASE_URL}/api/agora/token`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -991,7 +1068,15 @@ export default function VoiceTestPage() {
         speechRecognitionRef.current = rec; speechRecognitionActiveRef.current = true;
         try { rec.start(); } catch {}
       }
-    } catch (err: any) { addLog(`Join/VAD Error: ${err.message}`); setConnectionState('ERROR'); }
+    } catch (err: any) {
+      addLog(`Join/VAD Error: ${err.message}`);
+      // A failed join means you are not in a room, so the incident record opened
+      // moments ago has no conversation behind it. Tear all the way down rather
+      // than leaving an empty orphan incident on the server. handleLeave also
+      // purges it; setting ERROR afterwards keeps the failure visible.
+      await handleLeave();
+      setConnectionState('ERROR');
+    }
   };
 
   // ── Other handlers ─────────────────────────────────────────────────────
@@ -1059,11 +1144,21 @@ export default function VoiceTestPage() {
   };
 
   const handleRunDemo = async () => {
+    // Seeds the scripted scenario into the room you are in. Without a room there
+    // is no incident to seed, and writing to a fixed demo id would produce an
+    // incident nothing on screen is watching.
+    if (!sessionIncidentId) {
+      addLog('Join a channel first — the demo scenario seeds the current incident record.');
+      setDemoFeedback('Join a channel first');
+      setTimeout(() => setDemoFeedback(null), 3000);
+      return;
+    }
     try {
       setIsDemoRunning(true);
       setDemoFeedback('Loading scenario…');
-      addLog('Executing deterministic Identity Outage demo scenario...');
-      const res = await runIdentityOutageDemo();
+      addLog(`Executing deterministic Identity Outage demo scenario into '${sessionIncidentId}'...`);
+      const res = await runIdentityOutageDemo(sessionIncidentId);
+      await refreshActiveIncident();
       if (res?.state) {
         addLog('Seeded deterministic Identity Outage demo scenario into PostgreSQL.');
         setDemoFeedback('Scenario loaded');
@@ -1170,31 +1265,7 @@ export default function VoiceTestPage() {
       setFinalReport(res.content);
     });
 
-  // ── Ported handlers (incident switcher/creation, manual simulator,
-  //    decisions, handoff) ─────────────────────────────────────────────────
-
-  const handleCreateIncident = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newIncidentTitle.trim()) return;
-    setIsCreatingIncident(true);
-    setCreateIncidentError(null);
-    try {
-      const created = await createIncident({
-        title: newIncidentTitle.trim(),
-        event_type: 'TECHNICAL_INCIDENT',
-        initial_symptoms: newIncidentSymptom.trim() ? [newIncidentSymptom.trim()] : undefined,
-      });
-      handleIncidentUpdated(created);
-      handleSelectIncident(created.incident_id);
-      setShowNewIncidentForm(false);
-      setNewIncidentTitle('');
-      setNewIncidentSymptom('');
-    } catch (err: any) {
-      setCreateIncidentError(err?.message || 'Failed to create incident');
-    } finally {
-      setIsCreatingIncident(false);
-    }
-  };
+  // ── Ported handlers (manual simulator, decisions, handoff) ──────────────
 
   const handleSimulateUtterance = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1483,6 +1554,42 @@ export default function VoiceTestPage() {
           color: #64748b;
           margin-bottom: 8px;
           flex-shrink: 0;
+        }
+        /* Session record status (replaces the old incident switcher) */
+        .vcc-session-row {
+          display: flex;
+          align-items: center;
+          gap: 7px;
+          flex-wrap: wrap;
+        }
+        .vcc-session-dot {
+          width: 6px;
+          height: 6px;
+          border-radius: 999px;
+          background: #16a34a;
+          flex-shrink: 0;
+        }
+        .vcc-session-dot.idle { background: #cbd5e1; }
+        .vcc-session-state {
+          font-size: 11.5px;
+          font-weight: 600;
+          color: #15803d;
+        }
+        .vcc-session-state.idle { color: #94a3b8; }
+        .vcc-session-id {
+          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-size: 10px;
+          color: #475569;
+          background: #f1f5f9;
+          border: 1px solid #e2e8f0;
+          border-radius: 3px;
+          padding: 1px 5px;
+        }
+        .vcc-session-note {
+          font-size: 10.5px;
+          line-height: 1.45;
+          color: #94a3b8;
+          margin-top: 5px;
         }
         .vcc-card-sm {
           background: #ffffff;
@@ -2607,70 +2714,37 @@ export default function VoiceTestPage() {
               <div className="vcc-right-inner">
                 <div className="vcc-right-title">Incident Command &amp; Controls</div>
 
-                {/* ── Incident switcher + creation (ported from the removed
-                    root dashboard's IncidentHeader; its flood-scenario
-                    "Trigger Crisis Spike" modal was left out on purpose --
-                    see CLAUDE.md on not resurfacing flood labels) ── */}
-                {incidentsList.length > 0 && (
-                  <div className="vcc-section-card">
-                    <div className="vcc-section-label">Active Incident</div>
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <select
-                        className="vcc-select"
-                        style={{ flex: 1 }}
-                        value={activeIncident?.incident_id || ''}
-                        onChange={(e) => handleSelectIncident(e.target.value)}
-                        aria-label="Select active incident"
-                      >
-                        {incidentsList.map((inc) => (
-                          <option key={inc.incident_id} value={inc.incident_id}>
-                            {inc.title} ({inc.status})
-                          </option>
-                        ))}
-                      </select>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => setShowNewIncidentForm((v) => !v)}
-                      >
-                        + New
-                      </Button>
+                {/* ── Session record status ──
+                    Replaces the old incident switcher + creation form. There is
+                    nothing to pick between: the room you joined is the incident,
+                    and it lives only as long as the session. */}
+                <div className="vcc-section-card">
+                  <div className="vcc-section-label">Incident Record</div>
+                  {sessionIncidentId ? (
+                    <div className="vcc-session-live">
+                      <div className="vcc-session-row">
+                        <span className="vcc-session-dot" />
+                        <span className="vcc-session-state">Recording</span>
+                        <code className="vcc-session-id">{sessionIncidentId}</code>
+                      </div>
+                      <div className="vcc-session-note">
+                        Opened empty on join. Everything below was derived from this
+                        conversation, and is erased when you leave the channel.
+                      </div>
                     </div>
-                    {showNewIncidentForm && (
-                      <form onSubmit={handleCreateIncident} style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
-                        <input
-                          className="vcc-input"
-                          placeholder="Incident title"
-                          required
-                          value={newIncidentTitle}
-                          onChange={(e) => setNewIncidentTitle(e.target.value)}
-                        />
-                        <input
-                          className="vcc-input"
-                          placeholder="Initial observation (optional)"
-                          value={newIncidentSymptom}
-                          onChange={(e) => setNewIncidentSymptom(e.target.value)}
-                        />
-                        {createIncidentError && (
-                          <div className="vcc-cmd-error"><AlertTriangleIcon /> {createIncidentError}</div>
-                        )}
-                        <div className="vcc-btn-row" style={{ marginTop: 0 }}>
-                          <Button type="submit" size="xs" disabled={isCreatingIncident}>
-                            {isCreatingIncident ? 'Creating…' : 'Create'}
-                          </Button>
-                          <Button
-                            type="button"
-                            size="xs"
-                            variant="outline"
-                            onClick={() => { setShowNewIncidentForm(false); setCreateIncidentError(null); }}
-                          >
-                            Cancel
-                          </Button>
-                        </div>
-                      </form>
-                    )}
-                  </div>
-                )}
+                  ) : (
+                    <div className="vcc-session-idle">
+                      <div className="vcc-session-row">
+                        <span className="vcc-session-dot idle" />
+                        <span className="vcc-session-state idle">No active record</span>
+                      </div>
+                      <div className="vcc-session-note">
+                        Join the channel to open a fresh incident record. Nothing is
+                        tracked until then.
+                      </div>
+                    </div>
+                  )}
+                </div>
 
                 {/* ── Integrated Startup & Agent Control Deck ── */}
                 <div className="vcc-control-deck">
@@ -2834,9 +2908,13 @@ export default function VoiceTestPage() {
                           <Button
                             size="mini"
                             variant="outline"
-                            disabled={isDemoRunning}
+                            disabled={isDemoRunning || !sessionIncidentId}
                             onClick={handleRunDemo}
-                            title="Load deterministic customer login outage demo scenario into PostgreSQL"
+                            title={
+                              sessionIncidentId
+                                ? 'Seed the deterministic customer login outage scenario into the current incident record'
+                                : 'Join a channel first — the scenario seeds the active incident record'
+                            }
                           >
                             {isDemoRunning ? 'Loading…' : demoFeedback || (<><ZapIcon /> Load Demo</>)}
                           </Button>
@@ -2992,7 +3070,11 @@ export default function VoiceTestPage() {
                     ~200-line client-side regex simulator (extractIncidentInfo, with
                     hardcoded flood/fire/earthquake/cyclone patterns) with tiles derived
                     live from the real backend evidence record via deriveDynamicTiles. */}
-                <DynamicSituationTiles incident={activeIncident} wsStatus={wsStatus} />
+                <DynamicSituationTiles
+                  incident={activeIncident}
+                  wsStatus={wsStatus}
+                  hasSession={!!sessionIncidentId}
+                />
 
                 {/* ── Possible Causes (Hypotheses) — real data, item 1 step 4 ── */}
                 {(activeIncident?.hypotheses?.length ?? 0) > 0 && (

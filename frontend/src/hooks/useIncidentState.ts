@@ -1,132 +1,78 @@
 import { useCallback, useEffect, useState } from 'react';
 import { IncidentState } from '@/types/incident';
-import { createIncident, fetchIncident, fetchIncidents } from '@/hooks/useIncidentApi';
+import { fetchIncident } from '@/hooks/useIncidentApi';
 import { useIncidentWebSocket, WsConnectionStatus } from '@/hooks/useIncidentWebSocket';
 
-const DEMO_INCIDENT_ID = 'inc-demo-identity-outage';
-
 /**
- * Single source of truth for "the current incident and its live state," shared by
- * every page that needs it. Extracted from `/` (page.tsx) verbatim — no behavior
- * change — specifically so `/voice-test` can consume the exact same incident data the
- * dashboard does instead of maintaining a second, independent implementation that can
- * silently drift out of sync (see docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md).
+ * Live state for exactly one incident: the room you are currently in.
  *
- * Behavior, current:
- * - On mount, fetch the incident list; if the canonical demo incident id doesn't
- *   exist yet, create it -- genuinely empty (no title story, no seeded symptoms, no
- *   claims). Live-reported 2026-09-03: this used to pre-populate a scripted
- *   "Customer Login and Identity Outage" scenario with two hardcoded symptoms on
- *   every fresh install, which looked indistinguishable from fabricated evidence to
- *   someone opening the app to test whether it derives things from real input. The
- *   incident's actual title, severity and status are meant to come from
- *   incident_derivation.py reacting to real claims, not from a value written here.
- * - Select the demo incident by default (or the first incident if it's absent for
- *   some other reason).
- * - Subscribe to that incident's WebSocket for live updates.
- * - If the initial fetch fails entirely (backend unreachable), fall back to a
- *   neutral standby IncidentState -- explicitly labeled as a disconnected
- *   placeholder, not a scenario -- so the page still renders something coherent
- *   rather than a blank screen, without parading fabricated severity or metrics.
+ * Behavior:
+ * - Pass the incident id of the joined room, or `null` when not in a room.
+ * - `null` means genuinely nothing: no fetch, no incident, no placeholder. The UI
+ *   is expected to render an explicit "not in a room" empty state rather than
+ *   showing an incident shell with zeroed numbers, which reads as real data.
+ * - When an id is given, fetch that incident once and then track it live over the
+ *   incident WebSocket.
+ *
+ * History (2026-09-04): this hook used to own a hardcoded `inc-demo-identity-outage`
+ * id, auto-create that incident on mount if it was missing, and expose a list plus a
+ * selector so the user could switch between incidents. That made every fresh page
+ * load open onto a pre-existing incident whose evidence had accumulated across
+ * previous sessions -- indistinguishable, to anyone opening the app, from data the
+ * product had fabricated. The incident is now created by joining a room and purged
+ * by leaving it, so what you see in a room is only ever what that conversation
+ * produced. Title, severity, status and hypotheses are still derived server-side
+ * from real claims by app/engine/incident_derivation.py; nothing here writes them.
  */
-export function useIncidentState() {
-  const [incidentsList, setIncidentsList] = useState<IncidentState[]>([]);
-  const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  // Lazily-initialized (not `new Date()` inline): evaluating a timestamp during the
-  // initializer runs it once on the server during SSR and again on the client during
-  // hydration, producing two different values for the same render and triggering a
-  // React hydration mismatch (errors #418/#425). Starting null and setting the real
-  // value in the mount effect keeps the very first client render identical to the
-  // server-rendered HTML.
-  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+export function useIncidentState(incidentId: string | null) {
+  const [fetched, setFetched] = useState<IncidentState | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
 
   const { incidentState: wsIncident, status: wsStatus, setIncidentState } =
-    useIncidentWebSocket(selectedIncidentId);
+    useIncidentWebSocket(incidentId);
 
   useEffect(() => {
-    async function initIncidents() {
+    let cancelled = false;
+
+    if (!incidentId) {
+      // Leaving a room must clear both caches, or the panels keep rendering the
+      // evidence of a room that no longer exists.
+      setFetched(null);
+      setIncidentState(() => null);
+      setIsLoading(false);
+      return;
+    }
+
+    async function loadIncident(id: string) {
       try {
         setIsLoading(true);
-        let list = await fetchIncidents();
-        const identityIncident = list.find((incident) => incident.incident_id === DEMO_INCIDENT_ID);
-        if (!identityIncident) {
-          // Genuinely empty on creation -- no title story, no seeded symptoms. The
-          // room's own evidence is what should ever populate this, via
-          // incident_derivation.py reacting to real claims as they come in.
-          const defaultInc = await createIncident({
-            title: 'Untitled Incident — Awaiting Reports',
-            event_type: 'TECHNICAL_INCIDENT',
-            incident_id: DEMO_INCIDENT_ID,
-          });
-          list = [defaultInc, ...list];
-        }
-        setIncidentsList(list);
-        const selected = list.find((incident) => incident.incident_id === DEMO_INCIDENT_ID) || list[0];
-        setSelectedIncidentId(selected.incident_id);
-        setIncidentState(() => selected);
+        const state = await fetchIncident(id);
+        if (cancelled) return;
+        setFetched(state);
+        setIncidentState(() => state);
       } catch {
-        // Backend unreachable -- a neutral disconnected placeholder, not a scenario.
-        // Severity/metrics read as "nothing wrong" (LOW, full health) rather than
-        // fabricating an outage the app has no evidence for; the title says plainly
-        // that this is standby state, not a derived or reported incident.
-        const fallback: IncidentState = {
-          incident_id: DEMO_INCIDENT_ID,
-          title: 'No Incident Loaded (Backend Unreachable)',
-          event_type: 'TECHNICAL_INCIDENT',
-          status: 'IDLE',
-          severity: 'LOW',
-          metrics: {
-            severity_score: 0,
-            water_safety_index: 100,
-            flood_depth_meters: 0,
-            affected_population: 0,
-            infrastructure_integrity_pct: 100,
-          },
-          symptoms: [],
-          timeline: [
-            {
-              timestamp: new Date().toISOString(),
-              event_type: 'BACKEND_UNREACHABLE',
-              description: 'Could not reach the backend -- showing a local standby placeholder, not live evidence.',
-              actor: 'SYSTEM',
-            },
-          ],
-          hypotheses: [],
-          proposed_actions: [],
-          actions_taken: [],
-          participants: [],
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        };
-        setIncidentsList([fallback]);
-        setSelectedIncidentId(fallback.incident_id);
-        setIncidentState(() => fallback);
+        // The room may not be persisted yet at the moment of the first fetch
+        // (join creates it, and the WebSocket delivers state right behind this).
+        // Staying null is correct: better an honest empty room than a fabricated
+        // one.
+        if (!cancelled) setFetched(null);
       } finally {
-        setIsLoading(false);
-        setLastUpdated(new Date().toISOString());
+        if (!cancelled) setIsLoading(false);
       }
     }
 
-    initIncidents();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [setIncidentState]);
+    loadIncident(incidentId);
+    return () => { cancelled = true; };
+  }, [incidentId, setIncidentState]);
 
-  const activeIncident = wsIncident || incidentsList.find((i) => i.incident_id === selectedIncidentId) || null;
+  // The WebSocket copy wins when present: it is the one that receives every
+  // observation, conflict and derivation as they land.
+  const activeIncident = incidentId ? (wsIncident || fetched) : null;
 
   const handleIncidentUpdated = useCallback(
     (updated: IncidentState) => {
       setIncidentState(() => updated);
-      setLastUpdated(new Date().toISOString());
-      setIncidentsList((prev) => {
-        const idx = prev.findIndex((i) => i.incident_id === updated.incident_id);
-        if (idx >= 0) {
-          const next = [...prev];
-          next[idx] = updated;
-          return next;
-        }
-        return [updated, ...prev];
-      });
+      setFetched(updated);
     },
     [setIncidentState]
   );
@@ -134,35 +80,20 @@ export function useIncidentState() {
   // Resolving an evidence item mutates server-side state; refetch so the panels
   // reflect the new open/settled split even if the WebSocket update is delayed.
   const refreshActiveIncident = useCallback(async () => {
-    if (!selectedIncidentId) return;
+    if (!incidentId) return;
     try {
-      const fresh = await fetchIncident(selectedIncidentId);
+      const fresh = await fetchIncident(incidentId);
       handleIncidentUpdated(fresh);
     } catch {
       // Non-fatal: the WebSocket broadcast is the primary update path.
     }
-  }, [selectedIncidentId, handleIncidentUpdated]);
-
-  const handleSelectIncident = useCallback(
-    (id: string) => {
-      setSelectedIncidentId(id);
-      const target = incidentsList.find((i) => i.incident_id === id);
-      if (target) {
-        setIncidentState(() => target);
-      }
-    },
-    [incidentsList, setIncidentState]
-  );
+  }, [incidentId, handleIncidentUpdated]);
 
   return {
     activeIncident,
-    incidentsList,
-    selectedIncidentId,
     isLoading,
-    lastUpdated,
     wsStatus: wsStatus as WsConnectionStatus,
     handleIncidentUpdated,
     refreshActiveIncident,
-    handleSelectIncident,
   };
 }

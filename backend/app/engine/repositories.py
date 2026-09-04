@@ -166,8 +166,45 @@ class IncidentRepository:
                 logger.error(f"Failed to deserialize incident row: {e}")
         return incidents
 
+    # Child tables that carry an incident_id, ordered so that every row is removed
+    # before the rows it references. conflicts -> claims -> observations -> incidents
+    # is a real foreign-key chain (see migrations/001_initial_schema.sql), so this
+    # order is load-bearing, not cosmetic. action_audit_log has no FK constraint but
+    # is included so a purge doesn't leave orphaned audit rows behind.
+    _CHILD_TABLES: tuple[str, ...] = (
+        "action_audit_log",
+        "incident_summaries",
+        "timeline_entries",
+        "proposed_actions",
+        "action_items",
+        "unresolved_risks",
+        "missing_info",
+        "conflicts",
+        "claims",
+        "observations",
+        "participants",
+    )
+
     async def delete(self, incident_id: str) -> None:
+        """
+        Permanently remove an incident and every record belonging to it.
+
+        This deletes the child rows first. Deleting only the `incidents` row (which
+        is what this method used to do) raises a foreign-key violation for any
+        incident that has accumulated evidence -- i.e. every incident worth
+        deleting -- so the previous implementation could only ever succeed on an
+        empty incident.
+        """
+        for table in self._CHILD_TABLES:
+            try:
+                await execute(f"DELETE FROM {table} WHERE incident_id = $1", incident_id)
+            except Exception as e:
+                # Surface the failure rather than leaving a half-purged incident to
+                # look like a clean one; the caller decides how to report it.
+                logger.error(f"Purge of {table} for incident '{incident_id}' failed: {e}")
+                raise
         await execute("DELETE FROM incidents WHERE incident_id = $1", incident_id)
+        logger.info(f"Purged incident '{incident_id}' and all associated records.")
 
 
 # ─── Participant Repository ──────────────────────────────────────────────────

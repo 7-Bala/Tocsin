@@ -17,11 +17,10 @@ import { AlertTriangleIcon } from '@/components/Icon';
  * sections too. A second internal subscription here would open a second WebSocket
  * connection to the same incident for no benefit.
  *
- * Note on scope (deliberate, not an oversight): the incident passed in is always
- * whatever `useIncidentState()` resolves to — the canonical demo incident by default,
- * same as `/`. This component does not know about or follow `/voice-test`'s free-text
- * "Voice Channel" field if a user types something else there — that field has always
- * been primarily an Agora RTC channel name, not an incident switcher.
+ * Note on scope: the incident passed in is the room currently joined, or null when
+ * no channel is joined. Null is a real, expected state here (nothing is recorded
+ * until someone joins), and `deriveDynamicTiles` renders it as an explicit
+ * disconnected/empty state rather than inventing placeholder tiles.
  *
  * Visual output intentionally duplicates a handful of CSS rules from
  * `voice-test/page.tsx`'s scoped `<style jsx>` block rather than importing them,
@@ -33,6 +32,13 @@ import { AlertTriangleIcon } from '@/components/Icon';
 export interface DynamicSituationTilesProps {
   incident: IncidentState | null;
   wsStatus: WsConnectionStatus;
+  /**
+   * Whether a channel is currently joined. Distinguishes "no room, nothing is
+   * supposed to be here" (the resting state) from "there is a room but its state
+   * is unavailable" (a genuine fault worth alarming about). Defaults to true so
+   * existing callers keep the old behavior.
+   */
+  hasSession?: boolean;
 }
 
 const TONE_ACCENT: Record<DynamicTile['tone'], { valueColor?: string; subClass: string }> = {
@@ -72,19 +78,32 @@ function PlaceholderTile({ label }: { label: string }) {
   );
 }
 
-export const DynamicSituationTiles: React.FC<DynamicSituationTilesProps> = ({ incident, wsStatus }) => {
+export const DynamicSituationTiles: React.FC<DynamicSituationTilesProps> = ({ incident, wsStatus, hasSession = true }) => {
   const result = deriveDynamicTiles(incident, new Date());
+
+  // No incident and no room joined is the ordinary resting state, not a fault.
+  // deriveDynamicTiles reports any null incident as `isDisconnected`, which was
+  // right when a page always had an incident loaded; now it would raise a red
+  // "Disconnected" alarm on a clean page load where nothing is wrong at all.
+  const isIdle = !hasSession && !incident;
+  const isDisconnected = result.isDisconnected && !isIdle;
 
   return (
     <div className="vcc-section-card">
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
         <div className="vcc-section-label" style={{ margin: 0 }}>Live Situation</div>
         <span style={{ fontSize: 9.5, color: '#b0b0b0', fontStyle: 'italic' }}>
-          {result.isDisconnected ? 'Disconnected' : 'Live from evidence record'}
+          {isIdle ? 'No active record' : isDisconnected ? 'Disconnected' : 'Live from evidence record'}
         </span>
       </div>
 
-      {result.isDisconnected && (
+      {isIdle && (
+        <div style={{ fontSize: 10.5, color: '#94a3b8', padding: '2px 0 6px' }}>
+          Join the channel to start gathering evidence from the conversation.
+        </div>
+      )}
+
+      {isDisconnected && (
         <div
           style={{
             fontSize: 10.5,
@@ -103,14 +122,14 @@ export const DynamicSituationTiles: React.FC<DynamicSituationTilesProps> = ({ in
         </div>
       )}
 
-      {result.isEmpty && !result.isDisconnected && (
+      {result.isEmpty && !isDisconnected && !isIdle && (
         <div className="vcc-metric-grid">
           <PlaceholderTile label="Awaiting data" />
           <PlaceholderTile label="Awaiting data" />
         </div>
       )}
 
-      {!result.isEmpty && (
+      {!result.isEmpty && !isIdle && (
         <div className="vcc-metric-grid">
           {result.tiles.map((tile) => (
             <TileCard key={tile.entity} tile={tile} />
@@ -125,7 +144,7 @@ export const DynamicSituationTiles: React.FC<DynamicSituationTilesProps> = ({ in
         </div>
       )}
 
-      {wsStatus !== 'CONNECTED' && !result.isDisconnected && (
+      {wsStatus !== 'CONNECTED' && !isDisconnected && !isIdle && (
         <div className="vcc-inferred-note" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
           <AlertTriangleIcon /> Reconnecting to live updates ({wsStatus.toLowerCase()})… showing last known values.
         </div>

@@ -66,8 +66,21 @@ class SimulateTranscriptRequest(BaseModel):
     source: str = Field(default="demo_transcript_simulation")
 
 
+class RunScenarioRequest(BaseModel):
+    """
+    Optional target for the seeded scenario.
+
+    Incidents are created per voice session now, so the caller passes the id of the
+    room it is currently in. Falling back to the fixed DEMO_INCIDENT_ID preserves
+    the previous behavior for any caller that sends no body (tests, curl, scripts).
+    """
+    incident_id: str | None = Field(default=None)
+
+
 @router.post("/identity-outage/run-all", summary="Run complete Identity Outage Demo Scenario end-to-end")
-async def run_complete_identity_outage_scenario() -> dict[str, Any]:
+async def run_complete_identity_outage_scenario(
+    request: RunScenarioRequest | None = None,
+) -> dict[str, Any]:
     """
     Executes the full identity-service outage demonstration scenario deterministically:
     1. Incident creation (CRITICAL Identity Outage)
@@ -89,8 +102,10 @@ async def run_complete_identity_outage_scenario() -> dict[str, Any]:
     # clear trace instead of silently discarding state. See TODO.md: a prior reset of
     # this exact incident could not be conclusively traced because the container whose
     # logs would have shown it had already been recreated by the time it was noticed.
+    target_incident_id = (request.incident_id if request else None) or DEMO_INCIDENT_ID
+
     logger.warning(
-        f"Identity-outage demo scenario RESET triggered for '{DEMO_INCIDENT_ID}' — "
+        f"Identity-outage demo scenario RESET triggered for '{target_incident_id}' — "
         "this discards any existing conflicts/resolutions/timeline for that incident."
     )
 
@@ -98,7 +113,7 @@ async def run_complete_identity_outage_scenario() -> dict[str, Any]:
     state = await simulator.create_incident(
         title="Customer Login and Identity Outage",
         event_type=EventType.TECHNICAL_INCIDENT,
-        incident_id=DEMO_INCIDENT_ID,
+        incident_id=target_incident_id,
         initial_symptoms=[
             "HTTP 503 error surge on /api/v1/login across multiple regions",
             "Customer login success rate dropped to 60%",

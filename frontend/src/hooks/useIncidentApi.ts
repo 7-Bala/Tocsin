@@ -220,10 +220,35 @@ export async function getFinalSummary(incidentId: string): Promise<{ content: st
   return res.json();
 }
 
-export async function runIdentityOutageDemo(): Promise<any> {
+/**
+ * Permanently delete an incident and every record attached to it.
+ *
+ * Backing endpoint is idempotent: purging an id that holds nothing succeeds with
+ * `existed: false`. That matters because this runs on the leave-channel path,
+ * where a retry or a double-click must not surface a failure.
+ */
+export async function deleteIncident(
+  incidentId: string
+): Promise<{ incident_id: string; existed: boolean; purged: boolean }> {
+  const res = await fetch(`${API_BASE_URL}/api/incidents/${incidentId}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to purge incident (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
+export async function runIdentityOutageDemo(incidentId?: string): Promise<any> {
   const res = await fetch(`${API_BASE_URL}/api/demo/identity-outage/run-all`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    // Seed the room the user is actually in. Without this the scenario always
+    // wrote to a fixed `inc-demo-identity-outage` id, which since incidents became
+    // per-session is an incident nothing is watching -- the button would appear to
+    // do nothing at all.
+    body: JSON.stringify(incidentId ? { incident_id: incidentId } : {}),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));

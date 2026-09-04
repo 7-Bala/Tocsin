@@ -142,6 +142,40 @@ async def list_incidents() -> list[IncidentState]:
     return await simulator.list_incidents()
 
 
+@router.delete(
+    "/{incident_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Permanently purge an incident and all of its evidence",
+)
+async def delete_incident(incident_id: str) -> dict[str, Any]:
+    """
+    Delete an incident and every record attached to it: observations, claims,
+    conflicts, missing information, unresolved risks, action items, proposed
+    actions, participants, timeline entries, summaries, and audit rows.
+
+    This is irreversible and is the endpoint behind "leave the room and wipe the
+    record" in the incident room UI, where each voice session is a self-contained
+    incident that is not meant to outlive the conversation that produced it.
+
+    Deleting an incident that does not exist is not an error -- the caller's goal
+    ("this id holds no data") is already satisfied -- so this returns `existed:
+    false` rather than 404. That keeps the leave-channel path idempotent: a
+    double-click, a retry, or a reload mid-teardown must not surface a failure.
+    """
+    try:
+        existed = await simulator.delete_incident(incident_id)
+    except Exception as e:
+        # A partial purge must be visible, never reported as a clean wipe.
+        logger.error(f"Failed to purge incident '{incident_id}': {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to purge incident '{incident_id}': {e}",
+        )
+
+    await ws_manager.broadcast_state(incident_id, {"incident_id": incident_id, "deleted": True})
+    return {"incident_id": incident_id, "existed": existed, "purged": True}
+
+
 @router.get(
     "/{incident_id}",
     response_model=IncidentState,
