@@ -32,6 +32,11 @@ services:
       - MCP_SERVER_PUBLIC_URL=${MCP_SERVER_PUBLIC_URL:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Commander sign-off secret for approve/reject of critical actions.
+      # Deliberately has NO default: verify_commander_authorization() returns 503
+      # when it is unset, so an unconfigured deployment fails closed instead of
+      # silently accepting approvals. Set it in .env.
+      - TOCSIN_COMMANDER_KEY=${TOCSIN_COMMANDER_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

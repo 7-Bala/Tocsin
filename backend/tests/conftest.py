@@ -29,7 +29,18 @@ async def setup_test_env():
     # (test_postgresql_live.py) already force it back via their own autouse fixture,
     # which runs after this one and is unaffected by this change.
     os.environ["USE_SQLITE_FALLBACK"] = "true"
-    os.environ["TOCSIN_COMMANDER_KEY"] = os.getenv("TOCSIN_COMMANDER_KEY", "tocsin-commander-key")
+    # Same failure mode as USE_SQLITE_FALLBACK above, and for the same reason:
+    # `os.getenv(KEY, default)` only supplies the default when the var is UNSET, so
+    # once backend/.env defines a real TOCSIN_COMMANDER_KEY (as a correctly
+    # configured deployment must), load_dotenv() at import time wins and this
+    # fixture silently adopts the developer's real secret. Every test that sends
+    # the literal "tocsin-commander-key" header then 403s. That made the suite's
+    # result depend on the developer's machine rather than on the code — it passed
+    # only while the key happened to be unconfigured. Pinning it unconditionally
+    # makes the suite hermetic. Tests needing other values (see
+    # test_security_and_state_machine.py) override per-test via monkeypatch, which
+    # runs after this fixture and restores cleanly.
+    os.environ["TOCSIN_COMMANDER_KEY"] = "tocsin-commander-key"
 
     try:
         await init_db()

@@ -4,6 +4,13 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useIncidentState } from '@/hooks/useIncidentState';
 import { DynamicSituationTiles } from '@/components/DynamicSituationTiles';
 import LiveIncidentMap from '@/components/LiveIncidentMap';
+import {
+  approveIncidentAction,
+  rejectIncidentAction,
+  completeActionItem,
+  resolveEvidenceItem,
+  getFinalSummary,
+} from '@/hooks/useIncidentApi';
 import { startRtmTranscriptSession, RtmTranscriptSession } from '@/lib/agoraRtmTranscripts';
 import { decodeAgoraStreamMessage } from '@/lib/agoraStreamDecoder';
 
@@ -130,7 +137,18 @@ export default function VoiceTestPage() {
   // completely disconnected from the real backend evidence engine) with the exact
   // same live incident state the root dashboard (`/`) uses. See
   // frontend/src/hooks/useIncidentState.ts and TODO.md item 1 for the full history.
-  const { activeIncident, wsStatus } = useIncidentState();
+  const { activeIncident, wsStatus, refreshActiveIncident } = useIncidentState();
+
+  // ── Commander console state (merged in from the root dashboard) ─────────
+  // The commander key is held in component state ONLY, never persisted to
+  // localStorage and never baked into the bundle -- it is typed per session.
+  // See hooks/useIncidentApi.ts DEFAULT_COMMANDER_KEY for why.
+  const [commanderKey, setCommanderKey] = useState('');
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [commandError, setCommandError] = useState<string | null>(null);
+  const [rejectingId, setRejectingId] = useState<string | null>(null);
+  const [rejectReason, setRejectReason] = useState('');
+  const [finalReport, setFinalReport] = useState<string | null>(null);
 
   // ── Agora / VAD refs ───────────────────────────────────────────────────
   const rtcClientRef       = useRef<any>(null);
@@ -1060,6 +1078,82 @@ export default function VoiceTestPage() {
     addLog('Transcript display cleared (backend evidence record is unaffected).');
   };
 
+  // ── Commander console handlers ─────────────────────────────────────────
+  // Every one of these calls a real backend endpoint and then refreshes the
+  // incident from the server rather than optimistically mutating local state:
+  // if the server rejects the operation (401 on a bad commander key, 409 on a
+  // duplicate approval, 503 when TOCSIN_COMMANDER_KEY is unset) the UI must
+  // show the failure, not a success that did not happen.
+  const runCommand = useCallback(
+    async (id: string, label: string, fn: () => Promise<unknown>) => {
+      if (!activeIncident) return;
+      setBusyId(id);
+      setCommandError(null);
+      try {
+        await fn();
+        await refreshActiveIncident();
+        addLog(`✅ ${label}`);
+      } catch (err: any) {
+        const msg = err?.message || 'Request failed';
+        setCommandError(msg);
+        addLog(`❌ ${label} failed — ${msg}`);
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [activeIncident, refreshActiveIncident, addLog]
+  );
+
+  const handleApprove = (actionId: string, toolName: string) =>
+    runCommand(actionId, `Approved ${toolName}`, () =>
+      approveIncidentAction(
+        activeIncident!.incident_id,
+        actionId,
+        { commander_id: 'Voice Room Commander', notes: 'Approved from incident room' },
+        commanderKey
+      )
+    );
+
+  const handleReject = (actionId: string, toolName: string) => {
+    const reason = rejectReason.trim();
+    if (!reason) {
+      setCommandError('A rejection reason is required — rejections are terminal and must be justified.');
+      return;
+    }
+    return runCommand(actionId, `Rejected ${toolName}`, async () => {
+      await rejectIncidentAction(
+        activeIncident!.incident_id,
+        actionId,
+        { commander_id: 'Voice Room Commander', reason },
+        commanderKey
+      );
+      setRejectingId(null);
+      setRejectReason('');
+    });
+  };
+
+  const handleCompleteItem = (itemId: string) =>
+    runCommand(itemId, 'Action item completed', () =>
+      completeActionItem(activeIncident!.incident_id, itemId, 'Confirmed complete in incident room')
+    );
+
+  const handleResolveConflict = (conflictId: string, notes: string) =>
+    runCommand(conflictId, 'Contradiction resolved', () =>
+      resolveEvidenceItem(
+        activeIncident!.incident_id,
+        'conflicts',
+        conflictId,
+        'Voice Room Commander',
+        notes
+      )
+    );
+
+  const handleGenerateReport = () =>
+    runCommand('final-report', 'Final report generated', async () => {
+      const res = await getFinalSummary(activeIncident!.incident_id);
+      setFinalReport(res.content);
+    });
+
   // ── Computed state ─────────────────────────────────────────────────────
   const isConnected  = connectionState === 'CONNECTED';
   const isConnecting = connectionState === 'FETCHING_TOKEN' || connectionState === 'JOINING';
@@ -1963,6 +2057,165 @@ export default function VoiceTestPage() {
           font-style: italic;
         }
 
+        /* ── Merged commander panels (conflicts / items / risks / report) ──
+           Deliberately re-implemented in this page's own light vocabulary
+           rather than importing the root dashboard's components, which are
+           Tailwind zinc-dark and would read as broken on this surface. */
+        .vcc-count-pill {
+          font-size: 9px;
+          font-weight: 700;
+          letter-spacing: 0.02em;
+          padding: 2px 6px;
+          border-radius: 999px;
+          background: #f4f4f5;
+          color: #8a8a8a;
+          margin-left: 6px;
+          text-transform: none;
+        }
+        .vcc-count-warn { background: #fef3c7; color: #b45309; }
+        .vcc-count-lock { background: #eef2ff; color: #4f46e5; }
+
+        /* Contradictions */
+        .vcc-conflict {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          padding: 10px 0;
+          border-bottom: 1px solid #f5f5f5;
+        }
+        .vcc-conflict:last-child { border-bottom: none; padding-bottom: 0; }
+        .vcc-conflict-entity {
+          font-size: 11.5px;
+          font-weight: 600;
+          color: #1a1a1a;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          flex-wrap: wrap;
+        }
+        .vcc-conflict-state {
+          font-size: 8.5px;
+          font-weight: 700;
+          padding: 2px 6px;
+          border-radius: 4px;
+          white-space: nowrap;
+        }
+        .vcc-conflict-state.warn { background: #fef3c7; color: #b45309; }
+        .vcc-conflict-state.ok   { background: #f0fdf4; color: #15803d; }
+        .vcc-conflict-sides {
+          display: flex;
+          align-items: stretch;
+          gap: 8px;
+          background: #fafafa;
+          border: 1px solid #f0f0f0;
+          border-radius: 7px;
+          padding: 8px 10px;
+        }
+        .vcc-conflict-side { flex: 1; min-width: 0; }
+        .vcc-conflict-src {
+          font-size: 9.5px;
+          font-weight: 600;
+          color: #9b9b9b;
+          text-transform: uppercase;
+          letter-spacing: 0.03em;
+          margin-bottom: 2px;
+        }
+        .vcc-conflict-val { font-size: 11px; color: #2a2a2a; line-height: 1.35; }
+        .vcc-conflict-vs {
+          font-size: 9px;
+          font-weight: 700;
+          color: #c0c0c0;
+          align-self: center;
+          flex-shrink: 0;
+        }
+        .vcc-conflict-rec { font-size: 10px; color: #6b6b6b; font-style: italic; }
+
+        /* Action items */
+        .vcc-ai-row {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 10px;
+          padding: 9px 0;
+          border-bottom: 1px solid #f5f5f5;
+        }
+        .vcc-ai-row:last-child { border-bottom: none; padding-bottom: 0; }
+        .vcc-ai-main { flex: 1; min-width: 0; }
+        .vcc-ai-desc { font-size: 11.5px; color: #2a2a2a; line-height: 1.4; }
+        .vcc-ai-desc.done { text-decoration: line-through; color: #b0b0b0; }
+        .vcc-ai-meta { font-size: 10px; color: #9b9b9b; margin-top: 2px; display: flex; gap: 4px; flex-wrap: wrap; }
+        .vcc-ai-side { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; flex-shrink: 0; }
+        .vcc-ai-status {
+          font-size: 9px;
+          font-weight: 700;
+          padding: 2px 6px;
+          border-radius: 4px;
+          background: #f4f4f5;
+          color: #8a8a8a;
+        }
+        .vcc-ai-status.ok  { background: #f0fdf4; color: #15803d; }
+        .vcc-ai-status.bad { background: #fef2f2; color: #dc2626; }
+
+        /* Risks */
+        .vcc-risk {
+          display: flex;
+          align-items: flex-start;
+          gap: 8px;
+          padding: 7px 0;
+          border-bottom: 1px solid #f5f5f5;
+        }
+        .vcc-risk:last-child { border-bottom: none; padding-bottom: 0; }
+        .vcc-risk-dot {
+          width: 6px; height: 6px;
+          border-radius: 50%;
+          background: #f59e0b;
+          flex-shrink: 0;
+          margin-top: 5px;
+        }
+        .vcc-risk-text { flex: 1; font-size: 11.5px; color: #2a2a2a; line-height: 1.4; }
+        .vcc-risk-sev {
+          font-size: 8.5px;
+          font-weight: 700;
+          padding: 2px 6px;
+          border-radius: 4px;
+          background: #fef2f2;
+          color: #dc2626;
+          flex-shrink: 0;
+        }
+
+        /* Commander key + errors */
+        .vcc-cmd-key { margin-bottom: 8px; }
+        .vcc-key-hint { font-size: 9.5px; color: #b0b0b0; margin: 4px 0 0; line-height: 1.4; }
+        .vcc-key-hint code { font-size: 9px; background: #f4f4f5; padding: 1px 4px; border-radius: 3px; color: #6b6b6b; }
+        .vcc-cmd-error {
+          font-size: 10.5px;
+          color: #b91c1c;
+          background: #fef2f2;
+          border: 1px solid #fecaca;
+          border-radius: 6px;
+          padding: 7px 9px;
+          margin-bottom: 8px;
+          line-height: 1.4;
+        }
+        .vcc-reject-box { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+
+        /* Final report */
+        .vcc-report {
+          margin: 10px 0 0;
+          padding: 10px 12px;
+          background: #fafafa;
+          border: 1px solid #f0f0f0;
+          border-radius: 7px;
+          font-size: 10.5px;
+          line-height: 1.55;
+          color: #2a2a2a;
+          white-space: pre-wrap;
+          word-break: break-word;
+          max-height: 260px;
+          overflow-y: auto;
+          font-family: inherit;
+        }
+
         /* ── Status bar (footer) ── */
         .vcc-statusbar {
           height: 28px;
@@ -2531,20 +2784,164 @@ export default function VoiceTestPage() {
                   )}
                 </div>
 
-                {/* ── Response & Actions — real data, read-only, item 1 step 4 ──
-                    The old confirm/reject buttons here never called any backend
-                    endpoint — they were purely local, decorative UI state. Rather than
-                    wire a second, parallel commander-approval flow into this page,
-                    this now shows the REAL proposed-action status from the backend and
-                    points to the main dashboard's already-implemented, commander-key
-                    -gated approval workflow for taking action. Read-only here is more
-                    honest than fake buttons that did nothing. */}
+                {/* ── Contradictions ──
+                    The single most product-defining panel: two people asserted
+                    incompatible things about the same entity and Tocsin refuses to
+                    silently pick one. Resolution is human and attributed. */}
+                {(activeIncident?.conflicts?.length ?? 0) > 0 && (
+                  <div className="vcc-section-card">
+                    <div className="vcc-section-label">
+                      Contradictions
+                      <span className="vcc-count-pill vcc-count-warn">
+                        {activeIncident!.conflicts!.filter(c => c.status !== 'RESOLVED').length} open
+                      </span>
+                    </div>
+                    {activeIncident!.conflicts!.map((c) => {
+                      const resolved = c.status === 'RESOLVED';
+                      return (
+                        <div className="vcc-conflict" key={c.id}>
+                          <div className="vcc-conflict-entity">
+                            {c.entity}
+                            <span className={`vcc-conflict-state ${resolved ? 'ok' : 'warn'}`}>
+                              {resolved ? 'RESOLVED' : 'NEEDS HUMAN RESOLUTION'}
+                            </span>
+                          </div>
+                          <div className="vcc-conflict-sides">
+                            <div className="vcc-conflict-side">
+                              <div className="vcc-conflict-src">{c.speaker_a || c.source_a}</div>
+                              <div className="vcc-conflict-val">“{c.value_a}”</div>
+                            </div>
+                            <div className="vcc-conflict-vs">vs</div>
+                            <div className="vcc-conflict-side">
+                              <div className="vcc-conflict-src">{c.speaker_b || c.source_b}</div>
+                              <div className="vcc-conflict-val">“{c.value_b}”</div>
+                            </div>
+                          </div>
+                          {c.recommended_action && (
+                            <div className="vcc-conflict-rec">→ {c.recommended_action}</div>
+                          )}
+                          {!resolved && (
+                            <button
+                              className="vcc-btn vcc-btn-confirm"
+                              disabled={busyId === c.id}
+                              onClick={() =>
+                                handleResolveConflict(
+                                  c.id,
+                                  c.recommended_action || 'Resolved by commander in incident room'
+                                )
+                              }
+                              style={{ alignSelf: 'flex-start', marginTop: 2 }}
+                            >
+                              {busyId === c.id ? 'Resolving…' : 'Mark resolved'}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* ── Action items: who owes what, by when ── */}
+                {(activeIncident?.action_items?.length ?? 0) > 0 && (
+                  <div className="vcc-section-card">
+                    <div className="vcc-section-label">
+                      Action Items
+                      <span className="vcc-count-pill">{activeIncident!.action_items!.length}</span>
+                    </div>
+                    {activeIncident!.action_items!.map((item) => {
+                      const done = item.status === 'COMPLETE';
+                      return (
+                        <div className="vcc-ai-row" key={item.id}>
+                          <div className="vcc-ai-main">
+                            <div className={`vcc-ai-desc ${done ? 'done' : ''}`}>{item.description}</div>
+                            <div className="vcc-ai-meta">
+                              <span>{item.owner_name || 'Unassigned'}</span>
+                              {item.due_at && isMounted && (
+                                <span>
+                                  · due{' '}
+                                  {new Date(item.due_at).toLocaleTimeString([], {
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                  })}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="vcc-ai-side">
+                            <span className={`vcc-ai-status ${done ? 'ok' : item.status === 'OVERDUE' ? 'bad' : ''}`}>
+                              {item.status}
+                            </span>
+                            {!done && (
+                              <button
+                                className="vcc-btn"
+                                disabled={busyId === item.id}
+                                onClick={() => handleCompleteItem(item.id)}
+                                style={{ fontSize: 10, padding: '3px 8px' }}
+                              >
+                                {busyId === item.id ? '…' : 'Complete'}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* ── Unresolved risks: what could still go wrong ── */}
+                {(activeIncident?.unresolved_risks?.length ?? 0) > 0 && (
+                  <div className="vcc-section-card">
+                    <div className="vcc-section-label">
+                      Unresolved Risks
+                      <span className="vcc-count-pill vcc-count-warn">
+                        {activeIncident!.unresolved_risks!.length}
+                      </span>
+                    </div>
+                    {activeIncident!.unresolved_risks!.map((r) => (
+                      <div className="vcc-risk" key={r.id}>
+                        <span className="vcc-risk-dot" />
+                        <span className="vcc-risk-text">{r.description}</span>
+                        {r.severity && <span className="vcc-risk-sev">{r.severity}</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* ── Response & Actions — now a REAL commander console ──
+                    Previously read-only: the old confirm/reject buttons here never
+                    called any backend endpoint (purely decorative local state), so
+                    they were stripped and this panel pointed at the root dashboard
+                    instead. It now performs the genuine, commander-key-gated
+                    approve/reject against /api/incidents/{id}/actions/{id}/approve
+                    and /reject, so the whole incident can be run from this one page.
+                    The key is typed per session and never stored. */}
                 <div className="vcc-section-card">
-                  <div className="vcc-section-label">Response &amp; Actions</div>
+                  <div className="vcc-section-label">
+                    Response &amp; Actions
+                    <span className="vcc-count-pill vcc-count-lock">commander</span>
+                  </div>
+
                   {(activeIncident?.proposed_actions?.length ?? 0) > 0 ? (
                     <>
+                      <div className="vcc-cmd-key">
+                        <input
+                          type="password"
+                          className="vcc-input"
+                          placeholder="Commander key — required to approve or reject"
+                          value={commanderKey}
+                          onChange={(e) => setCommanderKey(e.target.value)}
+                          autoComplete="off"
+                        />
+                        <p className="vcc-key-hint">
+                          Verified server-side against <code>TOCSIN_COMMANDER_KEY</code>. Never stored in the browser.
+                        </p>
+                      </div>
+
+                      {commandError && <div className="vcc-cmd-error">⚠ {commandError}</div>}
+
                       {activeIncident!.proposed_actions.map((action) => {
                         const badge = actionStatusBadge(action.status);
+                        const pending = action.status === 'PENDING_APPROVAL' || action.status === 'PROPOSED';
                         return (
                           <div className="vcc-action-item" key={action.action_id}>
                             <div className="vcc-action-top">
@@ -2560,17 +2957,81 @@ export default function VoiceTestPage() {
                             <div className="vcc-action-confirmed-note" style={{ paddingLeft: 36 }}>
                               {action.rationale}
                             </div>
+
+                            {action.rejection_reason && (
+                              <div className="vcc-action-rejected-note" style={{ paddingLeft: 36 }}>
+                                Rejected: {action.rejection_reason}
+                              </div>
+                            )}
+
+                            {pending && (
+                              <div style={{ paddingLeft: 36 }}>
+                                {rejectingId === action.action_id ? (
+                                  <div className="vcc-reject-box">
+                                    <input
+                                      className="vcc-input"
+                                      placeholder="Reason for rejection (required — rejection is terminal)"
+                                      value={rejectReason}
+                                      onChange={(e) => setRejectReason(e.target.value)}
+                                    />
+                                    <div className="vcc-btn-row">
+                                      <button
+                                        className="vcc-btn vcc-btn-reject"
+                                        disabled={busyId === action.action_id}
+                                        onClick={() => handleReject(action.action_id, action.tool_name)}
+                                      >
+                                        {busyId === action.action_id ? 'Rejecting…' : 'Confirm rejection'}
+                                      </button>
+                                      <button
+                                        className="vcc-btn"
+                                        onClick={() => { setRejectingId(null); setRejectReason(''); }}
+                                      >
+                                        Cancel
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="vcc-btn-row">
+                                    <button
+                                      className="vcc-btn vcc-btn-confirm"
+                                      disabled={busyId === action.action_id}
+                                      onClick={() => handleApprove(action.action_id, action.tool_name)}
+                                    >
+                                      {busyId === action.action_id ? 'Approving…' : 'Approve'}
+                                    </button>
+                                    <button
+                                      className="vcc-btn vcc-btn-reject"
+                                      onClick={() => { setRejectingId(action.action_id); setCommandError(null); }}
+                                    >
+                                      Reject
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
                         );
                       })}
-                      <p className="vcc-empty" style={{ marginTop: 4 }}>
-                        Approve or reject pending actions on the main dashboard (commander sign-off required).
-                      </p>
                     </>
                   ) : (
                     <p className="vcc-empty">No response actions yet. Incident information will generate recommendations.</p>
                   )}
                 </div>
+
+                {/* ── Final report: the evidence-bounded close-out ── */}
+                {activeIncident && (
+                  <div className="vcc-section-card">
+                    <div className="vcc-section-label">Final Report</div>
+                    <button
+                      className="vcc-btn vcc-btn-primary"
+                      disabled={busyId === 'final-report'}
+                      onClick={handleGenerateReport}
+                    >
+                      {busyId === 'final-report' ? 'Generating…' : 'Generate final report'}
+                    </button>
+                    {finalReport && <pre className="vcc-report">{finalReport}</pre>}
+                  </div>
+                )}
 
               </div>
             </div>

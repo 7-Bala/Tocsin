@@ -10,7 +10,20 @@ import {
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-export const DEFAULT_COMMANDER_KEY = 'tocsin-commander-key';
+/**
+ * Intentionally EMPTY. The commander sign-off secret must never be baked into
+ * the client bundle -- anything shipped here is readable by every visitor, so a
+ * real key placed in this constant would defeat the approval gate it guards.
+ *
+ * This previously defaulted to the literal 'tocsin-commander-key', which was
+ * harmless only for as long as the server's TOCSIN_COMMANDER_KEY happened not
+ * to be that same string. That is a coincidence, not a control.
+ *
+ * The commander types the key into the approval panel per session instead. An
+ * empty key is still sent, and the backend answers 401 -- a visible, honest
+ * failure rather than a silent bypass.
+ */
+export const DEFAULT_COMMANDER_KEY = '';
 
 export async function ingestObservation(
   incidentId: string,
