@@ -68,20 +68,30 @@ exercised against the live server, not the real PagerDuty API.
 | `payload.severity` enum values | `CORROBORATED — TWO INDEPENDENT THIRD-PARTY SOURCES` | Not a direct quote from PagerDuty's own current docs; two independent sources agree, but this is a step below the project's usual "official docs" bar. |
 | `page_oncall_engineer` MCP tool implementation | `VERIFIED IN CODE (mocked dispatch + live MCP protocol reachability)` | Real request shape asserted against a mocked httpx client; genuinely reachable and callable through the live, running MCP server. Not yet exercised against a real PagerDuty account. |
 | Mock fallback when `PAGERDUTY_ROUTING_KEY` is unset | `VERIFIED IN CODE` | Live-called through the actual running MCP server; returned a clearly labeled `MOCK_FALLBACK` envelope, `paged: false`. |
-| Live dispatch to a real PagerDuty account/on-call engineer | `CREDENTIAL REQUIRED — NOT YET LIVE-VERIFIED` | Needs a real `PAGERDUTY_ROUTING_KEY` (an Events API v2 service integration key, not an account API token) and, ideally, an actual on-call schedule to confirm a real page arrives. |
+| Live dispatch to a real PagerDuty account/on-call engineer | `VERIFIED LIVE (2026-09-05)` | Real `PAGERDUTY_ROUTING_KEY` configured against a real service ("Tocsin Incident Commander", auto-generated escalation policy with the account owner as default on-call). Called `page_oncall_engineer` through the live, running MCP server (not a direct Python call) with `severity="SEV2"`; got back `paged: true`, `delivery_status: "delivered"`. Confirmed independently in the PagerDuty UI: a real incident (#1, status "Triggered", correct title, correct service, "Assigned To" the account owner) appeared within seconds. Resolved afterward via a `event_action: "resolve"` call with the same `dedup_key` — confirmed the incident count returned to 0 triggered / 0 acknowledged. |
 | Agent actually choosing to call this tool mid-conversation, unprompted | `NOT YET LIVE-VERIFIED` | Same open question as every other MCP tool under `composed_tools` per `docs/agora/RESEARCH.md` — tool wiring matches Agora's documented schema, but whether the LLM autonomously decides to invoke it in a real conversation has not been observed yet for this specific tool. |
 | Works under `gemini_live` (mllm) pipeline | `NOT SUPPORTED` | Same as every other MCP tool in this project — `mcp_servers` is documented only under `llm`, not `mllm`. Requires `composed_tools`. |
 
-## To go live
+## To go live — DONE for steps 1-5 (2026-09-05)
 
-1. Create a PagerDuty account (free trial is sufficient for a demo).
-2. Create a service, add an "Events API v2" integration to it, copy its
-   Integration Key.
-3. Set `PAGERDUTY_ROUTING_KEY` in `.env` (see `.env.example`) — the mock-services
-   container reads it via `docker-compose.yml`.
-4. Configure at least one on-call schedule/escalation policy on that service, or
-   the alert will trigger correctly but nothing will page anyone.
-5. Rebuild: `docker compose up -d --build mock-services`.
-6. Ask the agent (under `composed_tools`, not `gemini_live`) something that should
-   trigger a page, and confirm a real PagerDuty incident appears in their console
-   with `dedup_key` matching the Tocsin incident id.
+1. ✅ Created a PagerDuty account (free trial).
+2. ✅ Created a service ("Tocsin Incident Commander"), added the "Events API v2"
+   integration, copied its Integration Key. Used PagerDuty's own "Generate a new
+   Escalation Policy" default during service creation, which makes the account
+   owner the default on-call — this is what answered "who gets paged" without
+   Tocsin needing to track it.
+3. ✅ `PAGERDUTY_ROUTING_KEY` set in `.env`, confirmed received by the running
+   `mock-services` container (`docker compose exec mock-services` printenv check).
+4. ✅ Escalation policy exists (the auto-generated default from step 2).
+5. ✅ Rebuilt and live-tested: called `page_oncall_engineer` through the real
+   running MCP server with `severity="SEV2"` — got `paged: true`,
+   `delivery_status: "delivered"`. A real PagerDuty incident appeared within
+   seconds (status "Triggered", correct title/service/assignee). Resolved it
+   afterward with a matching `event_action: "resolve"` + same `dedup_key`;
+   confirmed the incident count returned to 0/0.
+
+**Remaining (not yet done):** whether the agent, given real conversation context
+under `composed_tools`, autonomously chooses to call this tool unprompted during
+a live voice session — the tool's own correctness is now proven, but "the LLM
+decides to use it" has not been observed yet, same open question as every other
+MCP tool in this project.
