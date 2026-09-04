@@ -145,8 +145,14 @@ export default function VoiceTestPage() {
   // localStorage and never baked into the bundle -- it is typed per session.
   // See hooks/useIncidentApi.ts DEFAULT_COMMANDER_KEY for why.
   const [commanderKey, setCommanderKey] = useState('');
+  const [showCommanderKey, setShowCommanderKey] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [commandError, setCommandError] = useState<string | null>(null);
+  // Bumped on every new error so the shake animation replays even when the
+  // same error text repeats (e.g. two wrong-key attempts in a row) -- keying
+  // purely on `commandError` wouldn't re-trigger a CSS animation for an
+  // unchanged value.
+  const [commandErrorKey, setCommandErrorKey] = useState(0);
   const [rejectingId, setRejectingId] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [finalReport, setFinalReport] = useState<string | null>(null);
@@ -1154,6 +1160,7 @@ export default function VoiceTestPage() {
       } catch (err: any) {
         const msg = err?.message || 'Request failed';
         setCommandError(msg);
+        setCommandErrorKey((k) => k + 1);
         addLog(`❌ ${label} failed — ${msg}`);
       } finally {
         setBusyId(null);
@@ -1176,6 +1183,7 @@ export default function VoiceTestPage() {
     const reason = rejectReason.trim();
     if (!reason) {
       setCommandError('A rejection reason is required — rejections are terminal and must be justified.');
+      setCommandErrorKey((k) => k + 1);
       return;
     }
     return runCommand(actionId, `Rejected ${toolName}`, async () => {
@@ -2459,17 +2467,55 @@ export default function VoiceTestPage() {
 
         /* Commander key + errors */
         .vcc-cmd-key { margin-bottom: 8px; }
+        .vcc-cmd-key-row { display: flex; align-items: stretch; gap: 6px; }
+        .vcc-cmd-key-row .vcc-input { flex: 1; min-width: 0; }
+        .vcc-key-toggle {
+          flex-shrink: 0;
+          width: 34px;
+          border: 1px solid #e2e8f0;
+          background: #fff;
+          border-radius: 7px;
+          font-size: 14px;
+          cursor: pointer;
+          transition: background 0.15s ease, border-color 0.15s ease;
+        }
+        .vcc-key-toggle:hover { background: #f8fafc; border-color: #cbd5e1; }
         .vcc-key-hint { font-size: 9.5px; color: #64748b; margin: 4px 0 0; line-height: 1.4; }
         .vcc-key-hint code { font-size: 9px; background: #f1f5f9; padding: 1px 5px; border-radius: 4px; color: #334155; }
+
+        /* Error slot: animates open/closed via grid-template-rows rather than
+           mount/unmount, so the panel below never jumps -- an instant
+           appear/disappear next to a key you're actively editing is exactly
+           what reads as "glitchy" rather than as a deliberate response. */
+        .vcc-cmd-error-slot {
+          display: grid;
+          grid-template-rows: 0fr;
+          opacity: 0;
+          transition: grid-template-rows 0.22s ease, opacity 0.18s ease;
+        }
+        .vcc-cmd-error-slot.open { grid-template-rows: 1fr; opacity: 1; margin-bottom: 8px; }
+        .vcc-cmd-error-slot > .vcc-cmd-error { overflow: hidden; }
         .vcc-cmd-error {
           font-size: 10.5px;
+          font-weight: 600;
           color: #b91c1c;
           background: #fef2f2;
           border: 1px solid #fecaca;
           border-radius: 6px;
           padding: 7px 9px;
-          margin-bottom: 8px;
           line-height: 1.4;
+          animation: vcc-error-shake 0.32s ease;
+        }
+        @keyframes vcc-error-shake {
+          0%, 100% { transform: translateX(0); }
+          20% { transform: translateX(-4px); }
+          40% { transform: translateX(3px); }
+          60% { transform: translateX(-2px); }
+          80% { transform: translateX(1px); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .vcc-cmd-error { animation: none; }
+          .vcc-cmd-error-slot { transition: none; }
         }
         .vcc-reject-box { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
 
@@ -3281,20 +3327,41 @@ export default function VoiceTestPage() {
                   {(activeIncident?.proposed_actions?.length ?? 0) > 0 ? (
                     <>
                       <div className="vcc-cmd-key">
-                        <input
-                          type="password"
-                          className="vcc-input"
-                          placeholder="Commander key — required to approve or reject"
-                          value={commanderKey}
-                          onChange={(e) => setCommanderKey(e.target.value)}
-                          autoComplete="off"
-                        />
+                        <div className="vcc-cmd-key-row">
+                          <input
+                            type={showCommanderKey ? 'text' : 'password'}
+                            className="vcc-input"
+                            placeholder="Commander key — required to approve or reject"
+                            value={commanderKey}
+                            onChange={(e) => {
+                              setCommanderKey(e.target.value);
+                              // A stale "invalid credentials" message sitting under
+                              // the box while you're actively correcting the key is
+                              // what read as "glitching" -- clear it the moment the
+                              // key changes so the error only ever reflects the
+                              // current value, not the last attempt.
+                              if (commandError) setCommandError(null);
+                            }}
+                            autoComplete="off"
+                          />
+                          <button
+                            type="button"
+                            className="vcc-key-toggle"
+                            onClick={() => setShowCommanderKey((v) => !v)}
+                            title={showCommanderKey ? 'Hide key' : 'Show key'}
+                            aria-label={showCommanderKey ? 'Hide commander key' : 'Show commander key'}
+                          >
+                            {showCommanderKey ? '🙈' : '👁'}
+                          </button>
+                        </div>
                         <p className="vcc-key-hint">
                           Verified server-side against <code>TOCSIN_COMMANDER_KEY</code>. Never stored in the browser.
                         </p>
                       </div>
 
-                      {commandError && <div className="vcc-cmd-error">⚠ {commandError}</div>}
+                      <div className={`vcc-cmd-error-slot ${commandError ? 'open' : ''}`}>
+                        <div className="vcc-cmd-error" key={commandErrorKey}>⚠ {commandError}</div>
+                      </div>
 
                       {activeIncident!.proposed_actions.map((action) => {
                         const badge = actionStatusBadge(action.status);
