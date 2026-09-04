@@ -10,8 +10,8 @@
  * does not document a raw wire format. Treat the patterns below as best-effort/
  * empirical, not a documented contract — any frame that doesn't match one of them is
  * intentionally discarded (returns null) rather than guessed at, and callers (see
- * VoiceHUD.tsx) must treat a null/empty result as "ignore this frame", never render
- * partial or garbage output for it.
+ * app/voice-test/page.tsx) must treat a null/empty result as "ignore this frame",
+ * never render partial or garbage output for it.
  *
  * Agora ConvoAI Stream Message Protocol (empirical, not doc-confirmed):
  *  - Frame format: `<message_id>|<sequence_no>|<flags_or_total>|<base64_payload>`
