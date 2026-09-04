@@ -22,6 +22,10 @@ const buttonVariants = cva(
         ghost: 'hover:bg-accent hover:text-accent-foreground',
         link: 'text-primary underline-offset-4 hover:underline',
         confirm: 'bg-state-confirmed text-white hover:bg-state-confirmed/90',
+        // Pastel variants for a binary decision pair (approve/reject a
+        // proposed action) where a solid destructive fill would be louder
+        // than the moment warrants -- the tint carries the meaning.
+        reject: 'bg-state-critical/10 text-state-critical border border-state-critical/25 hover:bg-state-critical/15',
       },
       size: {
         default: 'h-9 px-4 py-2',
@@ -29,6 +33,11 @@ const buttonVariants = cva(
         xs: 'h-6 rounded px-2 text-[10.5px]',
         lg: 'h-10 rounded-md px-8',
         icon: 'h-9 w-9',
+        // Exact pixel matches for the two compact sizes voice-test's control
+        // deck already used (.vcc-btn-compact / .vcc-btn-mini), so swapping
+        // the element doesn't shift anything visually.
+        compact: 'h-[30px] px-2.5 py-1 text-[11px] rounded-lg',
+        mini: 'h-[26px] px-2.5 py-1 text-[10px] rounded-sm',
       },
     },
     defaultVariants: {

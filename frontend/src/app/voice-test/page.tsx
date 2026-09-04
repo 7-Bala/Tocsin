@@ -11,6 +11,12 @@ import {
   resolveEvidenceItem,
   getFinalSummary,
   runIdentityOutageDemo,
+  createIncident,
+  simulateTranscript,
+  recordDecision,
+  supersedeDecision,
+  fetchHandoffBrief,
+  speakIntoChannel,
 } from '@/hooks/useIncidentApi';
 import { startRtmTranscriptSession, RtmTranscriptSession } from '@/lib/agoraRtmTranscripts';
 import { decodeAgoraStreamMessage } from '@/lib/agoraStreamDecoder';
@@ -22,7 +28,14 @@ import {
   ClockIcon,
   MapPinIcon,
   RepeatIcon,
+  UsersIcon,
+  ScaleIcon,
+  Volume2Icon,
+  CheckCircleIcon,
+  ClipboardIcon,
 } from '@/components/Icon';
+import { Button } from '@/components/ui/button';
+import type { Claim } from '@/types/incident';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -147,7 +160,14 @@ export default function VoiceTestPage() {
   // completely disconnected from the real backend evidence engine) with the exact
   // same live incident state the root dashboard (`/`) uses. See
   // frontend/src/hooks/useIncidentState.ts and TODO.md item 1 for the full history.
-  const { activeIncident, wsStatus, refreshActiveIncident } = useIncidentState();
+  const {
+    activeIncident,
+    wsStatus,
+    refreshActiveIncident,
+    incidentsList,
+    handleSelectIncident,
+    handleIncidentUpdated,
+  } = useIncidentState();
 
   // ── Commander console state (merged in from the root dashboard) ─────────
   // The commander key is held in component state ONLY, never persisted to
@@ -168,6 +188,53 @@ export default function VoiceTestPage() {
   const [isControlsCollapsed, setIsControlsCollapsed] = useState(false);
   const [isDemoRunning, setIsDemoRunning] = useState(false);
   const [demoFeedback, setDemoFeedback] = useState<string | null>(null);
+
+  // ── Ported back from the removed root dashboard (/) ─────────────────────
+  // These five had no equivalent anywhere on this page and were flagged
+  // rather than silently discarded when / was deleted; kept native to this
+  // page's light design system instead of importing the old dark-themed
+  // components wholesale.
+
+  // Incident switcher + minimal creation (no flood-scenario event-type
+  // picker -- IncidentHeader's original modal offered FLOOD_SURGE /
+  // WATER_CONTAMINATION / etc., which CLAUDE.md explicitly says must never
+  // resurface in the identity-outage product).
+  const [showNewIncidentForm, setShowNewIncidentForm] = useState(false);
+  const [newIncidentTitle, setNewIncidentTitle] = useState('');
+  const [newIncidentSymptom, setNewIncidentSymptom] = useState('');
+  const [isCreatingIncident, setIsCreatingIncident] = useState(false);
+  const [createIncidentError, setCreateIncidentError] = useState<string | null>(null);
+
+  // Manual utterance simulator (DemoModeControl) -- types a line as a named
+  // role without needing a working microphone.
+  const [simSpeaker, setSimSpeaker] = useState('Dave Miller');
+  const [simUtterance, setSimUtterance] = useState('');
+  const [isSimulating, setIsSimulating] = useState(false);
+  const simSpeakerRole = (speaker: string) =>
+    speaker === 'Priya Sharma' ? 'SUPPORT'
+    : speaker === 'Commander Sarah Chen' ? 'INCIDENT_COMMANDER'
+    : speaker === 'Marcus Vance' ? 'BUSINESS_LEADERSHIP'
+    : 'ENGINEER';
+
+  // Participants -- no state needed, reads activeIncident.participants directly.
+
+  // Decisions in force (DecisionsPanel)
+  const [showDecisionForm, setShowDecisionForm] = useState(false);
+  const [supersedeTarget, setSupersedeTarget] = useState<Claim | null>(null);
+  const [decisionEntity, setDecisionEntity] = useState('');
+  const [decisionValue, setDecisionValue] = useState('');
+  const [decisionRationale, setDecisionRationale] = useState('');
+  const [decisionBy, setDecisionBy] = useState('');
+  const [isSavingDecision, setIsSavingDecision] = useState(false);
+  const [decisionError, setDecisionError] = useState<string | null>(null);
+
+  // Shift handoff brief (HandoffPanel)
+  const [handoffBrief, setHandoffBrief] = useState<any | null>(null);
+  const [isGeneratingHandoff, setIsGeneratingHandoff] = useState(false);
+  const [handoffError, setHandoffError] = useState<string | null>(null);
+  const [handoffCopied, setHandoffCopied] = useState(false);
+  const [isBroadcastingHandoff, setIsBroadcastingHandoff] = useState(false);
+  const [handoffBroadcastResult, setHandoffBroadcastResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   // ── Agora / VAD refs ───────────────────────────────────────────────────
   const rtcClientRef       = useRef<any>(null);
@@ -1103,6 +1170,132 @@ export default function VoiceTestPage() {
       setFinalReport(res.content);
     });
 
+  // ── Ported handlers (incident switcher/creation, manual simulator,
+  //    decisions, handoff) ─────────────────────────────────────────────────
+
+  const handleCreateIncident = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newIncidentTitle.trim()) return;
+    setIsCreatingIncident(true);
+    setCreateIncidentError(null);
+    try {
+      const created = await createIncident({
+        title: newIncidentTitle.trim(),
+        event_type: 'TECHNICAL_INCIDENT',
+        initial_symptoms: newIncidentSymptom.trim() ? [newIncidentSymptom.trim()] : undefined,
+      });
+      handleIncidentUpdated(created);
+      handleSelectIncident(created.incident_id);
+      setShowNewIncidentForm(false);
+      setNewIncidentTitle('');
+      setNewIncidentSymptom('');
+    } catch (err: any) {
+      setCreateIncidentError(err?.message || 'Failed to create incident');
+    } finally {
+      setIsCreatingIncident(false);
+    }
+  };
+
+  const handleSimulateUtterance = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!simUtterance.trim() || !activeIncident) return;
+    setIsSimulating(true);
+    try {
+      await simulateTranscript(activeIncident.incident_id, {
+        speaker: simSpeaker,
+        speaker_role: simSpeakerRole(simSpeaker),
+        raw_utterance: simUtterance.trim(),
+      });
+      setSimUtterance('');
+      await refreshActiveIncident();
+      addLog(`Simulated utterance from ${simSpeaker} ingested.`);
+    } catch (err: any) {
+      addLog(`Simulate utterance failed: ${err?.message || err}`);
+    } finally {
+      setIsSimulating(false);
+    }
+  };
+
+  const resetDecisionForm = () => {
+    setShowDecisionForm(false);
+    setSupersedeTarget(null);
+    setDecisionEntity('');
+    setDecisionValue('');
+    setDecisionRationale('');
+    setDecisionBy('');
+    setDecisionError(null);
+  };
+
+  const handleSaveDecision = async () => {
+    if (!activeIncident) return;
+    if (!decisionEntity.trim() || !decisionValue.trim() || !decisionRationale.trim() || !decisionBy.trim()) {
+      setDecisionError('All fields are required.');
+      return;
+    }
+    setIsSavingDecision(true);
+    setDecisionError(null);
+    try {
+      const payload = {
+        entity: decisionEntity.trim(),
+        value: decisionValue.trim(),
+        rationale: decisionRationale.trim(),
+        decided_by: decisionBy.trim(),
+      };
+      if (supersedeTarget) {
+        await supersedeDecision(activeIncident.incident_id, supersedeTarget.id, payload);
+      } else {
+        await recordDecision(activeIncident.incident_id, payload);
+      }
+      resetDecisionForm();
+      await refreshActiveIncident();
+    } catch (e: any) {
+      setDecisionError(e?.message || 'Failed to save decision.');
+    } finally {
+      setIsSavingDecision(false);
+    }
+  };
+
+  const handleGenerateHandoff = async () => {
+    if (!activeIncident) return;
+    setIsGeneratingHandoff(true);
+    setHandoffError(null);
+    try {
+      setHandoffBrief(await fetchHandoffBrief(activeIncident.incident_id));
+    } catch (e: any) {
+      setHandoffError(e?.message || 'Failed to generate handoff brief.');
+    } finally {
+      setIsGeneratingHandoff(false);
+    }
+  };
+
+  const handleCopyHandoff = async () => {
+    if (!handoffBrief?.spoken_brief) return;
+    try {
+      await navigator.clipboard.writeText(handoffBrief.spoken_brief);
+      setHandoffCopied(true);
+      setTimeout(() => setHandoffCopied(false), 2000);
+    } catch {
+      setHandoffError('Clipboard unavailable in this browser context.');
+    }
+  };
+
+  const handleBroadcastHandoff = async () => {
+    if (!handoffBrief?.spoken_brief || !activeIncident) return;
+    setIsBroadcastingHandoff(true);
+    setHandoffBroadcastResult(null);
+    try {
+      await speakIntoChannel(activeIncident.incident_id, handoffBrief.spoken_brief);
+      setHandoffBroadcastResult({ ok: true, message: 'Sent to the live agent — audio delivery not independently confirmed by this UI.' });
+    } catch (e: any) {
+      setHandoffBroadcastResult({
+        ok: false,
+        message: `${e?.message || 'Broadcast failed.'} (Requires an agent already running for this incident's voice channel.)`,
+      });
+    } finally {
+      setIsBroadcastingHandoff(false);
+    }
+  };
+
   // ── Computed state ─────────────────────────────────────────────────────
   const isConnected  = connectionState === 'CONNECTED';
   const isConnecting = connectionState === 'FETCHING_TOKEN' || connectionState === 'JOINING';
@@ -1318,59 +1511,6 @@ export default function VoiceTestPage() {
         }
         .vcc-input:disabled { opacity: 0.6; cursor: not-allowed; background: #f8fafc; }
         .vcc-btn-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
-
-        /* ── Material 3 Buttons ── */
-        .vcc-btn {
-          padding: 6px 14px;
-          border-radius: 6px;
-          font-size: 11.5px;
-          font-weight: 600;
-          cursor: pointer;
-          border: 1px solid #cbd5e1;
-          background: #f1f5f9;
-          color: #334155;
-          transition: all 0.18s cubic-bezier(0.2, 0, 0, 1);
-          font-family: inherit;
-          white-space: nowrap;
-          display: inline-flex;
-          align-items: center;
-          gap: 5px;
-        }
-        .vcc-btn:hover:not(:disabled) {
-          background: #e2e8f0;
-          color: #0f172a;
-          transform: translateY(-0.5px);
-        }
-        .vcc-btn:active:not(:disabled) { transform: scale(0.98); }
-        .vcc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        .vcc-btn-primary { background: #0f172a; color: #ffffff; border-color: #0f172a; }
-        .vcc-btn-primary:hover:not(:disabled) { background: #1e293b; border-color: #1e293b; }
-        .vcc-btn-danger  { background: #ef4444; color: #ffffff; border-color: #ef4444; }
-        .vcc-btn-danger:hover:not(:disabled)  { background: #dc2626; border-color: #dc2626; }
-        .vcc-btn-green   { background: #16a34a; color: #ffffff; border-color: #16a34a; }
-        .vcc-btn-green:hover:not(:disabled)   { background: #15803d; border-color: #15803d; }
-        .vcc-btn-outline { background: transparent; color: #0f172a; border-color: #cbd5e1; }
-        .vcc-btn-outline:hover:not(:disabled) { background: #f1f5f9; }
-        .vcc-btn-confirm {
-          background: #dcfce7;
-          color: #15803d;
-          border-color: #bbf7d0;
-          font-weight: 600;
-          font-size: 11px;
-          border-radius: 6px;
-          padding: 5px 12px;
-        }
-        .vcc-btn-confirm:hover:not(:disabled) { background: #bbf7d0; color: #14532d; }
-        .vcc-btn-reject  {
-          background: #fee2e2;
-          color: #b91c1c;
-          border-color: #fecaca;
-          font-size: 11px;
-          font-weight: 600;
-          border-radius: 6px;
-          padding: 5px 12px;
-        }
-        .vcc-btn-reject:hover:not(:disabled)  { background: #fecaca; color: #7f1d1d; }
 
         /* ── Voice select ── */
         .vcc-select {
@@ -1816,15 +1956,6 @@ export default function VoiceTestPage() {
           box-sizing: border-box;
           border-radius: 8px;
         }
-        .vcc-btn-compact {
-          padding: 4px 10px;
-          font-size: 11px;
-          font-weight: 600;
-          height: 30px;
-          white-space: nowrap;
-          box-sizing: border-box;
-          border-radius: 8px;
-        }
         .vcc-deck-footer {
           display: flex;
           align-items: center;
@@ -1848,23 +1979,6 @@ export default function VoiceTestPage() {
           padding: 2.5px 8px;
           border-radius: 3px;
           white-space: nowrap;
-        }
-        .vcc-btn-mini {
-          padding: 3px 9px;
-          font-size: 10px;
-          font-weight: 600;
-          height: 26px;
-          background: #f1f5f9;
-          border: 1px solid #e2e8f0;
-          border-radius: 3px;
-          color: #334155;
-          white-space: nowrap;
-          cursor: pointer;
-          transition: all 0.15s ease;
-        }
-        .vcc-btn-mini:hover {
-          background: #e2e8f0;
-          color: #0f172a;
         }
         .vcc-deck-pill {
           display: inline-flex;
@@ -2460,6 +2574,71 @@ export default function VoiceTestPage() {
               <div className="vcc-right-inner">
                 <div className="vcc-right-title">Incident Command &amp; Controls</div>
 
+                {/* ── Incident switcher + creation (ported from the removed
+                    root dashboard's IncidentHeader; its flood-scenario
+                    "Trigger Crisis Spike" modal was left out on purpose --
+                    see CLAUDE.md on not resurfacing flood labels) ── */}
+                {incidentsList.length > 0 && (
+                  <div className="vcc-section-card">
+                    <div className="vcc-section-label">Active Incident</div>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <select
+                        className="vcc-select"
+                        style={{ flex: 1 }}
+                        value={activeIncident?.incident_id || ''}
+                        onChange={(e) => handleSelectIncident(e.target.value)}
+                        aria-label="Select active incident"
+                      >
+                        {incidentsList.map((inc) => (
+                          <option key={inc.incident_id} value={inc.incident_id}>
+                            {inc.title} ({inc.status})
+                          </option>
+                        ))}
+                      </select>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setShowNewIncidentForm((v) => !v)}
+                      >
+                        + New
+                      </Button>
+                    </div>
+                    {showNewIncidentForm && (
+                      <form onSubmit={handleCreateIncident} style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+                        <input
+                          className="vcc-input"
+                          placeholder="Incident title"
+                          required
+                          value={newIncidentTitle}
+                          onChange={(e) => setNewIncidentTitle(e.target.value)}
+                        />
+                        <input
+                          className="vcc-input"
+                          placeholder="Initial observation (optional)"
+                          value={newIncidentSymptom}
+                          onChange={(e) => setNewIncidentSymptom(e.target.value)}
+                        />
+                        {createIncidentError && (
+                          <div className="vcc-cmd-error"><AlertTriangleIcon /> {createIncidentError}</div>
+                        )}
+                        <div className="vcc-btn-row" style={{ marginTop: 0 }}>
+                          <Button type="submit" size="xs" disabled={isCreatingIncident}>
+                            {isCreatingIncident ? 'Creating…' : 'Create'}
+                          </Button>
+                          <Button
+                            type="button"
+                            size="xs"
+                            variant="outline"
+                            onClick={() => { setShowNewIncidentForm(false); setCreateIncidentError(null); }}
+                          >
+                            Cancel
+                          </Button>
+                        </div>
+                      </form>
+                    )}
+                  </div>
+                )}
+
                 {/* ── Integrated Startup & Agent Control Deck ── */}
                 <div className="vcc-control-deck">
                   <div className="vcc-deck-header">
@@ -2519,23 +2698,24 @@ export default function VoiceTestPage() {
                               style={{ flex: 1 }}
                             />
                             {!isConnected ? (
-                              <button
-                                className={`vcc-btn vcc-btn-compact ${isConnecting ? '' : 'vcc-btn-primary'}`}
+                              <Button
+                                size="compact"
+                                variant={isConnecting ? 'outline' : 'default'}
                                 onClick={handleJoin}
                                 disabled={isConnecting}
                                 aria-label="Join voice channel"
                               >
                                 {connectionState === 'FETCHING_TOKEN' ? 'Auth…' : connectionState === 'JOINING' ? 'Connecting…' : 'Join'}
-                              </button>
+                              </Button>
                             ) : (
-                              <button
-                                className="vcc-btn vcc-btn-compact vcc-btn-danger"
+                              <Button
+                                size="compact"
+                                variant="destructive"
                                 onClick={handleLeave}
                                 aria-label="Leave voice channel"
-                                style={{ padding: '4px 10px' }}
                               >
                                 Leave
-                              </button>
+                              </Button>
                             )}
                           </div>
                         </div>
@@ -2589,22 +2769,24 @@ export default function VoiceTestPage() {
                               <option value="Kore">Kore</option>
                             </select>
                             {agentStatus === 'RUNNING' || remoteAgentPresent ? (
-                              <button
-                                className="vcc-btn vcc-btn-compact vcc-btn-danger"
+                              <Button
+                                size="compact"
+                                variant="destructive"
                                 onClick={handleStopAgent}
                                 disabled={agentStatus === 'STOPPING'}
                               >
                                 {agentStatus === 'STOPPING' ? 'Stopping…' : '■ Stop'}
-                              </button>
+                              </Button>
                             ) : (
-                              <button
-                                className={`vcc-btn vcc-btn-compact ${agentStatus === 'STARTING' ? '' : 'vcc-btn-green'}`}
+                              <Button
+                                size="compact"
+                                variant={agentStatus === 'STARTING' ? 'outline' : 'confirm'}
                                 onClick={handleStartAgent}
                                 disabled={!isConnected || agentStatus === 'STARTING'}
                                 title={!isConnected ? 'Connect voice channel first' : undefined}
                               >
                                 {agentStatus === 'STARTING' ? 'Starting…' : '▶ Start'}
-                              </button>
+                              </Button>
                             )}
                           </div>
                         </div>
@@ -2616,25 +2798,67 @@ export default function VoiceTestPage() {
                           <ZapIcon /> 13 Tools
                         </span>
                         <div className="vcc-deck-footer-actions">
-                          <button
-                            className="vcc-btn vcc-btn-mini"
+                          <Button
+                            size="mini"
+                            variant="outline"
                             disabled={isDemoRunning}
                             onClick={handleRunDemo}
                             title="Load deterministic customer login outage demo scenario into PostgreSQL"
                           >
                             {isDemoRunning ? 'Loading…' : demoFeedback || (<><ZapIcon /> Load Demo</>)}
-                          </button>
+                          </Button>
                           {transcript.length > 0 && (
-                            <button
+                            <Button
+                              size="mini"
+                              variant="outline"
                               onClick={handleClearTranscript}
-                              className="vcc-btn vcc-btn-mini"
                               title="Clear transcript conversation history"
                             >
                               Clear Log
-                            </button>
+                            </Button>
                           )}
                         </div>
                       </div>
+
+                      {/* ── Manual utterance simulator (ported from the removed
+                          root dashboard's DemoModeControl) -- types a line as a
+                          named role without needing a working microphone. ── */}
+                      {activeIncident && (
+                        <form
+                          onSubmit={handleSimulateUtterance}
+                          style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, paddingTop: 8, borderTop: '1px solid #f1f5f9' }}
+                        >
+                          <span style={{ fontSize: 10.5, fontWeight: 600, color: '#64748b', whiteSpace: 'nowrap' }}>
+                            Simulate utterance:
+                          </span>
+                          <select
+                            className="vcc-select vcc-select-compact"
+                            value={simSpeaker}
+                            onChange={(e) => setSimSpeaker(e.target.value)}
+                            aria-label="Simulated speaker"
+                          >
+                            <option value="Dave Miller">Dave Miller (Engineer)</option>
+                            <option value="Priya Sharma">Priya Sharma (Support)</option>
+                            <option value="Commander Sarah Chen">Commander Sarah Chen (Commander)</option>
+                            <option value="Marcus Vance">Marcus Vance (Business Lead)</option>
+                          </select>
+                          <input
+                            className="vcc-input"
+                            style={{ flex: 1, minWidth: 180 }}
+                            placeholder="e.g. Database connection pool usage dropped back to 35% after restart."
+                            value={simUtterance}
+                            onChange={(e) => setSimUtterance(e.target.value)}
+                          />
+                          <Button
+                            type="submit"
+                            size="mini"
+                            variant="outline"
+                            disabled={isSimulating || !simUtterance.trim()}
+                          >
+                            {isSimulating ? 'Ingesting…' : 'Inject'}
+                          </Button>
+                        </form>
+                      )}
                     </div>
                   )}
                 </div>
@@ -2822,8 +3046,9 @@ export default function VoiceTestPage() {
                             <div className="vcc-conflict-rec">→ {c.recommended_action}</div>
                           )}
                           {!resolved && (
-                            <button
-                              className="vcc-btn vcc-btn-confirm"
+                            <Button
+                              size="xs"
+                              variant="confirm"
                               disabled={busyId === c.id}
                               onClick={() =>
                                 handleResolveConflict(
@@ -2834,7 +3059,7 @@ export default function VoiceTestPage() {
                               style={{ alignSelf: 'flex-start', marginTop: 2 }}
                             >
                               {busyId === c.id ? 'Resolving…' : 'Mark resolved'}
-                            </button>
+                            </Button>
                           )}
                         </div>
                       );
@@ -2873,14 +3098,14 @@ export default function VoiceTestPage() {
                               {item.status}
                             </span>
                             {!done && (
-                              <button
-                                className="vcc-btn"
+                              <Button
+                                size="xs"
+                                variant="outline"
                                 disabled={busyId === item.id}
                                 onClick={() => handleCompleteItem(item.id)}
-                                style={{ fontSize: 10, padding: '3px 8px' }}
                               >
                                 {busyId === item.id ? '…' : 'Complete'}
-                              </button>
+                              </Button>
                             )}
                           </div>
                         </div>
@@ -2905,6 +3130,155 @@ export default function VoiceTestPage() {
                         {r.severity && <span className="vcc-risk-sev">{r.severity}</span>}
                       </div>
                     ))}
+                  </div>
+                )}
+
+                {/* ── Participants (ported from the removed root dashboard) ── */}
+                {(activeIncident?.participants?.length ?? 0) > 0 && (
+                  <div className="vcc-section-card">
+                    <div className="vcc-section-label">
+                      Participants
+                      <span className="vcc-count-pill">{activeIncident!.participants!.length}</span>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                      {activeIncident!.participants!.map((p) => {
+                        const inferred = p.role_source === 'inferred';
+                        return (
+                          <div
+                            key={p.id}
+                            style={{
+                              padding: '7px 9px',
+                              borderRadius: 6,
+                              border: '1px solid #e2e8f0',
+                              background: '#f8fafc',
+                              fontSize: 11,
+                            }}
+                          >
+                            <div style={{ fontWeight: 600, color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {p.name}
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 2 }}>
+                              <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, color: '#475569' }}>{p.role}</span>
+                              {inferred ? (
+                                <span
+                                  title="Role inferred from voice discussion"
+                                  style={{ fontSize: 9, color: '#92600c', background: '#fef3c7', padding: '1px 5px', borderRadius: 3 }}
+                                >
+                                  Inferred ({Math.round((p.role_confidence || 0.6) * 100)}%)
+                                </span>
+                              ) : (
+                                <span style={{ fontSize: 9, color: '#94a3b8' }}>Declared</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* ── Decisions in force (ported from the removed root dashboard) ──
+                    Distinct from Response & Actions below: a decision is a recorded
+                    commander call with rationale, not a proposed tool execution. */}
+                {activeIncident && (
+                  <div className="vcc-section-card">
+                    <div className="vcc-section-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                        <ScaleIcon /> Decisions in Force
+                        <span className="vcc-count-pill">
+                          {(activeIncident.claims || []).filter((c) => c.claim_type === 'decision' && !c.superseded_by_id).length}
+                        </span>
+                      </span>
+                      {!showDecisionForm && (
+                        <Button size="xs" variant="outline" onClick={() => { setShowDecisionForm(true); setSupersedeTarget(null); }}>
+                          + Record
+                        </Button>
+                      )}
+                    </div>
+
+                    {(() => {
+                      const decisions = (activeIncident.claims || []).filter((c) => c.claim_type === 'decision');
+                      const active = decisions.filter((d) => !d.superseded_by_id);
+                      const byId = new Map(decisions.map((d) => [d.id, d]));
+                      if (active.length === 0) {
+                        return <p className="vcc-empty">No decisions recorded yet.</p>;
+                      }
+                      return active.map((dec) => (
+                        <div key={dec.id} style={{ padding: '8px 0', borderBottom: '1px solid #f5f5f5' }}>
+                          <div style={{ fontSize: 11.5 }}>
+                            <span style={{ fontWeight: 600, color: '#0f172a' }}>{dec.entity}:</span>{' '}
+                            <span style={{ color: '#334155' }}>{dec.value}</span>
+                          </div>
+                          {dec.rationale && (
+                            <p style={{ fontSize: 10.5, color: '#94a3b8', marginTop: 2 }}>Because: {dec.rationale}</p>
+                          )}
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+                            <span style={{ fontSize: 10, color: '#94a3b8' }}>
+                              By {dec.decided_by || dec.speaker || 'Commander'}
+                              {dec.supersedes_id && byId.has(dec.supersedes_id) && (
+                                <> · supersedes &ldquo;{byId.get(dec.supersedes_id)?.value}&rdquo;</>
+                              )}
+                            </span>
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              onClick={() => {
+                                setSupersedeTarget(dec);
+                                setDecisionEntity(dec.entity);
+                                setDecisionValue('');
+                                setDecisionRationale('');
+                                setDecisionBy('');
+                                setShowDecisionForm(true);
+                              }}
+                            >
+                              Supersede
+                            </Button>
+                          </div>
+                        </div>
+                      ));
+                    })()}
+
+                    {showDecisionForm && (
+                      <div style={{ marginTop: 8, padding: 10, borderRadius: 6, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <p style={{ fontSize: 10.5, fontWeight: 600, color: '#0f172a' }}>
+                          {supersedeTarget ? `Supersede: "${supersedeTarget.value}"` : 'New decision'}
+                        </p>
+                        <input
+                          className="vcc-input"
+                          placeholder="What this concerns (e.g. Rollback timing)"
+                          value={decisionEntity}
+                          onChange={(e) => setDecisionEntity(e.target.value)}
+                          disabled={!!supersedeTarget}
+                        />
+                        <input
+                          className="vcc-input"
+                          placeholder="The decision itself"
+                          value={decisionValue}
+                          onChange={(e) => setDecisionValue(e.target.value)}
+                        />
+                        <input
+                          className="vcc-input"
+                          placeholder="Rationale — why this decision"
+                          value={decisionRationale}
+                          onChange={(e) => setDecisionRationale(e.target.value)}
+                        />
+                        <input
+                          className="vcc-input"
+                          placeholder="Decided by"
+                          value={decisionBy}
+                          onChange={(e) => setDecisionBy(e.target.value)}
+                        />
+                        {decisionError && <div className="vcc-cmd-error"><AlertTriangleIcon /> {decisionError}</div>}
+                        <div className="vcc-btn-row" style={{ marginTop: 0 }}>
+                          <Button size="xs" variant="default" disabled={isSavingDecision} onClick={handleSaveDecision}>
+                            {isSavingDecision ? 'Saving…' : 'Save'}
+                          </Button>
+                          <Button size="xs" variant="outline" onClick={resetDecisionForm}>
+                            Cancel
+                          </Button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -2994,36 +3368,40 @@ export default function VoiceTestPage() {
                                       onChange={(e) => setRejectReason(e.target.value)}
                                     />
                                     <div className="vcc-btn-row">
-                                      <button
-                                        className="vcc-btn vcc-btn-reject"
+                                      <Button
+                                        size="xs"
+                                        variant="reject"
                                         disabled={busyId === action.action_id}
                                         onClick={() => handleReject(action.action_id, action.tool_name)}
                                       >
                                         {busyId === action.action_id ? 'Rejecting…' : 'Confirm rejection'}
-                                      </button>
-                                      <button
-                                        className="vcc-btn"
+                                      </Button>
+                                      <Button
+                                        size="xs"
+                                        variant="outline"
                                         onClick={() => { setRejectingId(null); setRejectReason(''); }}
                                       >
                                         Cancel
-                                      </button>
+                                      </Button>
                                     </div>
                                   </div>
                                 ) : (
                                   <div className="vcc-btn-row">
-                                    <button
-                                      className="vcc-btn vcc-btn-confirm"
+                                    <Button
+                                      size="xs"
+                                      variant="confirm"
                                       disabled={busyId === action.action_id}
                                       onClick={() => handleApprove(action.action_id, action.tool_name)}
                                     >
                                       {busyId === action.action_id ? 'Approving…' : 'Approve'}
-                                    </button>
-                                    <button
-                                      className="vcc-btn vcc-btn-reject"
+                                    </Button>
+                                    <Button
+                                      size="xs"
+                                      variant="reject"
                                       onClick={() => { setRejectingId(action.action_id); setCommandError(null); }}
                                     >
                                       Reject
-                                    </button>
+                                    </Button>
                                   </div>
                                 )}
                               </div>
@@ -3041,14 +3419,102 @@ export default function VoiceTestPage() {
                 {activeIncident && (
                   <div className="vcc-section-card">
                     <div className="vcc-section-label">Final Report</div>
-                    <button
-                      className="vcc-btn vcc-btn-primary"
+                    <Button
+                      size="sm"
                       disabled={busyId === 'final-report'}
                       onClick={handleGenerateReport}
                     >
                       {busyId === 'final-report' ? 'Generating…' : 'Generate final report'}
-                    </button>
+                    </Button>
                     {finalReport && <pre className="vcc-report">{finalReport}</pre>}
+                  </div>
+                )}
+
+                {/* ── Shift handoff brief (ported from the removed root
+                    dashboard). Written + spoken forms from the same evidence
+                    record so they cannot diverge -- see the original
+                    HandoffPanel.tsx for the full reasoning. Broadcast requires
+                    an agent already running for this incident's voice
+                    channel; CREDENTIAL REQUIRED / NOT YET LIVE-VERIFIED that
+                    audio is actually heard. ── */}
+                {activeIncident && (
+                  <div className="vcc-section-card">
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                      <div>
+                        <div className="vcc-section-label" style={{ marginBottom: 2 }}>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                            <RepeatIcon /> Shift Handoff Brief
+                          </span>
+                        </div>
+                        <p style={{ fontSize: 10.5, color: '#94a3b8' }}>
+                          Written record + spoken script from the same evidence.
+                        </p>
+                      </div>
+                      <Button size="xs" disabled={isGeneratingHandoff} onClick={handleGenerateHandoff}>
+                        {isGeneratingHandoff ? 'Generating…' : 'Generate handoff'}
+                      </Button>
+                    </div>
+
+                    {handoffError && <div className="vcc-cmd-error" style={{ marginTop: 8 }}><AlertTriangleIcon /> {handoffError}</div>}
+
+                    {!handoffBrief && !handoffError && (
+                      <p className="vcc-empty" style={{ marginTop: 6 }}>
+                        Generate a brief when handing this incident to another commander.
+                      </p>
+                    )}
+
+                    {handoffBrief?.open_item_counts && (
+                      <>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 10 }}>
+                          {[
+                            { label: 'Contradictions', value: handoffBrief.open_item_counts.contradictions },
+                            { label: 'Open questions', value: handoffBrief.open_item_counts.questions },
+                            { label: 'Open actions', value: handoffBrief.open_item_counts.actions },
+                            { label: 'Overdue', value: handoffBrief.open_item_counts.overdue_actions },
+                            { label: 'Unowned', value: handoffBrief.open_item_counts.unowned_actions },
+                            { label: 'Risks', value: handoffBrief.open_item_counts.risks },
+                          ].map((c) => (
+                            <div key={c.label} style={{ padding: '7px 4px', borderRadius: 6, border: '1px solid #e2e8f0', background: '#f8fafc', textAlign: 'center' }}>
+                              <div style={{ fontSize: 16, fontWeight: 700, color: c.value === 0 ? '#94a3b8' : '#0f172a' }}>{c.value}</div>
+                              <div style={{ fontSize: 8.5, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#94a3b8' }}>{c.label}</div>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div style={{ marginTop: 10, padding: 10, borderRadius: 6, border: '1px solid #e2e8f0', background: '#f8fafc' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                            <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#475569', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                              <MapPinIcon /> Read this onto the bridge
+                            </span>
+                            <div style={{ display: 'flex', gap: 5 }}>
+                              <Button size="xs" variant="outline" onClick={handleCopyHandoff}>
+                                {handoffCopied ? (<><CheckIcon /> Copied</>) : (<><ClipboardIcon /> Copy</>)}
+                              </Button>
+                              <Button size="xs" variant="outline" disabled={isBroadcastingHandoff} onClick={handleBroadcastHandoff}>
+                                {isBroadcastingHandoff ? 'Broadcasting…' : (<><Volume2Icon /> Broadcast</>)}
+                              </Button>
+                            </div>
+                          </div>
+                          <p style={{ fontSize: 11.5, color: '#1e293b', marginTop: 6, lineHeight: 1.5 }}>{handoffBrief.spoken_brief}</p>
+                          {handoffBroadcastResult && (
+                            <p style={{ fontSize: 10, marginTop: 6, display: 'flex', alignItems: 'flex-start', gap: 4, color: handoffBroadcastResult.ok ? '#64748b' : '#92600c' }}>
+                              {handoffBroadcastResult.ok ? <CheckCircleIcon /> : <AlertTriangleIcon />}
+                              <span>{handoffBroadcastResult.message}</span>
+                            </p>
+                          )}
+                        </div>
+
+                        {handoffBrief.sections?.record_quality && (
+                          <p style={{ fontSize: 10.5, color: '#92600c', background: '#fef3c7', border: '1px solid #fde68a', padding: 8, borderRadius: 6, marginTop: 10 }}>
+                            <b>Record quality:</b> {handoffBrief.sections.record_quality.caveat}
+                          </p>
+                        )}
+
+                        <p style={{ fontSize: 10, color: '#94a3b8', borderTop: '1px solid #f1f5f9', paddingTop: 8, marginTop: 10 }}>
+                          {handoffBrief.ai_disclaimer}
+                        </p>
+                      </>
+                    )}
                   </div>
                 )}
 
