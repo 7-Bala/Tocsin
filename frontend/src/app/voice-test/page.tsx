@@ -1233,11 +1233,12 @@ export default function VoiceTestPage() {
         .vcc-topbar-badge {
           font-size: 9.5px;
           font-weight: 600;
-          padding: 2px 8px;
-          border-radius: 9999px;
-          background: #e0f2fe;
-          color: #0369a1;
-          letter-spacing: 0.04em;
+          padding: 2px 7px;
+          border-radius: 3px;
+          background: #f1f5f9;
+          color: #475569;
+          border: 1px solid #e2e8f0;
+          letter-spacing: 0.05em;
           text-transform: uppercase;
         }
         .vcc-topbar-center {
@@ -1293,16 +1294,15 @@ export default function VoiceTestPage() {
         .vcc-card-sm {
           background: #ffffff;
           border: 1px solid #e2e8f0;
-          border-radius: 12px;
+          border-radius: 6px;
           padding: 10px 12px;
-          box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
         }
         .vcc-card-sm .vcc-section-label { margin-bottom: 6px; }
         .vcc-channel-card { width: 260px; margin-top: 20px; }
         .vcc-input {
           width: 100%;
           padding: 7px 10px;
-          border-radius: 8px;
+          border-radius: 6px;
           border: 1px solid #cbd5e1;
           background: #ffffff;
           font-size: 12px;
@@ -1313,8 +1313,8 @@ export default function VoiceTestPage() {
           transition: border-color 0.15s, box-shadow 0.15s;
         }
         .vcc-input:focus {
-          border-color: #0284c7;
-          box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.15);
+          border-color: #0f172a;
+          box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.08);
         }
         .vcc-input:disabled { opacity: 0.6; cursor: not-allowed; background: #f8fafc; }
         .vcc-btn-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
@@ -1322,7 +1322,7 @@ export default function VoiceTestPage() {
         /* ── Material 3 Buttons ── */
         .vcc-btn {
           padding: 6px 14px;
-          border-radius: 8px;
+          border-radius: 6px;
           font-size: 11.5px;
           font-weight: 600;
           cursor: pointer;
@@ -1343,8 +1343,8 @@ export default function VoiceTestPage() {
         }
         .vcc-btn:active:not(:disabled) { transform: scale(0.98); }
         .vcc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        .vcc-btn-primary { background: #0284c7; color: #ffffff; border-color: #0284c7; }
-        .vcc-btn-primary:hover:not(:disabled) { background: #0369a1; border-color: #0369a1; }
+        .vcc-btn-primary { background: #0f172a; color: #ffffff; border-color: #0f172a; }
+        .vcc-btn-primary:hover:not(:disabled) { background: #1e293b; border-color: #1e293b; }
         .vcc-btn-danger  { background: #ef4444; color: #ffffff; border-color: #ef4444; }
         .vcc-btn-danger:hover:not(:disabled)  { background: #dc2626; border-color: #dc2626; }
         .vcc-btn-green   { background: #16a34a; color: #ffffff; border-color: #16a34a; }
@@ -1357,7 +1357,7 @@ export default function VoiceTestPage() {
           border-color: #bbf7d0;
           font-weight: 600;
           font-size: 11px;
-          border-radius: 20px;
+          border-radius: 6px;
           padding: 5px 12px;
         }
         .vcc-btn-confirm:hover:not(:disabled) { background: #bbf7d0; color: #14532d; }
@@ -1367,7 +1367,7 @@ export default function VoiceTestPage() {
           border-color: #fecaca;
           font-size: 11px;
           font-weight: 600;
-          border-radius: 20px;
+          border-radius: 6px;
           padding: 5px 12px;
         }
         .vcc-btn-reject:hover:not(:disabled)  { background: #fecaca; color: #7f1d1d; }
@@ -1384,7 +1384,7 @@ export default function VoiceTestPage() {
           outline: none;
           transition: border-color 0.15s;
         }
-        .vcc-select:focus { border-color: #0284c7; }
+        .vcc-select:focus { border-color: #0f172a; }
 
         /* ── Center panel (Dynamic Island & Live Graph) ── */
         .vcc-center {
@@ -1451,14 +1451,16 @@ export default function VoiceTestPage() {
           transform: scale(0.96);
         }
         .vcc-cluster-mic-btn:focus-visible {
-          outline: 2px solid #0284c7;
+          outline: 2px solid #0f172a;
           outline-offset: 2px;
         }
         .vcc-cluster-mic-btn.active-user {
           color: #ea580c;
           border-color: #f97316;
           background: #fff7ed;
-          box-shadow: 0 0 16px rgba(249, 115, 22, 0.4);
+          /* A solid ring reads as "this control is active" without the diffuse
+             glow that reads as decorative AI-magic shimmer. */
+          box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.16);
         }
         .vcc-cluster-mic-btn.muted {
           color: #dc2626;
@@ -1479,19 +1481,20 @@ export default function VoiceTestPage() {
           height: 54px;
           border-radius: 9999px;
           background: #0f172a;
-          box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.25);
+          /* Flat, not floating -- an incident-command surface should feel
+             stable, not like an elevated consumer-app call bubble. */
+          box-shadow: 0 1px 2px rgba(15, 23, 42, 0.18);
           display: flex;
           align-items: center;
           justify-content: space-between;
           padding: 0 16px;
           box-sizing: border-box;
           user-select: none;
-          transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease;
+          transition: box-shadow 0.2s ease;
           flex-shrink: 0;
         }
         .vcc-dynamic-island:hover {
-          transform: translateY(-1px);
-          box-shadow: 0 12px 28px rgba(15, 23, 42, 0.32);
+          box-shadow: 0 1px 3px rgba(15, 23, 42, 0.24);
         }
 
         .vcc-island-left {
@@ -1576,8 +1579,7 @@ export default function VoiceTestPage() {
           padding: 10px 14px;
           background: #ffffff;
           border: 1px solid #e2e8f0;
-          border-radius: 14px;
-          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+          border-radius: 8px;
           box-sizing: border-box;
         }
 
@@ -1700,9 +1702,8 @@ export default function VoiceTestPage() {
         .vcc-control-deck {
           background: #ffffff;
           border: 1px solid #e2e8f0;
-          border-radius: 16px;
+          border-radius: 8px;
           padding: 12px 14px;
-          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
           display: flex;
           flex-direction: column;
           gap: 8px;
@@ -1733,7 +1734,7 @@ export default function VoiceTestPage() {
         .vcc-deck-toggle-btn {
           background: #f1f5f9;
           border: 1px solid #e2e8f0;
-          border-radius: 9999px;
+          border-radius: 3px;
           padding: 2px 8px;
           font-size: 9.5px;
           font-weight: 600;
@@ -1791,7 +1792,7 @@ export default function VoiceTestPage() {
           color: #15803d;
           background: #dcfce7;
           padding: 1.5px 5px;
-          border-radius: 9999px;
+          border-radius: 3px;
         }
         .vcc-deck-inline-row {
           display: flex;
@@ -1841,11 +1842,11 @@ export default function VoiceTestPage() {
         .vcc-deck-tool-tag {
           font-size: 9.5px;
           font-weight: 600;
-          color: #0284c7;
-          background: #e0f2fe;
-          border: 1px solid #bae6fd;
+          color: #3f5a74;
+          background: #eef2f6;
+          border: 1px solid #dbe3ea;
           padding: 2.5px 8px;
-          border-radius: 9999px;
+          border-radius: 3px;
           white-space: nowrap;
         }
         .vcc-btn-mini {
@@ -1855,7 +1856,7 @@ export default function VoiceTestPage() {
           height: 26px;
           background: #f1f5f9;
           border: 1px solid #e2e8f0;
-          border-radius: 9999px;
+          border-radius: 3px;
           color: #334155;
           white-space: nowrap;
           cursor: pointer;
@@ -1872,7 +1873,7 @@ export default function VoiceTestPage() {
           font-size: 9px;
           font-weight: 600;
           padding: 2px 7px;
-          border-radius: 9999px;
+          border-radius: 3px;
           background: #f8fafc;
           border: 1px solid #e2e8f0;
           color: #475569;
@@ -1882,9 +1883,8 @@ export default function VoiceTestPage() {
         .vcc-incident-card {
           background: #ffffff;
           border: 1px solid #e2e8f0;
-          border-radius: 16px;
+          border-radius: 8px;
           padding: 16px;
-          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
         }
         .vcc-incident-row {
           display: flex;
@@ -1894,7 +1894,7 @@ export default function VoiceTestPage() {
         }
         .vcc-incident-icon {
           width: 42px; height: 42px;
-          border-radius: 12px;
+          border-radius: 6px;
           display: flex;
           align-items: center;
           justify-content: center;
@@ -1916,7 +1916,7 @@ export default function VoiceTestPage() {
           color: #7c3aed;
           background: #f5f3ff;
           border: 1px solid #ddd6fe;
-          border-radius: 9999px;
+          border-radius: 3px;
           padding: 1.5px 7px;
           display: inline-block;
           margin-bottom: 4px;
@@ -1946,7 +1946,7 @@ export default function VoiceTestPage() {
         .vcc-chip {
           display: inline-block;
           padding: 3px 9px;
-          border-radius: 9999px;
+          border-radius: 3px;
           font-size: 10.5px;
           font-weight: 700;
           letter-spacing: 0.03em;
@@ -1969,7 +1969,7 @@ export default function VoiceTestPage() {
         .vcc-metric-item {
           background: #f8fafc;
           border: 1px solid #e2e8f0;
-          border-radius: 12px;
+          border-radius: 6px;
           padding: 12px 14px;
           transition: background-color 0.2s ease, border-color 0.2s ease;
         }
@@ -1984,9 +1984,8 @@ export default function VoiceTestPage() {
         .vcc-section-card {
           background: #ffffff;
           border: 1px solid #e2e8f0;
-          border-radius: 16px;
+          border-radius: 8px;
           padding: 16px 18px;
-          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
         }
 
         /* ── Hypotheses ── */
@@ -2001,7 +2000,7 @@ export default function VoiceTestPage() {
         .vcc-hypo-name { font-size: 11.5px; color: #1e293b; font-weight: 500; }
         .vcc-hypo-pct  { font-size: 11px; font-weight: 600; color: #64748b; }
         .vcc-bar-track { height: 6px; background: #f1f5f9; border-radius: 999px; overflow: hidden; }
-        .vcc-bar-fill  { height: 100%; background: #0284c7; border-radius: 999px; transition: width 0.6s ease; }
+        .vcc-bar-fill  { height: 100%; background: #0f172a; border-radius: 999px; transition: width 0.6s ease; }
 
         /* ── Timeline ── */
         .vcc-tl { display: flex; flex-direction: column; }
@@ -2030,7 +2029,7 @@ export default function VoiceTestPage() {
           font-size: 9.5px;
           font-weight: 700;
           padding: 2px 8px;
-          border-radius: 9999px;
+          border-radius: 3px;
           white-space: nowrap;
           flex-shrink: 0;
         }
@@ -2051,14 +2050,14 @@ export default function VoiceTestPage() {
           font-weight: 600;
           letter-spacing: 0.02em;
           padding: 2px 7px;
-          border-radius: 999px;
+          border-radius: 3px;
           background: #f1f5f9;
           color: #475569;
           margin-left: 6px;
           text-transform: none;
         }
-        .vcc-count-warn { background: #fef3c7; color: #b45309; }
-        .vcc-count-lock { background: #e0f2fe; color: #0369a1; }
+        .vcc-count-warn { background: #fef3c7; color: #92600c; }
+        .vcc-count-lock { background: #eef2f6; color: #3f5a74; }
 
         /* Contradictions */
         .vcc-conflict {
@@ -2082,7 +2081,7 @@ export default function VoiceTestPage() {
           font-size: 8.5px;
           font-weight: 700;
           padding: 2px 7px;
-          border-radius: 9999px;
+          border-radius: 3px;
           white-space: nowrap;
         }
         .vcc-conflict-state.warn { background: #fef3c7; color: #b45309; }
@@ -2093,7 +2092,7 @@ export default function VoiceTestPage() {
           gap: 8px;
           background: #f8fafc;
           border: 1px solid #e2e8f0;
-          border-radius: 10px;
+          border-radius: 6px;
           padding: 8px 10px;
         }
         .vcc-conflict-side { flex: 1; min-width: 0; }
@@ -2134,7 +2133,7 @@ export default function VoiceTestPage() {
           font-size: 9px;
           font-weight: 700;
           padding: 2px 7px;
-          border-radius: 9999px;
+          border-radius: 3px;
           background: #f1f5f9;
           color: #64748b;
         }
@@ -2162,7 +2161,7 @@ export default function VoiceTestPage() {
           font-size: 8.5px;
           font-weight: 700;
           padding: 2px 7px;
-          border-radius: 9999px;
+          border-radius: 3px;
           background: #fee2e2;
           color: #dc2626;
           flex-shrink: 0;

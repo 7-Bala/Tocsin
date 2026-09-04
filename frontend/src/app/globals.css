@@ -11,6 +11,70 @@
   --accent-red: #f85149;
   --accent-blue: #58a6ff;
   --accent-green: #3fb950;
+
+  /* ── shadcn/ui tokens ──────────────────────────────────────────────────
+     A deliberately restrained, near-monochrome palette (zinc-based neutrals,
+     no chroma in background/foreground/border) so shadcn primitives read as
+     an operational instrument rather than a SaaS admin template. --radius is
+     6px, not shadcn's 8px default -- smaller, more rectangular, closer to
+     Linear/GitHub than to a rounded consumer app. Values are HSL triplets
+     (no hsl() wrapper) because Tailwind's config composes them as
+     hsl(var(--x)) so opacity modifiers (bg-primary/50) keep working. */
+  --background: 0 0% 100%;
+  --foreground: 222 24% 10%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 24% 10%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222 24% 10%;
+  --primary: 222 24% 12%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 220 16% 96%;
+  --secondary-foreground: 222 24% 14%;
+  --muted: 220 16% 96%;
+  --muted-foreground: 220 9% 42%;
+  --accent: 220 16% 95%;
+  --accent-foreground: 222 24% 14%;
+  --destructive: 0 65% 42%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 220 14% 90%;
+  --input: 220 14% 88%;
+  --ring: 222 24% 20%;
+  --radius: 0.375rem;
+
+  /* Semantic incident-state colors. Desaturated deliberately -- these must
+     read as meaning (what is this evidence's status?), not as brand color. */
+  --state-confirmed: 142 45% 32%;  /* muted green: confirmed / healthy */
+  --state-warning:   32 70% 42%;   /* muted amber: uncertain / needs review */
+  --state-critical:  0 65% 42%;    /* muted red: contradicted / dangerous */
+  --state-info:      213 30% 42%;  /* muted slate-blue: informational */
+  --state-inference: 250 25% 45%;  /* muted indigo: AI-proposed, never a glow */
+}
+
+.dark {
+  --background: 222 30% 6%;
+  --foreground: 210 20% 96%;
+  --card: 222 26% 9%;
+  --card-foreground: 210 20% 96%;
+  --popover: 222 26% 9%;
+  --popover-foreground: 210 20% 96%;
+  --primary: 210 20% 96%;
+  --primary-foreground: 222 24% 12%;
+  --secondary: 222 20% 14%;
+  --secondary-foreground: 210 20% 96%;
+  --muted: 222 20% 14%;
+  --muted-foreground: 220 10% 62%;
+  --accent: 222 20% 16%;
+  --accent-foreground: 210 20% 96%;
+  --destructive: 0 55% 48%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 222 18% 18%;
+  --input: 222 18% 18%;
+  --ring: 210 20% 80%;
+  --state-confirmed: 142 40% 48%;
+  --state-warning: 32 65% 55%;
+  --state-critical: 0 60% 55%;
+  --state-info: 213 40% 62%;
+  --state-inference: 250 35% 65%;
 }
 
 * {
