@@ -51,11 +51,30 @@ RTM — so tiles/map/timeline do update from what a human says. What's actually
 broken is one direction only: nothing Tocsin *says back* ever becomes transcript
 text or feeds back into the evidence record structurally.
 
-**Recommended next step:** this looks like it needs an answer from Agora directly —
-docs.agora.io's own transcripts page admits it doesn't document the wire format, and
-the official toolkit's source only shows how a client should *listen*, not what
-makes the agent actually *publish*. See `docs/agora/RESEARCH.md` §9's 2026-09-04
-update for the full isolated repro to hand to a mentor or Agora support.
+**Update (later same day):** migrated the client transport to the official
+`agora-agent-client-toolkit` and fixed a genuine RTM channel-subscribe bug in
+doing so (the toolkit itself never opens the RTM channel; the app must). RTM
+events started flowing for the first time (`presence` confirmed arriving) — but
+`assistant.transcription` still never did.
+
+Four further, previously-untried fixes were then made and live-tested one at a
+time: `remote_rtc_uids` from wildcard to an explicit uid (matches every official
+example; no other example uses a wildcard), `output_modalities` to
+`["text","audio"]`, and the exact payload verified byte-for-byte against the
+official `agora-agents` Python SDK's own `GeminiLiveOptions.to_config()` source —
+confirming this project's hand-built JSON already matches what the SDK itself
+would generate, field for field. None of the four changed the outcome. With
+every fix applied together, the agent still spoke audibly (confirmed via a real
+`RemoteAudioTrack.play`/`playing` event in the console) — the pipeline runs
+end-to-end — but RTM never delivered a `message` event of any kind, only the
+`presence` events Signaling generates automatically on join/leave.
+
+**This is now closed as a local investigation.** Every documented and
+SDK-source-level lever has been pulled, correctly, and verified live twice. The
+remaining candidates (a preview-model transcription limitation, or an
+account-level restriction on agent-side RTM publish specifically) are outside
+what this codebase can diagnose further. See `docs/agora/RESEARCH.md` §9's final
+2026-09-04 update for the isolated repro to hand to Agora support directly.
 
 ---
 

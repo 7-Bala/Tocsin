@@ -141,12 +141,16 @@ export async function startRtmTranscriptSession(options: {
       if (emitted.get(key) === text) continue;
       emitted.set(key, text);
 
-      // metadata.object is authoritative for who spoke; fall back to comparing
-      // the transcript uid against our own RTM identity.
+      // metadata.object is authoritative for who spoke. Fallback matches Agora's
+      // own official quickstart (agent-quickstart-nextjs/lib/conversation.ts):
+      // uid === "0" is the toolkit's SENTINEL for local-user speech, not a real
+      // RTC uid to compare against our own identity -- comparing it to
+      // userAccount (as this file previously did) would misattribute every
+      // local turn to the agent, since "0" never equals a real uid.
       const objectType: string | undefined = item?.metadata?.object;
       const isUser =
         objectType === 'user.transcription' ||
-        (objectType === undefined && String(item?.uid) === String(userAccount));
+        (objectType === undefined && String(item?.uid) === '0');
 
       onEvent({
         utteranceId: key,

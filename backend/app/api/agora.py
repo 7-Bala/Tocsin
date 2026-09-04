@@ -175,6 +175,20 @@ class StartAgentRequest(BaseModel):
     description="Numeric RTC UID for the agent participant in the channel",
     examples=[9999],
   )
+  remote_uid: str | int | None = Field(
+    default=None,
+    description=(
+      "RTC uid of the human participant the agent should listen to, echoed "
+      "into properties.remote_rtc_uids. Every official Agora example (the "
+      "Python SDK's own docs, the official Next.js quickstart) sets this to "
+      "an explicit uid -- none uses a wildcard. This project previously sent "
+      "['*'] unconditionally; that was never how any first-party example was "
+      "written, and its effect on RTM transcript delivery was untested. When "
+      "omitted, falls back to ['*'] for backward compatibility with existing "
+      "callers (demo/test scripts that don't yet pass a real participant uid)."
+    ),
+    examples=[9376],
+  )
   voice: str = Field(
     default="Puck",
     description="Gemini Live voice personality (Puck, Charon, Aoede, Fenrir, Kore, Leda, Orus, Zephyr)",
@@ -769,6 +783,15 @@ async def start_conversational_agent(
   mcp_endpoint: str | None = None
   payload: dict[str, Any]
 
+  # Every first-party Agora example (agora-agents-python's own docs, the
+  # official agent-quickstart-nextjs reference app) sets remote_rtc_uids to an
+  # explicit participant uid; none uses a wildcard. This project sent ["*"]
+  # unconditionally with no live confirmation either way -- restrict to the
+  # actual human participant when the caller supplies one, matching every
+  # documented example, and fall back to "*" only for callers that don't
+  # (existing demo/test scripts).
+  remote_rtc_uids = [str(request.remote_uid)] if request.remote_uid is not None else ["*"]
+
   if request.voice_pipeline == "gemini_live":
     # Unchanged from the original implementation, MINUS mcp_servers: official docs
     # confirm this field is not supported here (docs/agora/RESEARCH.md §4). Gemini
@@ -783,7 +806,7 @@ async def start_conversational_agent(
         "channel": channel_name,
         "token": agent_token,
         "agent_rtc_uid": str(request.agent_uid),
-        "remote_rtc_uids": ["*"],
+        "remote_rtc_uids": remote_rtc_uids,
         "enable_string_uid": False,
         "idle_timeout": 120,
         "advanced_features": {"enable_rtm": True},
@@ -819,7 +842,16 @@ async def start_conversational_agent(
             },
           },
           "input_modalities": ["audio"],
-          "output_modalities": ["audio"],
+          # "audio" alone was the prior default. Testing "text" alongside audio:
+          # transcribe_agent/transcribe_user match Agora's own SDK-generated
+          # payload byte-for-byte (verified against agora-agents-python's
+          # GeminiLive.to_config()), yet zero RTM "message" events of ANY kind
+          # (not just transcripts) have ever arrived, only "presence". The docs'
+          # only other lever on this pipeline is output_modalities -- "Combined
+          # text and audio output" is documented as an alternative to
+          # audio-only, and transcription may be gated on text being an active
+          # output modality rather than solely on the transcribe_* flags.
+          "output_modalities": ["text", "audio"],
           "greeting_message": (
             "Tocsin emergency coordinator active. How can I assist?"
           ),
@@ -885,7 +917,7 @@ async def start_conversational_agent(
         "channel": channel_name,
         "token": agent_token,
         "agent_rtc_uid": str(request.agent_uid),
-        "remote_rtc_uids": ["*"],
+        "remote_rtc_uids": remote_rtc_uids,
         "enable_string_uid": False,
         "idle_timeout": 120,
         "advanced_features": {"enable_rtm": True},

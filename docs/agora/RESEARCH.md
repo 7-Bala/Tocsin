@@ -532,6 +532,71 @@ from reading Agora's own source, not from running it — treat this as
 `CREDENTIAL REQUIRED`, not `VERIFIED IN CODE`, until a live session with an active
 agent confirms a transcript actually renders.
 
+### UPDATE 2026-09-04 (latest) — every documented lever tried; root cause isolated to outside this codebase
+
+Following up on the CREDENTIAL REQUIRED status below, four concrete, previously-untried
+fixes were made and live-tested, each ruling out one more hypothesis:
+
+1. **`agora project doctor --feature rtm --feature convoai`** (official Agora CLI,
+   installed and authenticated this session): `rtm enabled`, `convoai enabled`,
+   `Project is ready for CONVOAI`. Rules out Console-level RTM/ConvoAI feature
+   enablement as the cause — it was never disabled.
+
+2. **`remote_rtc_uids` changed from `["*"]` to an explicit participant uid.** Every
+   first-party example (the official `agora-agents-python` SDK docs, the actively
+   maintained `agent-quickstart-nextjs` reference app) scopes the agent to a real
+   uid; none uses a wildcard, and this project's use of one had never been tested
+   against a real session. Live-tested with the fix: **no change** — still zero
+   `assistant.transcription`, still zero RTM `message` events of any kind.
+
+3. **`output_modalities` changed from `["audio"]` to `["text", "audio"]`.** Docs
+   describe this as "Combined text and audio output" as an alternative to
+   audio-only; transcription could plausibly be gated on text being an active
+   output modality rather than solely on `transcribe_agent`/`transcribe_user`.
+   Live-tested: **no change**.
+
+4. **Payload verified byte-for-byte against Agora's own SDK.** Installed
+   `agora-agents` (PyPI, official, Fern-generated from Agora's API definition) and
+   read `GeminiLiveOptions.to_config()` in
+   `agora_agent/agentkit/vendors/mllm.py` directly. Its serialization logic
+   produces the exact same `params.transcribe_agent` / `params.transcribe_user`
+   shape this project's hand-built payload already sent — no hidden field, no
+   `input_audio_transcription` object, nothing this project's JSON was missing.
+   **A full migration to the official SDK would send an identical wire payload.**
+   This rules out "our hand-built JSON has a subtle schema bug" as the cause,
+   with the same confidence a migration would have provided, without the risk of
+   rewriting ~700 lines of tested, working endpoint code for zero expected effect
+   on this symptom.
+
+**What was NOT ruled out, because audio genuinely works:** with all four fixes
+applied simultaneously — explicit uid, `enable_error_message`, both transcribe
+flags, combined output modalities, RTM channel genuinely subscribed (confirmed via
+toolkit `presence` events arriving) — the agent was started, `agent-think` forced
+a real LLM turn, and **the reply was heard: genuine `RemoteAudioTrack.play` /
+`onSuccess` / `playing` state, confirmed in the console.** The pipeline runs
+end-to-end. The one and only thing that never happens, under any configuration
+tried across two full investigation sessions, is an RTM channel `message` event —
+not malformed, not misdirected, simply never sent. Only `presence` events (which
+Signaling generates automatically on join/leave, independent of the agent) have
+ever arrived.
+
+**Conclusion:** this is no longer an open configuration question on this
+project's side. Every documented and undocumented (SDK-source-level) lever has
+been pulled once, correctly, and verified live. The remaining candidates are
+outside this codebase's reach to fix or diagnose further:
+  - An Agora-side limitation specific to the `gemini-3.1-flash-live-preview`
+    model's transcription support (preview models rotate and can have partial
+    feature support that GA models don't).
+  - An account/project-level restriction on agent-side RTM *publish* specifically
+    (distinct from the client-side RTM login/subscribe *doctor* already
+    confirmed) — `agora project doctor`'s own documentation explicitly states it
+    proves control-plane readiness only, not that "RTM is already usable."
+
+**Recommended next step:** escalate this exact repro to Agora support directly —
+App ID, model name, the four fixes above, and the observation that `presence`
+arrives but `message` never does. That is not a question this project's own code
+can answer with more guessing.
+
 ### UPDATE 2026-09-04 (later) — migrated to the official toolkit; RTM delivery now demonstrably works, transcripts still unconfirmed
 
 Supersedes the two updates below on one specific point: **RTM message delivery to

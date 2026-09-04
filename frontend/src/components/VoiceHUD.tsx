@@ -58,6 +58,10 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
   const isMutedRef = useRef<boolean>(false);
   const ampIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const rtmSessionRef = useRef<RtmTranscriptSession | null>(null);
+  // Set once handleJoin resolves; handleStartAgent reads it to scope the agent
+  // to this participant's real RTC uid instead of a wildcard (see start-agent
+  // remote_uid on the backend for why the wildcard was never a good default).
+  const localRtcUidRef = useRef<string | number | null>(null);
 
   const addLog = useCallback(
     (msg: string) => {
@@ -184,6 +188,7 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
       }
 
       const { token, app_id, channel_name, uid } = await tokenRes.json();
+      localRtcUidRef.current = uid;
       setConnectionState('JOINING');
 
       const AgoraRTC = (await import('agora-rtc-sdk-ng')).default;
@@ -378,6 +383,7 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
         body: JSON.stringify({
           channel_name: channelName.trim(),
           agent_uid: 9999,
+          remote_uid: localRtcUidRef.current ?? undefined,
           voice: selectedVoice,
         }),
       });

@@ -10,6 +10,7 @@ import {
   completeActionItem,
   resolveEvidenceItem,
   getFinalSummary,
+  runIdentityOutageDemo,
 } from '@/hooks/useIncidentApi';
 import { startRtmTranscriptSession, RtmTranscriptSession } from '@/lib/agoraRtmTranscripts';
 import { decodeAgoraStreamMessage } from '@/lib/agoraStreamDecoder';
@@ -149,6 +150,9 @@ export default function VoiceTestPage() {
   const [rejectingId, setRejectingId] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [finalReport, setFinalReport] = useState<string | null>(null);
+  const [isControlsCollapsed, setIsControlsCollapsed] = useState(false);
+  const [isDemoRunning, setIsDemoRunning] = useState(false);
+  const [demoFeedback, setDemoFeedback] = useState<string | null>(null);
 
   // ── Agora / VAD refs ───────────────────────────────────────────────────
   const rtcClientRef       = useRef<any>(null);
@@ -946,6 +950,11 @@ export default function VoiceTestPage() {
         body: JSON.stringify({
           channel_name: channelName.trim(),
           agent_uid: 9999,
+          // Every official Agora example scopes the agent to an explicit
+          // participant uid; this project previously sent none, which made
+          // the backend default to a wildcard untested by any first-party
+          // reference. Only meaningful once Join Channel has set tokenDetails.
+          remote_uid: tokenDetails?.uid,
           voice: selectedVoice,
           voice_pipeline: voicePipeline,
           ...(voicePipeline === 'composed_tools' ? { composed_tools_llm_vendor: llmVendor } : {}),
@@ -979,6 +988,29 @@ export default function VoiceTestPage() {
       });
       setAgentStatus('STOPPED'); setAgentId(null); setRemoteAgentPresent(false);
     } catch { setAgentStatus('ERROR'); }
+  };
+
+  const handleRunDemo = async () => {
+    try {
+      setIsDemoRunning(true);
+      setDemoFeedback('Loading scenario…');
+      addLog('Executing deterministic Identity Outage demo scenario...');
+      const res = await runIdentityOutageDemo();
+      if (res?.state) {
+        addLog('✅ Seeded deterministic Identity Outage demo scenario into PostgreSQL.');
+        setDemoFeedback('✅ Scenario loaded');
+      } else {
+        addLog('✅ Executed identity outage demo scenario.');
+        setDemoFeedback('✅ Scenario loaded');
+      }
+      setTimeout(() => setDemoFeedback(null), 3500);
+    } catch (err: any) {
+      addLog(`❌ Demo execution error: ${err.message}`);
+      setDemoFeedback(`❌ Error: ${err.message}`);
+      setTimeout(() => setDemoFeedback(null), 4000);
+    } finally {
+      setIsDemoRunning(false);
+    }
   };
 
   /**
@@ -1242,9 +1274,6 @@ export default function VoiceTestPage() {
     }
   };
 
-  // Real ActionApprovalStatus values from the backend state machine (PROPOSED →
-  // PENDING_APPROVAL → APPROVED → EXECUTING → VERIFIED | FAILED; REJECTED is
-  // terminal). Read-only display — see the note above the Response & Actions section.
   const actionStatusBadge = (status: string): { bg: string; text: string; border: string; icon: string; iconBg: string } => {
     switch (status) {
       case 'APPROVED':
@@ -1262,7 +1291,6 @@ export default function VoiceTestPage() {
     }
   };
 
-  // ── Dot component (reused throughout) ──────────────────────────────────
   const Dot = ({ color }: { color: 'green' | 'indigo' | 'gray' | 'red' | 'amber' }) => {
     const c = { green: '#16a34a', indigo: '#6366f1', gray: '#9b9b9b', red: '#dc2626', amber: '#d97706' }[color];
     return <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: c, flexShrink: 0, marginRight: 5 }} />;
@@ -1272,55 +1300,53 @@ export default function VoiceTestPage() {
   const agentDotColor = agentStatus === 'RUNNING' || remoteAgentPresent ? 'green' : agentStatus === 'ERROR' ? 'red' : agentStatus === 'STARTING' || agentStatus === 'STOPPING' ? 'amber' : 'gray';
   const vadDotColor = vadStatus === 'READY' ? 'green' : vadStatus === 'ERROR' ? 'red' : vadStatus === 'LOADING' ? 'amber' : 'gray';
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // RENDER
-  // ─────────────────────────────────────────────────────────────────────────
   return (
     <>
       <style suppressHydrationWarning>{`
-        /* ── Reset & root ── */
+        /* ── Material 3 Design Tokens & Root ── */
         .vcc-root {
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-          background: #f2f1ef;
+          font-family: -apple-system, BlinkMacSystemFont, 'Google Sans Text', 'Google Sans', Roboto, 'Segoe UI', Inter, sans-serif;
+          background: #f8fafc;
           height: 100vh;
           height: 100dvh;
           overflow: hidden;
           display: flex;
           flex-direction: column;
-          color: #1a1a1a;
+          color: #0f172a;
           -webkit-font-smoothing: antialiased;
           font-size: 13px;
         }
 
-        /* ── Top bar ── */
+        /* ── Top bar (Material 3 Small Top App Bar) ── */
         .vcc-topbar {
-          height: 48px;
+          height: 50px;
           background: #ffffff;
-          border-bottom: 1px solid #e5e5e5;
+          border-bottom: 1px solid #e2e8f0;
           display: flex;
           align-items: center;
           justify-content: space-between;
           padding: 0 20px;
           flex-shrink: 0;
           gap: 16px;
+          box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
         }
         .vcc-topbar-brand {
           display: flex;
           align-items: center;
           gap: 8px;
-          font-size: 13px;
+          font-size: 13.5px;
           font-weight: 700;
-          color: #1a1a1a;
+          color: #0f172a;
           letter-spacing: -0.01em;
         }
         .vcc-topbar-badge {
-          font-size: 9px;
-          font-weight: 700;
-          padding: 2px 6px;
-          border-radius: 4px;
-          background: #f3f3f3;
-          color: #6b6b6b;
-          letter-spacing: 0.05em;
+          font-size: 9.5px;
+          font-weight: 600;
+          padding: 2px 8px;
+          border-radius: 9999px;
+          background: #e0f2fe;
+          color: #0369a1;
+          letter-spacing: 0.04em;
           text-transform: uppercase;
         }
         .vcc-topbar-center {
@@ -1328,14 +1354,15 @@ export default function VoiceTestPage() {
           align-items: center;
           gap: 6px;
           font-size: 11.5px;
-          color: #6b6b6b;
+          color: #64748b;
+          font-weight: 500;
         }
         .vcc-topbar-right {
           display: flex;
           align-items: center;
           gap: 16px;
           font-size: 12px;
-          color: #4a4a4a;
+          color: #475569;
         }
 
         /* ── Body layout ── */
@@ -1347,7 +1374,7 @@ export default function VoiceTestPage() {
           overflow: hidden;
         }
 
-        /* ── Panel shared ── */
+        /* ── Panel shared (Material 3 Surfaces) ── */
         .vcc-panel {
           display: flex;
           flex-direction: column;
@@ -1358,37 +1385,37 @@ export default function VoiceTestPage() {
           overflow-y: auto;
           overflow-x: hidden;
         }
-        .vcc-panel-scroll::-webkit-scrollbar { width: 8px; }
-        .vcc-panel-scroll::-webkit-scrollbar-thumb { background: #c4c4c4; border-radius: 4px; }
-        .vcc-panel-scroll::-webkit-scrollbar-thumb:hover { background: #6b6b6b; }
+        .vcc-panel-scroll::-webkit-scrollbar { width: 6px; }
+        .vcc-panel-scroll::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.35); border-radius: 9999px; }
+        .vcc-panel-scroll::-webkit-scrollbar-thumb:hover { background: rgba(100, 116, 139, 0.6); }
         .vcc-panel-scroll::-webkit-scrollbar-track { background: transparent; }
 
-        /* ── Left panel ── */
+        /* ── Left panel (Transcript & Manual Ingestion) ── */
         .vcc-left {
-          background: #f8f8f7;
-          border-right: 1px solid #e5e5e5;
+          background: #f8fafc;
+          border-right: 1px solid #e2e8f0;
         }
         .vcc-left-header {
           padding: 14px 16px 10px;
-          border-bottom: 1px solid #eeeeee;
+          border-bottom: 1px solid #e2e8f0;
           flex-shrink: 0;
           display: flex;
           align-items: center;
           justify-content: space-between;
         }
         .vcc-left-title {
-          font-size: 10px;
+          font-size: 10.5px;
           font-weight: 700;
-          letter-spacing: 0.07em;
+          letter-spacing: 0.06em;
           text-transform: uppercase;
-          color: #1a1a1a;
+          color: #334155;
         }
         .vcc-conn-badge {
           display: flex;
           align-items: center;
           font-size: 10.5px;
           font-weight: 600;
-          color: ${connectionState === 'CONNECTED' ? '#16a34a' : connectionState === 'ERROR' ? '#dc2626' : '#9b9b9b'};
+          color: ${connectionState === 'CONNECTED' ? '#16a34a' : connectionState === 'ERROR' ? '#dc2626' : '#94a3b8'};
         }
 
         /* ── Transcript ── */
@@ -1400,11 +1427,11 @@ export default function VoiceTestPage() {
           padding: 12px 12px 0;
         }
         .vcc-section-label {
-          font-size: 9.5px;
+          font-size: 10px;
           font-weight: 700;
-          letter-spacing: 0.07em;
+          letter-spacing: 0.06em;
           text-transform: uppercase;
-          color: #9b9b9b;
+          color: #64748b;
           margin-bottom: 8px;
           flex-shrink: 0;
         }
@@ -1414,12 +1441,12 @@ export default function VoiceTestPage() {
           overflow-x: hidden;
           display: flex;
           flex-direction: column;
-          gap: 6px;
+          gap: 8px;
           padding-bottom: 8px;
         }
-        .vcc-transcript::-webkit-scrollbar { width: 8px; }
-        .vcc-transcript::-webkit-scrollbar-thumb { background: #c4c4c4; border-radius: 4px; }
-        .vcc-transcript::-webkit-scrollbar-thumb:hover { background: #6b6b6b; }
+        .vcc-transcript::-webkit-scrollbar { width: 6px; }
+        .vcc-transcript::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.35); border-radius: 9999px; }
+        .vcc-transcript::-webkit-scrollbar-thumb:hover { background: rgba(100, 116, 139, 0.6); }
         .vcc-transcript::-webkit-scrollbar-track { background: transparent; }
         .vcc-transcript-empty {
           display: flex;
@@ -1427,8 +1454,8 @@ export default function VoiceTestPage() {
           align-items: center;
           justify-content: center;
           flex: 1;
-          gap: 4px;
-          color: #b0b0b0;
+          gap: 6px;
+          color: #94a3b8;
           font-size: 12px;
           text-align: center;
           font-style: italic;
@@ -1437,20 +1464,28 @@ export default function VoiceTestPage() {
         .vcc-msg {
           display: flex;
           flex-direction: column;
-          gap: 3px;
-          padding: 8px 10px;
-          border-radius: 7px;
-          border-left: 3px solid transparent;
+          gap: 4px;
+          padding: 10px 12px;
+          border-radius: 12px;
+          border-left: 3.5px solid transparent;
           background: #ffffff;
-          border: 1px solid #f0f0f0;
-          animation: vcc-msg-in 0.2s cubic-bezier(0.16,1,0.3,1);
+          border: 1px solid #e2e8f0;
+          box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+          animation: vcc-msg-in 0.2s cubic-bezier(0.16, 1, 0.3, 1);
         }
         @keyframes vcc-msg-in {
           from { opacity: 0; transform: translateY(4px); }
           to   { opacity: 1; transform: translateY(0); }
         }
-        .vcc-msg.you { border-left: 3px solid #ff9f0a; }
-        .vcc-msg.ai  { border-left: 3px solid #30d158; }
+        .vcc-msg.you {
+          border-left: 3.5px solid #0284c7;
+          background: #ffffff;
+        }
+        .vcc-msg.ai {
+          border-left: 3.5px solid #16a34a;
+          background: #f0fdf4;
+          border-color: #bbf7d0;
+        }
         .vcc-msg-header {
           display: flex;
           align-items: center;
@@ -1459,22 +1494,22 @@ export default function VoiceTestPage() {
         .vcc-msg-speaker {
           font-size: 9px;
           font-weight: 700;
-          letter-spacing: 0.06em;
+          letter-spacing: 0.05em;
           text-transform: uppercase;
-          padding: 1px 6px;
-          border-radius: 3px;
+          padding: 1.5px 7px;
+          border-radius: 9999px;
         }
-        .vcc-msg-speaker.you { background: #fff7ed; color: #ea580c; }
-        .vcc-msg-speaker.ai  { background: #f0fdf4; color: #16a34a; }
+        .vcc-msg-speaker.you { background: #e0f2fe; color: #0369a1; }
+        .vcc-msg-speaker.ai  { background: #dcfce7; color: #15803d; }
         .vcc-msg-time {
           font-size: 9px;
-          color: #b0b0b0;
+          color: #94a3b8;
           font-variant-numeric: tabular-nums;
         }
         .vcc-msg-text {
           font-size: 12px;
           line-height: 1.5;
-          color: #2a2a2a;
+          color: #1e293b;
           word-break: break-word;
         }
 
@@ -1482,101 +1517,135 @@ export default function VoiceTestPage() {
         .vcc-left-controls {
           flex-shrink: 0;
           padding: 10px 12px;
-          border-top: 1px solid #eeeeee;
+          border-top: 1px solid #e2e8f0;
           display: flex;
           flex-direction: column;
           gap: 8px;
         }
         .vcc-card-sm {
           background: #ffffff;
-          border: 1px solid #e8e8e8;
-          border-radius: 8px;
+          border: 1px solid #e2e8f0;
+          border-radius: 12px;
           padding: 10px 12px;
+          box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
         }
         .vcc-card-sm .vcc-section-label { margin-bottom: 6px; }
         .vcc-channel-card { width: 260px; margin-top: 20px; }
         .vcc-input {
           width: 100%;
-          padding: 7px 9px;
-          border-radius: 6px;
-          border: 1px solid #e0e0e0;
-          background: #f8f8f7;
+          padding: 7px 10px;
+          border-radius: 8px;
+          border: 1px solid #cbd5e1;
+          background: #ffffff;
           font-size: 12px;
-          color: #1a1a1a;
-          font-family: monospace;
+          color: #0f172a;
+          font-family: inherit;
           outline: none;
           box-sizing: border-box;
           transition: border-color 0.15s, box-shadow 0.15s;
         }
-        .vcc-input:focus { border-color: #6366f1; box-shadow: 0 0 0 2px rgba(99,102,241,0.1); }
-        .vcc-input:disabled { opacity: 0.6; cursor: not-allowed; }
+        .vcc-input:focus {
+          border-color: #0284c7;
+          box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.15);
+        }
+        .vcc-input:disabled { opacity: 0.6; cursor: not-allowed; background: #f8fafc; }
         .vcc-btn-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
 
-        /* ── Buttons ── */
+        /* ── Material 3 Buttons ── */
         .vcc-btn {
-          padding: 6px 12px;
-          border-radius: 6px;
+          padding: 6px 14px;
+          border-radius: 8px;
           font-size: 11.5px;
           font-weight: 600;
           cursor: pointer;
-          border: 1px solid #e0e0e0;
-          background: #f5f5f4;
-          color: #1a1a1a;
-          transition: all 0.15s ease;
+          border: 1px solid #cbd5e1;
+          background: #f1f5f9;
+          color: #334155;
+          transition: all 0.18s cubic-bezier(0.2, 0, 0, 1);
           font-family: inherit;
           white-space: nowrap;
           display: inline-flex;
           align-items: center;
           gap: 5px;
         }
-        .vcc-btn:hover:not(:disabled) { opacity: 0.85; transform: translateY(-0.5px); }
+        .vcc-btn:hover:not(:disabled) {
+          background: #e2e8f0;
+          color: #0f172a;
+          transform: translateY(-0.5px);
+        }
         .vcc-btn:active:not(:disabled) { transform: scale(0.98); }
         .vcc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        .vcc-btn-primary { background: #1a1a1a; color: #ffffff; border-color: #1a1a1a; }
-        .vcc-btn-danger  { background: #dc2626; color: #ffffff; border-color: #dc2626; }
+        .vcc-btn-primary { background: #0284c7; color: #ffffff; border-color: #0284c7; }
+        .vcc-btn-primary:hover:not(:disabled) { background: #0369a1; border-color: #0369a1; }
+        .vcc-btn-danger  { background: #ef4444; color: #ffffff; border-color: #ef4444; }
+        .vcc-btn-danger:hover:not(:disabled)  { background: #dc2626; border-color: #dc2626; }
         .vcc-btn-green   { background: #16a34a; color: #ffffff; border-color: #16a34a; }
-        .vcc-btn-outline { background: transparent; color: #1a1a1a; border-color: #d4d4d4; }
-        .vcc-btn-confirm { background: #f0fdf4; color: #15803d; border-color: #bbf7d0; font-weight: 700; font-size: 11px; }
-        .vcc-btn-confirm:hover:not(:disabled) { background: #dcfce7; }
-        .vcc-btn-reject  { background: transparent; color: #dc2626; border-color: #fecaca; font-size: 11px; }
-        .vcc-btn-reject:hover:not(:disabled)  { background: #fef2f2; }
+        .vcc-btn-green:hover:not(:disabled)   { background: #15803d; border-color: #15803d; }
+        .vcc-btn-outline { background: transparent; color: #0f172a; border-color: #cbd5e1; }
+        .vcc-btn-outline:hover:not(:disabled) { background: #f1f5f9; }
+        .vcc-btn-confirm {
+          background: #dcfce7;
+          color: #15803d;
+          border-color: #bbf7d0;
+          font-weight: 600;
+          font-size: 11px;
+          border-radius: 20px;
+          padding: 5px 12px;
+        }
+        .vcc-btn-confirm:hover:not(:disabled) { background: #bbf7d0; color: #14532d; }
+        .vcc-btn-reject  {
+          background: #fee2e2;
+          color: #b91c1c;
+          border-color: #fecaca;
+          font-size: 11px;
+          font-weight: 600;
+          border-radius: 20px;
+          padding: 5px 12px;
+        }
+        .vcc-btn-reject:hover:not(:disabled)  { background: #fecaca; color: #7f1d1d; }
 
-        /* ── Command input ── */
+        /* ── Command input (Observation ingestion) ── */
         .vcc-cmd-row {
           display: flex;
           align-items: center;
           gap: 6px;
           background: #ffffff;
-          border: 1px solid #e5e5e5;
-          border-radius: 8px;
-          padding: 8px 10px;
+          border: 1px solid #cbd5e1;
+          border-radius: 12px;
+          padding: 7px 10px;
           transition: border-color 0.15s, box-shadow 0.15s;
+          box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
         }
-        .vcc-cmd-row:focus-within { border-color: #6366f1; box-shadow: 0 0 0 2px rgba(99,102,241,0.1); }
+        .vcc-cmd-row:focus-within {
+          border-color: #0284c7;
+          box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.15);
+        }
         .vcc-cmd-input {
           flex: 1;
           border: none;
           outline: none;
           font-size: 12px;
-          color: #1a1a1a;
+          color: #0f172a;
           background: transparent;
           font-family: inherit;
         }
-        .vcc-cmd-input::placeholder { color: #c0c0c0; }
+        .vcc-cmd-input::placeholder { color: #94a3b8; }
         .vcc-cmd-send {
-          width: 26px; height: 26px;
-          border-radius: 6px;
-          background: #1a1a1a;
+          width: 28px;
+          height: 28px;
+          border-radius: 9px;
+          background: #0284c7;
+          color: #ffffff;
           border: none;
           cursor: pointer;
           display: flex;
           align-items: center;
           justify-content: center;
           flex-shrink: 0;
-          transition: opacity 0.15s, transform 0.15s;
+          transition: opacity 0.15s, transform 0.15s, background 0.15s;
         }
-        .vcc-cmd-send:hover:not(:disabled) { opacity: 0.8; transform: scale(1.05); }
-        .vcc-cmd-send:active:not(:disabled) { transform: scale(0.95); }
+        .vcc-cmd-send:hover:not(:disabled) { background: #0369a1; transform: scale(1.04); }
+        .vcc-cmd-send:active:not(:disabled) { transform: scale(0.96); }
         .vcc-cmd-send-spinner {
           width: 11px; height: 11px;
           border: 1.5px solid rgba(255,255,255,0.35);
@@ -1587,7 +1656,7 @@ export default function VoiceTestPage() {
         @keyframes vcc-spin { to { transform: rotate(360deg); } }
         .vcc-cmd-thinking {
           font-size: 10.5px;
-          color: #999;
+          color: #64748b;
           padding: 4px 2px 0 2px;
           font-style: italic;
         }
@@ -1595,19 +1664,21 @@ export default function VoiceTestPage() {
         /* ── Voice select ── */
         .vcc-select {
           padding: 5px 8px;
-          border-radius: 6px;
-          border: 1px solid #e0e0e0;
-          background: #fff;
+          border-radius: 8px;
+          border: 1px solid #cbd5e1;
+          background: #ffffff;
           font-size: 11.5px;
-          color: #1a1a1a;
+          color: #0f172a;
           font-family: inherit;
           outline: none;
+          transition: border-color 0.15s;
         }
+        .vcc-select:focus { border-color: #0284c7; }
 
-        /* ── Center panel ── */
+        /* ── Center panel (Dynamic Island & Live Graph) ── */
         .vcc-center {
-          background: #f2f1ef;
-          border-right: 1px solid #e5e5e5;
+          background: #f1f5f9;
+          border-right: 1px solid #e2e8f0;
           display: flex;
           flex-direction: column;
         }
@@ -1619,15 +1690,12 @@ export default function VoiceTestPage() {
           justify-content: center;
           padding: 24px 20px;
           gap: 0;
-          /* The map grows with the incident, so this column needs its own scroll --
-             .vcc-root is height:100vh/overflow:hidden, so without this a busy map
-             would be clipped rather than reachable. */
           overflow-y: auto;
           min-height: 0;
         }
-        .vcc-center-inner::-webkit-scrollbar { width: 8px; }
-        .vcc-center-inner::-webkit-scrollbar-thumb { background: #c4c4c4; border-radius: 4px; }
-        .vcc-center-inner::-webkit-scrollbar-thumb:hover { background: #6b6b6b; }
+        .vcc-center-inner::-webkit-scrollbar { width: 6px; }
+        .vcc-center-inner::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.35); border-radius: 9999px; }
+        .vcc-center-inner::-webkit-scrollbar-thumb:hover { background: rgba(100, 116, 139, 0.6); }
         .vcc-center-inner::-webkit-scrollbar-track { background: transparent; }
         .vcc-map-slot {
           width: 100%;
@@ -1636,7 +1704,7 @@ export default function VoiceTestPage() {
           flex-shrink: 0;
         }
 
-        /* ── Centered Interaction Cluster (42px Mic + 12px Gap + 310px Dynamic Island) ── */
+        /* ── Centered Interaction Cluster (FAB Mic + Dynamic Island) ── */
         .vcc-interaction-cluster {
           display: flex;
           align-items: center;
@@ -1646,42 +1714,43 @@ export default function VoiceTestPage() {
           max-width: 100%;
         }
 
-        /* ── Standalone 42px Circular Microphone Control (Left of Island) ── */
+        /* ── Circular Material 3 Floating Mic Button ── */
         .vcc-cluster-mic-btn {
-          width: 42px;
-          height: 42px;
+          width: 44px;
+          height: 44px;
           border-radius: 50%;
-          border: 1px solid rgba(0, 0, 0, 0.08);
+          border: 1px solid #cbd5e1;
           background: #ffffff;
-          color: #374151;
+          color: #334155;
           display: flex;
           align-items: center;
           justify-content: center;
           cursor: pointer;
           flex-shrink: 0;
-          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
-          transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+          box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+          transition: all 0.2s cubic-bezier(0.2, 0, 0, 1);
         }
         .vcc-cluster-mic-btn:hover:not(:disabled) {
-          background: #f9fafb;
-          border-color: rgba(0, 0, 0, 0.16);
+          background: #f8fafc;
+          border-color: #94a3b8;
           transform: scale(1.04);
+          box-shadow: 0 4px 10px rgba(0, 0, 0, 0.09);
         }
         .vcc-cluster-mic-btn:active:not(:disabled) {
           transform: scale(0.96);
         }
         .vcc-cluster-mic-btn:focus-visible {
-          outline: 2px solid #3b82f6;
+          outline: 2px solid #0284c7;
           outline-offset: 2px;
         }
         .vcc-cluster-mic-btn.active-user {
-          color: #ff9f0a;
-          border-color: #ff9f0a;
+          color: #ea580c;
+          border-color: #f97316;
           background: #fff7ed;
-          box-shadow: 0 0 12px rgba(255, 159, 10, 0.35);
+          box-shadow: 0 0 16px rgba(249, 115, 22, 0.4);
         }
         .vcc-cluster-mic-btn.muted {
-          color: #ef4444;
+          color: #dc2626;
           border-color: #ef4444;
           background: #fef2f2;
         }
@@ -1693,13 +1762,13 @@ export default function VoiceTestPage() {
           cursor: not-allowed;
         }
 
-        /* ── Compact Apple Dynamic Island Capsule (310px x 54px) ── */
+        /* ── Dynamic Island Capsule ── */
         .vcc-dynamic-island {
           width: min(310px, calc(100vw - 32px));
           height: 54px;
           border-radius: 9999px;
-          background: #000000;
-          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+          background: #0f172a;
+          box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.25);
           display: flex;
           align-items: center;
           justify-content: space-between;
@@ -1711,7 +1780,7 @@ export default function VoiceTestPage() {
         }
         .vcc-dynamic-island:hover {
           transform: translateY(-1px);
-          box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
+          box-shadow: 0 12px 28px rgba(15, 23, 42, 0.32);
         }
 
         .vcc-island-left {
@@ -1730,32 +1799,32 @@ export default function VoiceTestPage() {
           flex-shrink: 0;
           transition: background-color 0.2s ease;
         }
-        .vcc-island-dot.connected    { background: #30d158; }
-        .vcc-island-dot.user         { background: #ff9f0a; }
-        .vcc-island-dot.ai           { background: #30d158; }
-        .vcc-island-dot.active       { background: #ffd60a; }
+        .vcc-island-dot.connected    { background: #22c55e; }
+        .vcc-island-dot.user         { background: #f97316; }
+        .vcc-island-dot.ai           { background: #22c55e; }
+        .vcc-island-dot.active       { background: #eab308; }
         .vcc-island-dot.muted        { background: #ef4444; }
-        .vcc-island-dot.connecting   { background: #ffd60a; }
-        .vcc-island-dot.disconnected { background: #9ca3af; }
+        .vcc-island-dot.connecting   { background: #eab308; }
+        .vcc-island-dot.disconnected { background: #94a3b8; }
         .vcc-island-dot.error        { background: #ef4444; }
 
         .vcc-island-label {
           font-size: 13px;
           font-weight: 600;
-          color: #f3f4f6;
+          color: #f8fafc;
           letter-spacing: -0.01em;
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
           transition: color 0.2s ease;
         }
-        .vcc-island-label.connected    { color: #30d158; }
-        .vcc-island-label.user         { color: #ff9f0a; }
-        .vcc-island-label.ai           { color: #30d158; }
-        .vcc-island-label.active       { color: #ffd60a; }
+        .vcc-island-label.connected    { color: #22c55e; }
+        .vcc-island-label.user         { color: #f97316; }
+        .vcc-island-label.ai           { color: #22c55e; }
+        .vcc-island-label.active       { color: #eab308; }
         .vcc-island-label.muted        { color: #ef4444; }
-        .vcc-island-label.connecting   { color: #ffd60a; }
-        .vcc-island-label.disconnected { color: #9ca3af; }
+        .vcc-island-label.connecting   { color: #eab308; }
+        .vcc-island-label.disconnected { color: #94a3b8; }
         .vcc-island-label.error        { color: #ef4444; }
 
         .vcc-island-wave {
@@ -1771,7 +1840,7 @@ export default function VoiceTestPage() {
           height: 26px;
         }
 
-        /* ── Minimal Secondary Controls & Telemetry Below Island ── */
+        /* ── Telemetry & Secondary Controls ── */
         .vcc-island-controls {
           margin-top: 18px;
           display: flex;
@@ -1783,7 +1852,7 @@ export default function VoiceTestPage() {
 
         .vcc-island-hint {
           font-size: 11px;
-          color: #71717a;
+          color: #64748b;
           font-weight: 500;
           text-align: center;
         }
@@ -1793,10 +1862,10 @@ export default function VoiceTestPage() {
           display: flex;
           flex-direction: column;
           gap: 6px;
-          padding: 8px 12px;
+          padding: 10px 14px;
           background: #ffffff;
-          border: 1px solid #e4e4e7;
-          border-radius: 8px;
+          border: 1px solid #e2e8f0;
+          border-radius: 14px;
           box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
           box-sizing: border-box;
         }
@@ -1807,14 +1876,14 @@ export default function VoiceTestPage() {
           justify-content: space-between;
           gap: 8px;
           font-size: 10px;
-          color: #71717a;
+          color: #64748b;
         }
         .vcc-submeter-label {
           font-weight: 600;
           letter-spacing: 0.04em;
           text-transform: uppercase;
           font-size: 8.5px;
-          color: #a1a1aa;
+          color: #94a3b8;
           min-width: 90px;
         }
 
@@ -1826,23 +1895,23 @@ export default function VoiceTestPage() {
         .vcc-submeter-seg {
           width: 9px;
           height: 4px;
-          border-radius: 1px;
-          background: #e4e4e7;
+          border-radius: 2px;
+          background: #e2e8f0;
           opacity: 0.35;
           transition: background-color 0.08s ease, opacity 0.08s ease;
         }
 
         .vcc-submeter-track {
           flex: 1;
-          height: 2.5px;
-          background: #f4f4f5;
+          height: 3px;
+          background: #f1f5f9;
           border-radius: 999px;
           overflow: hidden;
         }
         .vcc-submeter-fill {
           height: 100%;
           border-radius: 999px;
-          background: #ff9f0a;
+          background: #f97316;
         }
         .vcc-submeter-num {
           font-size: 9.5px;
@@ -1850,14 +1919,14 @@ export default function VoiceTestPage() {
           font-variant-numeric: tabular-nums;
           width: 24px;
           text-align: right;
-          color: #71717a;
+          color: #64748b;
         }
 
         /* ── System status row ── */
         .vcc-sys-status {
           flex-shrink: 0;
-          border-top: 1px solid #e8e8e8;
-          background: #fafaf9;
+          border-top: 1px solid #e2e8f0;
+          background: #ffffff;
           padding: 10px 20px;
           display: flex;
           align-items: center;
@@ -1869,14 +1938,14 @@ export default function VoiceTestPage() {
           align-items: center;
           gap: 4px;
           font-size: 11px;
-          color: #6b6b6b;
+          color: #64748b;
         }
-        .vcc-sys-label { font-weight: 600; color: #4a4a4a; }
+        .vcc-sys-label { font-weight: 600; color: #334155; }
 
-        /* ── Right panel ── */
+        /* ── Right panel (Material 3 Incident Command Deck) ── */
         .vcc-right {
-          background: #ffffff;
-          border-left: 1px solid #e5e5e5;
+          background: #f8fafc;
+          border-left: 1px solid #e2e8f0;
           min-height: 0;
         }
         .vcc-right-inner {
@@ -1889,40 +1958,222 @@ export default function VoiceTestPage() {
           overflow-y: auto;
           overflow-x: hidden;
         }
-        .vcc-right-inner::-webkit-scrollbar { width: 8px; }
-        .vcc-right-inner::-webkit-scrollbar-thumb { background: #c4c4c4; border-radius: 4px; }
-        .vcc-right-inner::-webkit-scrollbar-thumb:hover { background: #6b6b6b; }
+        .vcc-right-inner::-webkit-scrollbar { width: 6px; }
+        .vcc-right-inner::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.35); border-radius: 9999px; }
+        .vcc-right-inner::-webkit-scrollbar-thumb:hover { background: rgba(100, 116, 139, 0.6); }
         .vcc-right-inner::-webkit-scrollbar-track { background: transparent; }
 
-        /* ── Incident Timeline: internal scroll, not the whole right column ── */
+        /* ── Incident Timeline scroll ── */
         .vcc-tl-scroll {
           max-height: 280px;
           overflow-y: auto;
           overflow-x: hidden;
           padding-right: 4px;
         }
-        .vcc-tl-scroll::-webkit-scrollbar { width: 8px; }
-        .vcc-tl-scroll::-webkit-scrollbar-thumb { background: #c4c4c4; border-radius: 4px; }
-        .vcc-tl-scroll::-webkit-scrollbar-thumb:hover { background: #6b6b6b; }
+        .vcc-tl-scroll::-webkit-scrollbar { width: 6px; }
+        .vcc-tl-scroll::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.35); border-radius: 9999px; }
+        .vcc-tl-scroll::-webkit-scrollbar-thumb:hover { background: rgba(100, 116, 139, 0.6); }
         .vcc-tl-scroll::-webkit-scrollbar-track { background: transparent; }
         .vcc-right-title {
           font-size: 10px;
           font-weight: 700;
           letter-spacing: 0.08em;
           text-transform: uppercase;
-          color: #1a1a1a;
+          color: #475569;
           padding-bottom: 4px;
-          border-bottom: 1px solid #f0f0f0;
+          border-bottom: 1px solid #e2e8f0;
           flex-shrink: 0;
         }
 
-        /* ── Incident status card ── */
+        /* ── Compact Horizontal Control Deck (Material 3 Card) ── */
+        .vcc-control-deck {
+          background: #ffffff;
+          border: 1px solid #e2e8f0;
+          border-radius: 16px;
+          padding: 12px 14px;
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          flex-shrink: 0;
+        }
+        .vcc-deck-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding-bottom: 8px;
+          border-bottom: 1px solid #f1f5f9;
+        }
+        .vcc-deck-title {
+          font-size: 10.5px;
+          font-weight: 700;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          color: #1e293b;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+        .vcc-deck-badges {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+        .vcc-deck-toggle-btn {
+          background: #f1f5f9;
+          border: 1px solid #e2e8f0;
+          border-radius: 9999px;
+          padding: 2px 8px;
+          font-size: 9.5px;
+          font-weight: 600;
+          color: #475569;
+          cursor: pointer;
+          transition: all 0.15s ease;
+          text-transform: none;
+          letter-spacing: normal;
+          margin-left: 2px;
+        }
+        .vcc-deck-toggle-btn:hover {
+          background: #e2e8f0;
+          color: #0f172a;
+        }
+        .vcc-deck-content {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+        .vcc-deck-columns {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 12px;
+        }
+        @media (max-width: 900px) {
+          .vcc-deck-columns {
+            grid-template-columns: 1fr;
+            gap: 8px;
+          }
+        }
+        .vcc-deck-col {
+          display: flex;
+          flex-direction: column;
+          gap: 5px;
+          min-width: 0;
+        }
+        .vcc-deck-label {
+          font-size: 9.5px;
+          font-weight: 700;
+          letter-spacing: 0.05em;
+          text-transform: uppercase;
+          color: #64748b;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+        }
+        .vcc-deck-status-txt {
+          font-size: 9.5px;
+          font-weight: 600;
+          color: #475569;
+        }
+        .vcc-badge-live {
+          font-size: 8.5px;
+          font-weight: 700;
+          color: #15803d;
+          background: #dcfce7;
+          padding: 1.5px 5px;
+          border-radius: 9999px;
+        }
+        .vcc-deck-inline-row {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          width: 100%;
+        }
+        .vcc-input-compact {
+          padding: 5px 8px;
+          font-size: 11.5px;
+          height: 30px;
+          box-sizing: border-box;
+          border-radius: 8px;
+        }
+        .vcc-select-compact {
+          padding: 4px 7px;
+          font-size: 11px;
+          height: 30px;
+          background: #ffffff;
+          border-color: #cbd5e1;
+          box-sizing: border-box;
+          border-radius: 8px;
+        }
+        .vcc-btn-compact {
+          padding: 4px 10px;
+          font-size: 11px;
+          font-weight: 600;
+          height: 30px;
+          white-space: nowrap;
+          box-sizing: border-box;
+          border-radius: 8px;
+        }
+        .vcc-deck-footer {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+          padding-top: 8px;
+          border-top: 1px solid #f1f5f9;
+          flex-wrap: wrap;
+        }
+        .vcc-deck-footer-actions {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+        .vcc-deck-tool-tag {
+          font-size: 9.5px;
+          font-weight: 600;
+          color: #0284c7;
+          background: #e0f2fe;
+          border: 1px solid #bae6fd;
+          padding: 2.5px 8px;
+          border-radius: 9999px;
+          white-space: nowrap;
+        }
+        .vcc-btn-mini {
+          padding: 3px 9px;
+          font-size: 10px;
+          font-weight: 600;
+          height: 26px;
+          background: #f1f5f9;
+          border: 1px solid #e2e8f0;
+          border-radius: 9999px;
+          color: #334155;
+          white-space: nowrap;
+          cursor: pointer;
+          transition: all 0.15s ease;
+        }
+        .vcc-btn-mini:hover {
+          background: #e2e8f0;
+          color: #0f172a;
+        }
+        .vcc-deck-pill {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          font-size: 9px;
+          font-weight: 600;
+          padding: 2px 7px;
+          border-radius: 9999px;
+          background: #f8fafc;
+          border: 1px solid #e2e8f0;
+          color: #475569;
+        }
+
+        /* ── Incident status card (Material 3 Card) ── */
         .vcc-incident-card {
-          background: #fff;
-          border: 1px solid #e8e8e8;
-          border-radius: 10px;
-          padding: 14px;
-          box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+          background: #ffffff;
+          border: 1px solid #e2e8f0;
+          border-radius: 16px;
+          padding: 16px;
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
         }
         .vcc-incident-row {
           display: flex;
@@ -1931,19 +2182,19 @@ export default function VoiceTestPage() {
           gap: 12px;
         }
         .vcc-incident-icon {
-          width: 40px; height: 40px;
-          border-radius: 8px;
+          width: 42px; height: 42px;
+          border-radius: 12px;
           display: flex;
           align-items: center;
           justify-content: center;
           flex-shrink: 0;
-          background: ${activeIncident ? '#fee2e2' : '#f4f4f5'};
-          color: ${activeIncident ? '#dc2626' : '#a0a0a0'};
+          background: ${activeIncident ? '#fee2e2' : '#f1f5f9'};
+          color: ${activeIncident ? '#dc2626' : '#94a3b8'};
         }
         .vcc-incident-title {
-          font-size: 14px;
+          font-size: 14.5px;
           font-weight: 700;
-          color: ${activeIncident ? '#1a1a1a' : '#b0b0b0'};
+          color: ${activeIncident ? '#0f172a' : '#94a3b8'};
           margin-bottom: 3px;
           line-height: 1.3;
         }
@@ -1951,18 +2202,18 @@ export default function VoiceTestPage() {
           font-size: 9.5px;
           font-weight: 600;
           letter-spacing: 0.03em;
-          color: #9b7ba8;
-          background: #f6f2f8;
-          border: 1px solid #e8dced;
-          border-radius: 4px;
-          padding: 1px 5px;
+          color: #7c3aed;
+          background: #f5f3ff;
+          border: 1px solid #ddd6fe;
+          border-radius: 9999px;
+          padding: 1.5px 7px;
           display: inline-block;
           margin-bottom: 4px;
           cursor: help;
         }
         .vcc-incident-loc {
           font-size: 11.5px;
-          color: #6b6b6b;
+          color: #64748b;
           display: flex;
           align-items: center;
           gap: 3px;
@@ -1970,7 +2221,7 @@ export default function VoiceTestPage() {
         }
         .vcc-incident-id {
           font-size: 10px;
-          color: #b0b0b0;
+          color: #94a3b8;
           font-family: monospace;
         }
         .vcc-incident-chips {
@@ -1980,51 +2231,51 @@ export default function VoiceTestPage() {
           flex-wrap: wrap;
         }
         .vcc-chip-group { display: flex; flex-direction: column; gap: 3px; }
-        .vcc-chip-meta  { font-size: 9px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: #b0b0b0; }
+        .vcc-chip-meta  { font-size: 9px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #94a3b8; }
         .vcc-chip {
           display: inline-block;
           padding: 3px 9px;
-          border-radius: 5px;
+          border-radius: 9999px;
           font-size: 10.5px;
           font-weight: 700;
-          letter-spacing: 0.04em;
+          letter-spacing: 0.03em;
         }
         .vcc-inferred-note {
           font-size: 9.5px;
-          color: #a0a0a0;
+          color: #94a3b8;
           font-style: italic;
           margin-top: 8px;
           padding-top: 8px;
-          border-top: 1px solid #f5f5f5;
+          border-top: 1px solid #f1f5f9;
         }
 
-        /* ── Metrics grid ── */
+        /* ── Metrics grid (Material 3 Tonal Containers) ── */
         .vcc-metric-grid {
           display: grid;
           grid-template-columns: 1fr 1fr;
-          gap: 8px;
+          gap: 10px;
         }
         .vcc-metric-item {
-          background: #fafafa;
-          border: 1px solid #ebebeb;
-          border-radius: 8px;
-          padding: 11px 13px;
+          background: #f8fafc;
+          border: 1px solid #e2e8f0;
+          border-radius: 12px;
+          padding: 12px 14px;
           transition: background-color 0.2s ease, border-color 0.2s ease;
         }
-        .vcc-metric-label { font-size: 10px; color: #9b9b9b; font-weight: 500; margin-bottom: 5px; }
-        .vcc-metric-value { font-size: 20px; font-weight: 700; color: #1a1a1a; line-height: 1.1; transition: color 0.2s ease; }
-        .vcc-metric-value.placeholder { color: #d0d0d0; }
-        .vcc-metric-sub   { font-size: 10px; color: #9b9b9b; margin-top: 3px; }
+        .vcc-metric-label { font-size: 10px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 5px; }
+        .vcc-metric-value { font-size: 20px; font-weight: 700; color: #0f172a; line-height: 1.1; transition: color 0.2s ease; }
+        .vcc-metric-value.placeholder { color: #cbd5e1; }
+        .vcc-metric-sub   { font-size: 10px; color: #64748b; margin-top: 3px; }
         .vcc-metric-sub.warn { color: #d97706; font-weight: 600; }
         .vcc-metric-sub.alert { color: #dc2626; font-weight: 600; }
 
-        /* ── Section card ── */
+        /* ── Section card (Material 3 Card) ── */
         .vcc-section-card {
-          background: #fff;
-          border: 1px solid #e8e8e8;
-          border-radius: 10px;
-          padding: 12px 14px;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+          background: #ffffff;
+          border: 1px solid #e2e8f0;
+          border-radius: 16px;
+          padding: 14px 16px;
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
         }
 
         /* ── Hypotheses ── */
@@ -2036,21 +2287,21 @@ export default function VoiceTestPage() {
           align-items: center;
           margin-bottom: 4px;
         }
-        .vcc-hypo-name { font-size: 11.5px; color: #2a2a2a; }
-        .vcc-hypo-pct  { font-size: 11px; font-weight: 600; color: #6b6b6b; }
-        .vcc-bar-track { height: 5px; background: #f0f0f0; border-radius: 3px; overflow: hidden; }
-        .vcc-bar-fill  { height: 100%; background: #6366f1; border-radius: 3px; transition: width 0.6s ease; }
+        .vcc-hypo-name { font-size: 11.5px; color: #1e293b; font-weight: 500; }
+        .vcc-hypo-pct  { font-size: 11px; font-weight: 600; color: #64748b; }
+        .vcc-bar-track { height: 6px; background: #f1f5f9; border-radius: 999px; overflow: hidden; }
+        .vcc-bar-fill  { height: 100%; background: #0284c7; border-radius: 999px; transition: width 0.6s ease; }
 
         /* ── Timeline ── */
         .vcc-tl { display: flex; flex-direction: column; }
         .vcc-tl-row { display: flex; gap: 0; align-items: stretch; }
-        .vcc-tl-time { font-size: 9.5px; color: #b0b0b0; font-weight: 500; white-space: nowrap; width: 44px; flex-shrink: 0; padding-top: 2px; font-variant-numeric: tabular-nums; }
+        .vcc-tl-time { font-size: 9.5px; color: #94a3b8; font-weight: 600; white-space: nowrap; width: 44px; flex-shrink: 0; padding-top: 2px; font-variant-numeric: tabular-nums; }
         .vcc-tl-mid  { display: flex; flex-direction: column; align-items: center; width: 16px; flex-shrink: 0; }
         .vcc-tl-dot  { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 3px; }
-        .vcc-tl-line { width: 1.5px; background: #ebebeb; flex: 1; min-height: 12px; margin-top: 3px; }
+        .vcc-tl-line { width: 1.5px; background: #e2e8f0; flex: 1; min-height: 12px; margin-top: 3px; }
         .vcc-tl-body { flex: 1; padding-bottom: 10px; padding-left: 6px; }
-        .vcc-tl-title { font-size: 11.5px; font-weight: 600; color: #1a1a1a; line-height: 1.3; }
-        .vcc-tl-desc  { font-size: 10px; color: #9b9b9b; margin-top: 1px; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+        .vcc-tl-title { font-size: 11.5px; font-weight: 600; color: #0f172a; line-height: 1.3; }
+        .vcc-tl-desc  { font-size: 10px; color: #64748b; margin-top: 1px; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
 
         /* ── Actions ── */
         .vcc-action-item {
@@ -2058,17 +2309,17 @@ export default function VoiceTestPage() {
           flex-direction: column;
           gap: 7px;
           padding: 10px 0;
-          border-bottom: 1px solid #f5f5f5;
+          border-bottom: 1px solid #f1f5f9;
         }
         .vcc-action-item:last-child { border-bottom: none; padding-bottom: 0; }
         .vcc-action-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
-        .vcc-action-icon { width: 30px; height: 30px; border-radius: 7px; display: flex; align-items: center; justify-content: center; font-size: 13px; flex-shrink: 0; }
-        .vcc-action-label { font-size: 12px; font-weight: 500; color: #1a1a1a; line-height: 1.4; flex: 1; }
+        .vcc-action-icon { width: 32px; height: 32px; border-radius: 9px; display: flex; align-items: center; justify-content: center; font-size: 13px; flex-shrink: 0; }
+        .vcc-action-label { font-size: 12px; font-weight: 500; color: #0f172a; line-height: 1.4; flex: 1; }
         .vcc-action-status-badge {
           font-size: 9.5px;
           font-weight: 700;
-          padding: 2px 7px;
-          border-radius: 4px;
+          padding: 2px 8px;
+          border-radius: 9999px;
           white-space: nowrap;
           flex-shrink: 0;
         }
@@ -2083,23 +2334,20 @@ export default function VoiceTestPage() {
           font-style: italic;
         }
 
-        /* ── Merged commander panels (conflicts / items / risks / report) ──
-           Deliberately re-implemented in this page's own light vocabulary
-           rather than importing the root dashboard's components, which are
-           Tailwind zinc-dark and would read as broken on this surface. */
+        /* ── Commander panels ── */
         .vcc-count-pill {
-          font-size: 9px;
-          font-weight: 700;
+          font-size: 9.5px;
+          font-weight: 600;
           letter-spacing: 0.02em;
-          padding: 2px 6px;
+          padding: 2px 7px;
           border-radius: 999px;
-          background: #f4f4f5;
-          color: #8a8a8a;
+          background: #f1f5f9;
+          color: #475569;
           margin-left: 6px;
           text-transform: none;
         }
         .vcc-count-warn { background: #fef3c7; color: #b45309; }
-        .vcc-count-lock { background: #eef2ff; color: #4f46e5; }
+        .vcc-count-lock { background: #e0f2fe; color: #0369a1; }
 
         /* Contradictions */
         .vcc-conflict {
@@ -2107,13 +2355,13 @@ export default function VoiceTestPage() {
           flex-direction: column;
           gap: 6px;
           padding: 10px 0;
-          border-bottom: 1px solid #f5f5f5;
+          border-bottom: 1px solid #f1f5f9;
         }
         .vcc-conflict:last-child { border-bottom: none; padding-bottom: 0; }
         .vcc-conflict-entity {
           font-size: 11.5px;
           font-weight: 600;
-          color: #1a1a1a;
+          color: #0f172a;
           display: flex;
           align-items: center;
           gap: 6px;
@@ -2122,39 +2370,39 @@ export default function VoiceTestPage() {
         .vcc-conflict-state {
           font-size: 8.5px;
           font-weight: 700;
-          padding: 2px 6px;
-          border-radius: 4px;
+          padding: 2px 7px;
+          border-radius: 9999px;
           white-space: nowrap;
         }
         .vcc-conflict-state.warn { background: #fef3c7; color: #b45309; }
-        .vcc-conflict-state.ok   { background: #f0fdf4; color: #15803d; }
+        .vcc-conflict-state.ok   { background: #dcfce7; color: #15803d; }
         .vcc-conflict-sides {
           display: flex;
           align-items: stretch;
           gap: 8px;
-          background: #fafafa;
-          border: 1px solid #f0f0f0;
-          border-radius: 7px;
+          background: #f8fafc;
+          border: 1px solid #e2e8f0;
+          border-radius: 10px;
           padding: 8px 10px;
         }
         .vcc-conflict-side { flex: 1; min-width: 0; }
         .vcc-conflict-src {
           font-size: 9.5px;
           font-weight: 600;
-          color: #9b9b9b;
+          color: #64748b;
           text-transform: uppercase;
           letter-spacing: 0.03em;
           margin-bottom: 2px;
         }
-        .vcc-conflict-val { font-size: 11px; color: #2a2a2a; line-height: 1.35; }
+        .vcc-conflict-val { font-size: 11px; color: #1e293b; line-height: 1.35; }
         .vcc-conflict-vs {
           font-size: 9px;
           font-weight: 700;
-          color: #c0c0c0;
+          color: #94a3b8;
           align-self: center;
           flex-shrink: 0;
         }
-        .vcc-conflict-rec { font-size: 10px; color: #6b6b6b; font-style: italic; }
+        .vcc-conflict-rec { font-size: 10px; color: #64748b; font-style: italic; }
 
         /* Action items */
         .vcc-ai-row {
@@ -2163,24 +2411,24 @@ export default function VoiceTestPage() {
           justify-content: space-between;
           gap: 10px;
           padding: 9px 0;
-          border-bottom: 1px solid #f5f5f5;
+          border-bottom: 1px solid #f1f5f9;
         }
         .vcc-ai-row:last-child { border-bottom: none; padding-bottom: 0; }
         .vcc-ai-main { flex: 1; min-width: 0; }
-        .vcc-ai-desc { font-size: 11.5px; color: #2a2a2a; line-height: 1.4; }
-        .vcc-ai-desc.done { text-decoration: line-through; color: #b0b0b0; }
-        .vcc-ai-meta { font-size: 10px; color: #9b9b9b; margin-top: 2px; display: flex; gap: 4px; flex-wrap: wrap; }
+        .vcc-ai-desc { font-size: 11.5px; color: #1e293b; line-height: 1.4; }
+        .vcc-ai-desc.done { text-decoration: line-through; color: #94a3b8; }
+        .vcc-ai-meta { font-size: 10px; color: #64748b; margin-top: 2px; display: flex; gap: 4px; flex-wrap: wrap; }
         .vcc-ai-side { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; flex-shrink: 0; }
         .vcc-ai-status {
           font-size: 9px;
           font-weight: 700;
-          padding: 2px 6px;
-          border-radius: 4px;
-          background: #f4f4f5;
-          color: #8a8a8a;
+          padding: 2px 7px;
+          border-radius: 9999px;
+          background: #f1f5f9;
+          color: #64748b;
         }
-        .vcc-ai-status.ok  { background: #f0fdf4; color: #15803d; }
-        .vcc-ai-status.bad { background: #fef2f2; color: #dc2626; }
+        .vcc-ai-status.ok  { background: #dcfce7; color: #15803d; }
+        .vcc-ai-status.bad { background: #fee2e2; color: #dc2626; }
 
         /* Risks */
         .vcc-risk {
@@ -2188,7 +2436,7 @@ export default function VoiceTestPage() {
           align-items: flex-start;
           gap: 8px;
           padding: 7px 0;
-          border-bottom: 1px solid #f5f5f5;
+          border-bottom: 1px solid #f1f5f9;
         }
         .vcc-risk:last-child { border-bottom: none; padding-bottom: 0; }
         .vcc-risk-dot {
@@ -2198,21 +2446,21 @@ export default function VoiceTestPage() {
           flex-shrink: 0;
           margin-top: 5px;
         }
-        .vcc-risk-text { flex: 1; font-size: 11.5px; color: #2a2a2a; line-height: 1.4; }
+        .vcc-risk-text { flex: 1; font-size: 11.5px; color: #1e293b; line-height: 1.4; }
         .vcc-risk-sev {
           font-size: 8.5px;
           font-weight: 700;
-          padding: 2px 6px;
-          border-radius: 4px;
-          background: #fef2f2;
+          padding: 2px 7px;
+          border-radius: 9999px;
+          background: #fee2e2;
           color: #dc2626;
           flex-shrink: 0;
         }
 
         /* Commander key + errors */
         .vcc-cmd-key { margin-bottom: 8px; }
-        .vcc-key-hint { font-size: 9.5px; color: #b0b0b0; margin: 4px 0 0; line-height: 1.4; }
-        .vcc-key-hint code { font-size: 9px; background: #f4f4f5; padding: 1px 4px; border-radius: 3px; color: #6b6b6b; }
+        .vcc-key-hint { font-size: 9.5px; color: #64748b; margin: 4px 0 0; line-height: 1.4; }
+        .vcc-key-hint code { font-size: 9px; background: #f1f5f9; padding: 1px 5px; border-radius: 4px; color: #334155; }
         .vcc-cmd-error {
           font-size: 10.5px;
           color: #b91c1c;
@@ -2404,65 +2652,6 @@ export default function VoiceTestPage() {
 
             {/* Controls area */}
             <div className="vcc-left-controls">
-              {/* Gemini Agent (only when connected) */}
-              {isConnected && (
-                <div className="vcc-card-sm">
-                  <div className="vcc-section-label">Conversational Agent</div>
-                  <div className="vcc-btn-row" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
-                    <select
-                      className="vcc-select"
-                      value={voicePipeline}
-                      onChange={e => setVoicePipeline(e.target.value as 'gemini_live' | 'composed_tools')}
-                      disabled={agentStatus === 'RUNNING' || agentStatus === 'STARTING'}
-                      aria-label="Select conversational pipeline"
-                      title="gemini_live: lowest latency, no MCP tools. composed_tools: Agora-managed Deepgram/OpenAI/MiniMax by default (no model key needed), supports MCP tools."
-                    >
-                      <option value="gemini_live">Gemini Live (low-latency)</option>
-                      <option value="composed_tools">Managed Pipeline (tools-capable)</option>
-                    </select>
-                    {voicePipeline === 'composed_tools' && (
-                      <select
-                        className="vcc-select"
-                        value={llmVendor}
-                        onChange={e => setLlmVendor(e.target.value as 'openai' | 'gemini')}
-                        disabled={agentStatus === 'RUNNING' || agentStatus === 'STARTING'}
-                        aria-label="Select LLM vendor for managed pipeline"
-                        title="openai: Agora-managed credential, no key of ours needed. gemini: our own GEMINI_API_KEY, subject to its quota."
-                      >
-                        <option value="openai">LLM: Agora-managed OpenAI</option>
-                        <option value="gemini">LLM: BYOK Gemini</option>
-                      </select>
-                    )}
-                    <select
-                      className="vcc-select"
-                      value={selectedVoice}
-                      onChange={e => setSelectedVoice(e.target.value)}
-                      disabled={agentStatus === 'RUNNING' || agentStatus === 'STARTING' || voicePipeline === 'composed_tools'}
-                      aria-label="Select agent voice"
-                      title={voicePipeline === 'composed_tools' ? 'Ignored on the managed pipeline — MiniMax TTS uses its own voice, not this Gemini Live voice enum.' : undefined}
-                    >
-                      <option value="Puck">Puck — Energetic</option>
-                      <option value="Charon">Charon — Authoritative</option>
-                      <option value="Aoede">Aoede — Calm</option>
-                      <option value="Fenrir">Fenrir — Direct</option>
-                      <option value="Kore">Kore — Clear</option>
-                    </select>
-                    {agentStatus === 'RUNNING' || remoteAgentPresent
-                      ? <button className="vcc-btn vcc-btn-danger" onClick={handleStopAgent} disabled={agentStatus === 'STOPPING'}>
-                          {agentStatus === 'STOPPING' ? 'Stopping...' : '■ Stop Agent'}
-                        </button>
-                      : <button
-                          className={`vcc-btn ${agentStatus === 'STARTING' ? '' : 'vcc-btn-green'}`}
-                          onClick={handleStartAgent}
-                          disabled={agentStatus === 'STARTING'}
-                        >
-                          {agentStatus === 'STARTING' ? 'Launching...' : '▶ Start Agent'}
-                        </button>
-                    }
-                  </div>
-                </div>
-              )}
-
               {/* Command / text input */}
               <div className="vcc-cmd-row">
                 <input
@@ -2591,44 +2780,7 @@ export default function VoiceTestPage() {
                 )}
               </div>
 
-              {/* Voice channel — moved here from the left column so it lives with the
-                  rest of the call controls, not next to the text-command chat input. */}
-              <div className="vcc-card-sm vcc-channel-card">
-                <div className="vcc-section-label">Voice Channel</div>
-                <input
-                  id="channel-input"
-                  type="text"
-                  className="vcc-input"
-                  value={channelName}
-                  onChange={e => setChannelName(e.target.value)}
-                  disabled={connectionState !== 'DISCONNECTED' && connectionState !== 'ERROR'}
-                  placeholder="channel-name"
-                  aria-label="Voice channel name"
-                />
-                <div className="vcc-btn-row">
-                  {isConnected
-                    ? <button className="vcc-btn vcc-btn-danger" onClick={handleLeave}>Leave Channel</button>
-                    : <button
-                        className={`vcc-btn ${isConnecting ? '' : 'vcc-btn-primary'}`}
-                        onClick={handleJoin}
-                        disabled={isConnecting}
-                        aria-label="Join voice channel"
-                      >
-                        {connectionState === 'FETCHING_TOKEN' ? 'Authorizing...' :
-                         connectionState === 'JOINING' ? 'Connecting...' : 'Join Channel'}
-                      </button>
-                  }
-                  {isConnected && (
-                    <button
-                      className={`vcc-btn ${isMuted ? 'vcc-btn-danger' : 'vcc-btn-green'}`}
-                      onClick={handleToggleMute}
-                      aria-label={isMuted ? 'Unmute microphone' : 'Mute microphone'}
-                    >
-                      {isMuted ? '🔇 Unmute' : '🎤 Mute'}
-                    </button>
-                  )}
-                </div>
-              </div>
+
 
               {/* ── Live Incident Map ──
                   The centre column is where the conversation happens, so this is
@@ -2654,7 +2806,186 @@ export default function VoiceTestPage() {
           <aside className="vcc-panel vcc-right">
             <div className="vcc-panel-scroll">
               <div className="vcc-right-inner">
-                <div className="vcc-right-title">Incident Command</div>
+                <div className="vcc-right-title">Incident Command &amp; Controls</div>
+
+                {/* ── Integrated Startup & Agent Control Deck ── */}
+                <div className="vcc-control-deck">
+                  <div className="vcc-deck-header">
+                    <div className="vcc-deck-title">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="4" y1="21" x2="4" y2="14"/>
+                        <line x1="4" y1="10" x2="4" y2="3"/>
+                        <line x1="12" y1="21" x2="12" y2="12"/>
+                        <line x1="12" y1="8" x2="12" y2="3"/>
+                        <line x1="20" y1="21" x2="20" y2="16"/>
+                        <line x1="20" y1="12" x2="20" y2="3"/>
+                        <line x1="1" y1="14" x2="7" y2="14"/>
+                        <line x1="9" y1="8" x2="15" y2="8"/>
+                        <line x1="17" y1="16" x2="23" y2="16"/>
+                      </svg>
+                      Room &amp; Agent Controls
+                      <button
+                        className="vcc-deck-toggle-btn"
+                        onClick={() => setIsControlsCollapsed(!isControlsCollapsed)}
+                        aria-label={isControlsCollapsed ? 'Expand controls' : 'Collapse controls'}
+                      >
+                        {isControlsCollapsed ? '+ Expand' : '− Collapse'}
+                      </button>
+                    </div>
+                    <div className="vcc-deck-badges">
+                      <span className="vcc-deck-pill">
+                        <Dot color={connDotColor} />
+                        {connectionState === 'CONNECTED' ? 'Voice Active' : connectionState === 'ERROR' ? 'Voice Error' : 'Voice Offline'}
+                      </span>
+                      <span className="vcc-deck-pill">
+                        <Dot color={agentDotColor} />
+                        {agentStatus === 'RUNNING' || remoteAgentPresent ? 'Agent Live' : agentStatus === 'STARTING' ? 'Starting' : 'Agent Idle'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {!isControlsCollapsed && (
+                    <div className="vcc-deck-content">
+                      {/* 2-Column Horizontal Split */}
+                      <div className="vcc-deck-columns">
+                        {/* Column 1: Voice Channel */}
+                        <div className="vcc-deck-col">
+                          <div className="vcc-deck-label">
+                            <span>Voice Channel</span>
+                            {isConnected && <span className="vcc-badge-live">CONNECTED</span>}
+                          </div>
+                          <div className="vcc-deck-inline-row">
+                            <input
+                              id="channel-input"
+                              type="text"
+                              className="vcc-input vcc-input-compact"
+                              value={channelName}
+                              onChange={e => setChannelName(e.target.value)}
+                              disabled={connectionState !== 'DISCONNECTED' && connectionState !== 'ERROR'}
+                              placeholder="channel-name"
+                              aria-label="Voice channel name"
+                              style={{ flex: 1 }}
+                            />
+                            {!isConnected ? (
+                              <button
+                                className={`vcc-btn vcc-btn-compact ${isConnecting ? '' : 'vcc-btn-primary'}`}
+                                onClick={handleJoin}
+                                disabled={isConnecting}
+                                aria-label="Join voice channel"
+                              >
+                                {connectionState === 'FETCHING_TOKEN' ? 'Auth…' : connectionState === 'JOINING' ? 'Connecting…' : 'Join'}
+                              </button>
+                            ) : (
+                              <button
+                                className="vcc-btn vcc-btn-compact vcc-btn-danger"
+                                onClick={handleLeave}
+                                aria-label="Leave voice channel"
+                                style={{ padding: '4px 10px' }}
+                              >
+                                Leave
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Column 2: Conversational Agent */}
+                        <div className="vcc-deck-col">
+                          <div className="vcc-deck-label">
+                            <span>Conversational Agent</span>
+                            <span className="vcc-deck-status-txt">
+                              {agentStatus === 'RUNNING' || remoteAgentPresent ? '● Active' : agentStatus === 'STARTING' ? '◌ Starting' : '○ Stopped'}
+                            </span>
+                          </div>
+                          <div className="vcc-deck-inline-row">
+                            <select
+                              className="vcc-select vcc-select-compact"
+                              value={voicePipeline}
+                              onChange={e => setVoicePipeline(e.target.value as 'gemini_live' | 'composed_tools')}
+                              disabled={agentStatus === 'RUNNING' || agentStatus === 'STARTING'}
+                              aria-label="Select conversational pipeline"
+                              title="gemini_live: lowest latency. composed_tools: supports MCP tools."
+                              style={{ flex: 1.2 }}
+                            >
+                              <option value="gemini_live">Gemini Live</option>
+                              <option value="composed_tools">Managed Tools</option>
+                            </select>
+                            {voicePipeline === 'composed_tools' && (
+                              <select
+                                className="vcc-select vcc-select-compact"
+                                value={llmVendor}
+                                onChange={e => setLlmVendor(e.target.value as 'openai' | 'gemini')}
+                                disabled={agentStatus === 'RUNNING' || agentStatus === 'STARTING'}
+                                aria-label="Select LLM vendor"
+                                style={{ flex: 0.9 }}
+                              >
+                                <option value="openai">OpenAI</option>
+                                <option value="gemini">Gemini</option>
+                              </select>
+                            )}
+                            <select
+                              className="vcc-select vcc-select-compact"
+                              value={selectedVoice}
+                              onChange={e => setSelectedVoice(e.target.value)}
+                              disabled={agentStatus === 'RUNNING' || agentStatus === 'STARTING' || voicePipeline === 'composed_tools'}
+                              aria-label="Select agent voice"
+                              style={{ flex: 0.9 }}
+                            >
+                              <option value="Puck">Puck</option>
+                              <option value="Charon">Charon</option>
+                              <option value="Aoede">Aoede</option>
+                              <option value="Fenrir">Fenrir</option>
+                              <option value="Kore">Kore</option>
+                            </select>
+                            {agentStatus === 'RUNNING' || remoteAgentPresent ? (
+                              <button
+                                className="vcc-btn vcc-btn-compact vcc-btn-danger"
+                                onClick={handleStopAgent}
+                                disabled={agentStatus === 'STOPPING'}
+                              >
+                                {agentStatus === 'STOPPING' ? 'Stopping…' : '■ Stop'}
+                              </button>
+                            ) : (
+                              <button
+                                className={`vcc-btn vcc-btn-compact ${agentStatus === 'STARTING' ? '' : 'vcc-btn-green'}`}
+                                onClick={handleStartAgent}
+                                disabled={!isConnected || agentStatus === 'STARTING'}
+                                title={!isConnected ? 'Connect voice channel first' : undefined}
+                              >
+                                {agentStatus === 'STARTING' ? 'Starting…' : '▶ Start'}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Bottom Utility Bar */}
+                      <div className="vcc-deck-footer">
+                        <span className="vcc-deck-tool-tag" title="FastMCP Streamable HTTP server on port 8001">
+                          ⚡ 13 Tools
+                        </span>
+                        <div className="vcc-deck-footer-actions">
+                          <button
+                            className="vcc-btn vcc-btn-mini"
+                            disabled={isDemoRunning}
+                            onClick={handleRunDemo}
+                            title="Load deterministic customer login outage demo scenario into PostgreSQL"
+                          >
+                            {isDemoRunning ? 'Loading…' : demoFeedback || '⚡ Load Demo'}
+                          </button>
+                          {transcript.length > 0 && (
+                            <button
+                              onClick={handleClearTranscript}
+                              className="vcc-btn vcc-btn-mini"
+                              title="Clear transcript conversation history"
+                            >
+                              Clear Log
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
 
                 {/* ── Incident Status (real data — item 1, step 4) ── */}
                 <div className="vcc-incident-card">
