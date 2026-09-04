@@ -786,7 +786,29 @@ export default function VoiceTestPage() {
               ingestObservationRef.current(speakerLabel, decoded.text);
             }
           },
-          onAgentState: (state) => addLog(`🤖 Agent state: ${state}`),
+          // Primary mic-echo guard signal. AGENT_STATE_CHANGED is pushed over RTM
+          // the instant the agent's pipeline state changes -- unlike RTC's
+          // volume-indicator below, which is HARD-CODED by the SDK to fire only
+          // every 2000ms (confirmed in agora-rtc-sdk-ng's own .d.ts: "reports the
+          // volumes every two seconds, regardless of whether there are active
+          // speakers"). That fixed 2s granularity is why a short agent reply --
+          // e.g. its own greeting, "Tocsin emergency coordinator active, how can
+          // I assist" -- was live-observed on 2026-09-04 leaking through
+          // Chrome's SpeechRecognition and landing in the evidence record
+          // mislabeled as the human Operator: the utterance finished and was
+          // finalized by SpeechRecognition before the first volume-indicator
+          // tick ever arrived, so aiSpeakingRef.current was still false when the
+          // guard below checked it. RTM state pushes are not on a fixed poll, so
+          // they arrive fast enough to gate even short utterances. The
+          // volume-indicator path stays as a secondary signal for the amplitude
+          // meter and as a fallback if RTM state delivery is ever interrupted.
+          onAgentState: (state) => {
+            addLog(`🤖 Agent state: ${state}`);
+            const speaking = state === 'speaking';
+            aiSpeakingRef.current = speaking;
+            setAiSpeaking(speaking);
+            if (!speaking) aiSpeechEndedAtRef.current = Date.now();
+          },
           onLog: addLog,
         });
       } catch (rtmErr: any) {
