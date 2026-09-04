@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { IncidentState } from '@/types/incident';
+import { BrainIcon, CheckCircleIcon, HelpCircleIcon, AlertTriangleIcon } from '@/components/Icon';
 import { ConflictsPanel } from './ConflictsPanel';
 import { ActionItemsPanel } from './ActionItemsPanel';
 import { ParticipantsPanel } from './ParticipantsPanel';
@@ -41,7 +42,7 @@ export const IntelligencePanel: React.FC<IntelligencePanelProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h2 className="text-base font-bold text-zinc-100 flex items-center gap-2">
-              <span>🧠</span> Shared Incident Intelligence Record
+              <BrainIcon /> Shared Incident Intelligence Record
             </h2>
             <p className="text-xs text-zinc-400 mt-0.5">
               Canonical evidence ingested from live voice discussion. Facts, hypotheses, and assumptions are rigorously separated.
@@ -149,7 +150,7 @@ export const IntelligencePanel: React.FC<IntelligencePanelProps> = ({
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="p-3.5 rounded-xl bg-zinc-900/60 border border-zinc-800 space-y-2">
             <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
-              <span>✅</span> Confirmed Facts ({confirmedFacts.length})
+              <CheckCircleIcon /> Confirmed Facts ({confirmedFacts.length})
             </h3>
             {confirmedFacts.length > 0 ? (
               <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
@@ -189,7 +190,7 @@ export const IntelligencePanel: React.FC<IntelligencePanelProps> = ({
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="p-3.5 rounded-xl bg-zinc-900/60 border border-amber-900/40 space-y-2">
             <h3 className="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
-              <span>❓</span> Missing Information ({missingInfo.length})
+              <HelpCircleIcon /> Missing Information ({missingInfo.length})
             </h3>
             <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
               {missingInfo.map((mi) => (
@@ -205,7 +206,7 @@ export const IntelligencePanel: React.FC<IntelligencePanelProps> = ({
 
           <div className="p-3.5 rounded-xl bg-zinc-900/60 border border-rose-900/40 space-y-2">
             <h3 className="text-xs font-bold uppercase tracking-wider text-rose-400 flex items-center gap-1.5">
-              <span>⚠️</span> Unresolved Risks ({unresolvedRisks.length})
+              <AlertTriangleIcon /> Unresolved Risks ({unresolvedRisks.length})
             </h3>
             <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
               {unresolvedRisks.map((risk) => (

@@ -11,6 +11,7 @@ import { VoiceHUD } from '@/components/VoiceHUD';
 import { IntelligencePanel } from '@/components/IntelligencePanel';
 import LiveIncidentMap from '@/components/LiveIncidentMap';
 import { DemoModeControl } from '@/components/DemoModeControl';
+import { ShieldIcon, SirenIcon } from '@/components/Icon';
 
 export default function IncidentCommandDashboard() {
   const {
@@ -54,7 +55,7 @@ export default function IncidentCommandDashboard() {
       {/* Human Confirmation Security Notice Banner */}
       <div className="p-3 rounded-lg bg-amber-950/30 border border-amber-500/30 flex items-center justify-between gap-3 text-xs text-amber-200">
         <div className="flex items-center gap-2">
-          <span>🛡️</span>
+          <span><ShieldIcon /></span>
           <span>
             <b>Human Confirmation Mandate:</b> Critical recovery operations require explicit Incident Commander sign-off (via <code>TOCSIN_COMMANDER_KEY</code>). AI proposals cannot execute autonomously.
           </span>
@@ -133,8 +134,8 @@ export default function IncidentCommandDashboard() {
           color: 'var(--text-secondary)',
         }}
       >
-        <span>
-          🚨 <b>TOCSIN Crisis Coordination Engine</b> • Multi-Party Voice AI & Incident Intelligence
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <SirenIcon /> <b>TOCSIN Crisis Coordination Engine</b> • Multi-Party Voice AI & Incident Intelligence
         </span>
         <span>
           Active Incident: <code>{activeIncident?.incident_id || '---'}</code> • Status: <b>{activeIncident?.status || 'IDLE'}</b> • Severity: <b>{activeIncident?.severity || 'LOW'}</b>

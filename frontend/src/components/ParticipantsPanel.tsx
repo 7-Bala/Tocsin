@@ -2,6 +2,7 @@
 
 import React from 'react';
 import { Participant } from '@/types/incident';
+import { UsersIcon } from '@/components/Icon';
 
 interface ParticipantsPanelProps {
   participants: Participant[];
@@ -20,7 +21,7 @@ export const ParticipantsPanel: React.FC<ParticipantsPanelProps> = ({ participan
     <div className="p-4 rounded-xl border border-zinc-800 bg-zinc-900/60 space-y-3" aria-label="Incident participants">
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-          <span>👥</span> Incident Participants & Roles ({participants.length})
+          <span><UsersIcon /></span> Incident Participants & Roles ({participants.length})
         </h3>
       </div>
 

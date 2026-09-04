@@ -2,6 +2,7 @@
 
 import React from 'react';
 import { Hypothesis, Symptom } from '@/types/incident';
+import { BrainIcon } from '@/components/Icon';
 
 interface HypothesesPanelProps {
   hypotheses?: Hypothesis[];
@@ -39,7 +40,9 @@ export const HypothesesPanel: React.FC<HypothesesPanelProps> = ({
       {/* Hypotheses */}
       <div>
         <h2 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '0.65rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-          <span>🧠 Grounded Incident Hypotheses</span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
+            <BrainIcon /> Grounded Incident Hypotheses
+          </span>
           <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>({hypotheses.length})</span>
         </h2>
 

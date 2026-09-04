@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { Claim } from '@/types/incident';
 import { recordDecision, supersedeDecision } from '@/hooks/useIncidentApi';
+import { ScaleIcon } from '@/components/Icon';
 
 interface DecisionsPanelProps {
   claims: Claim[];
@@ -70,7 +71,7 @@ export const DecisionsPanel: React.FC<DecisionsPanelProps> = ({ claims, incident
     <div className="p-3.5 rounded-xl bg-zinc-900/60 border border-zinc-800 space-y-2" aria-label="Incident decisions">
       <div className="flex items-center justify-between">
         <h3 className="text-xs font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
-          <span>⚖️</span> Decisions in Force ({active.length})
+          <ScaleIcon /> Decisions in Force ({active.length})
         </h3>
         {!showForm && (
           <button

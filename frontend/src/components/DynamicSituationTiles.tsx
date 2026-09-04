@@ -4,6 +4,7 @@ import React from 'react';
 import { IncidentState } from '@/types/incident';
 import { WsConnectionStatus } from '@/hooks/useIncidentWebSocket';
 import { deriveDynamicTiles, DynamicTile } from '@/lib/deriveDynamicTiles';
+import { AlertTriangleIcon } from '@/components/Icon';
 
 /**
  * Replaces `/voice-test`'s old `extractIncidentInfo()` client-side regex simulator
@@ -93,9 +94,12 @@ export const DynamicSituationTiles: React.FC<DynamicSituationTilesProps> = ({ in
             borderRadius: 6,
             padding: '6px 9px',
             marginBottom: 8,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 5,
           }}
         >
-          ⚠ Disconnected — showing last known state, not live data.
+          <AlertTriangleIcon /> Disconnected — showing last known state, not live data.
         </div>
       )}
 
@@ -122,8 +126,8 @@ export const DynamicSituationTiles: React.FC<DynamicSituationTilesProps> = ({ in
       )}
 
       {wsStatus !== 'CONNECTED' && !result.isDisconnected && (
-        <div className="vcc-inferred-note">
-          ⚠ Reconnecting to live updates ({wsStatus.toLowerCase()})… showing last known values.
+        <div className="vcc-inferred-note" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <AlertTriangleIcon /> Reconnecting to live updates ({wsStatus.toLowerCase()})… showing last known values.
         </div>
       )}
 

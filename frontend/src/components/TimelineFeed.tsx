@@ -2,6 +2,16 @@
 
 import React from 'react';
 import { TimelineEntry } from '@/types/incident';
+import {
+  ClipboardIcon,
+  CheckIcon,
+  XIcon,
+  AlertTriangleIcon,
+  ShieldIcon,
+  MicIcon,
+  MapPinIcon,
+  ScrollTextIcon,
+} from '@/components/Icon';
 
 interface TimelineFeedProps {
   timeline?: TimelineEntry[];
@@ -9,13 +19,13 @@ interface TimelineFeedProps {
 
 export const TimelineFeed: React.FC<TimelineFeedProps> = ({ timeline = [] }) => {
   const getEventIcon = (type: string) => {
-    if (type.includes('PROPOSED')) return '📋';
-    if (type.includes('APPROVED')) return '✓';
-    if (type.includes('REJECTED')) return '✕';
-    if (type.includes('EVENT') || type.includes('BREACH')) return '⚠️';
-    if (type.includes('RESOLUTION') || type.includes('STABILIZED')) return '🛡️';
-    if (type.includes('VOICE')) return '🎙️';
-    return '📌';
+    if (type.includes('PROPOSED')) return <ClipboardIcon />;
+    if (type.includes('APPROVED')) return <CheckIcon />;
+    if (type.includes('REJECTED')) return <XIcon />;
+    if (type.includes('EVENT') || type.includes('BREACH')) return <AlertTriangleIcon />;
+    if (type.includes('RESOLUTION') || type.includes('STABILIZED')) return <ShieldIcon />;
+    if (type.includes('VOICE')) return <MicIcon />;
+    return <MapPinIcon />;
   };
 
   const getEventColor = (type: string) => {
@@ -42,7 +52,9 @@ export const TimelineFeed: React.FC<TimelineFeedProps> = ({ timeline = [] }) => 
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h2 style={{ fontSize: '1.05rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-          <span>📜 Operational Event Timeline</span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <ScrollTextIcon /> Operational Event Timeline
+          </span>
           <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>({timeline.length} events)</span>
         </h2>
       </div>

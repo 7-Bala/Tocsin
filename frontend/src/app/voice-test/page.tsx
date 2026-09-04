@@ -14,6 +14,15 @@ import {
 } from '@/hooks/useIncidentApi';
 import { startRtmTranscriptSession, RtmTranscriptSession } from '@/lib/agoraRtmTranscripts';
 import { decodeAgoraStreamMessage } from '@/lib/agoraStreamDecoder';
+import {
+  AlertTriangleIcon,
+  CheckIcon,
+  XIcon,
+  ZapIcon,
+  ClockIcon,
+  MapPinIcon,
+  RepeatIcon,
+} from '@/components/Icon';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -249,7 +258,7 @@ export default function VoiceTestPage() {
     const handler = (event: PromiseRejectionEvent) => {
       const reason = event?.reason;
       const detail = reason instanceof Error ? `${reason.message}\n${reason.stack}` : String(reason);
-      addLog(`🛑 [Unhandled promise rejection] ${detail}`);
+      addLog(`[Unhandled promise rejection] ${detail}`);
     };
     window.addEventListener('unhandledrejection', handler);
     return () => window.removeEventListener('unhandledrejection', handler);
@@ -697,7 +706,7 @@ export default function VoiceTestPage() {
       audioCtxRef.current = audioCtx;
 
       client.on('user-published', async (user: any, mediaType: string) => {
-        if (Number(user.uid) === 9999) { setRemoteAgentPresent(true); addLog(`✨ [Agora ConvoAI] ${activeAgentLabelRef.current} (UID 9999) joined.`); }
+        if (Number(user.uid) === 9999) { setRemoteAgentPresent(true); addLog(`[Agora ConvoAI] ${activeAgentLabelRef.current} (UID 9999) joined.`); }
         await client.subscribe(user, mediaType as 'audio' | 'video');
         if (mediaType === 'audio' && user.audioTrack) {
           user.audioTrack.play();
@@ -813,7 +822,7 @@ export default function VoiceTestPage() {
           // volume-indicator path stays as a secondary signal for the amplitude
           // meter and as a fallback if RTM state delivery is ever interrupted.
           onAgentState: (state) => {
-            addLog(`🤖 Agent state: ${state}`);
+            addLog(`Agent state: ${state}`);
             const speaking = state === 'speaking';
             aiSpeakingRef.current = speaking;
             setAiSpeaking(speaking);
@@ -822,7 +831,7 @@ export default function VoiceTestPage() {
           onLog: addLog,
         });
       } catch (rtmErr: any) {
-        addLog(`⚠️ RTM transcript session failed to start: ${rtmErr?.message || rtmErr} (voice call continues; AI transcript text may not appear)`);
+        addLog(`RTM transcript session failed to start: ${rtmErr?.message || rtmErr} (voice call continues; AI transcript text may not appear)`);
       }
 
       client.enableAudioVolumeIndicator();
@@ -866,7 +875,7 @@ export default function VoiceTestPage() {
         userAnalyserRef.current = userAnalyser;
         userTimeDataRef.current = new Uint8Array(userAnalyser.fftSize);
         userFreqDataRef.current = new Uint8Array(userAnalyser.frequencyBinCount);
-      } catch { addLog('⚠️ Web Audio setup failed.'); }
+      } catch { addLog('Web Audio setup failed.'); }
 
       setVadStatus('LOADING');
       const { MicVAD } = await import('@ricky0123/vad-web');
@@ -887,14 +896,14 @@ export default function VoiceTestPage() {
       client.on('stream-message', (uid: number, data: Uint8Array) => {
         try {
           const raw = new TextDecoder('utf-8').decode(data);
-          addLog(`📡 [Stream Message] from UID ${uid} (${data.length} bytes): ${raw.slice(0, 100)}`);
+          addLog(`[Stream Message] from UID ${uid} (${data.length} bytes): ${raw.slice(0, 100)}`);
           const decoded = decodeAgoraStreamMessage(uid, data);
           if (decoded && decoded.text) {
             const speakerLabel: 'You' | 'AI Agent' = decoded.speaker === 'TOCSIN' ? 'AI Agent' : 'You';
             ingestObservationRef.current(speakerLabel, decoded.text);
           }
         } catch (err: any) {
-          addLog(`⚠️ [Stream Message error] ${err?.message}`);
+          addLog(`[Stream Message error] ${err?.message}`);
         }
       });
 
@@ -924,7 +933,7 @@ export default function VoiceTestPage() {
             ingestObservationRef.current('You', text);
           }
         };
-        rec.onerror = (e: any) => { if (e.error !== 'no-speech' && e.error !== 'aborted') addLog(`⚠️ [Speech recognition] ${e.error}`); };
+        rec.onerror = (e: any) => { if (e.error !== 'no-speech' && e.error !== 'aborted') addLog(`[Speech recognition] ${e.error}`); };
         rec.onend   = () => { if (speechRecognitionActiveRef.current) { try { rec.start(); } catch {} } };
         speechRecognitionRef.current = rec; speechRecognitionActiveRef.current = true;
         try { rec.start(); } catch {}
@@ -977,7 +986,7 @@ export default function VoiceTestPage() {
         ? 'Agora-managed OpenAI'
         : 'Gemini';
       const modeLabel = data.llm_credential_mode === 'managed' ? ' (managed, keyless)' : '';
-      addLog(`✅ Agent dispatched — ${data.voice_pipeline}, LLM: ${providerLabel}${modeLabel}`);
+      addLog(`Agent dispatched — ${data.voice_pipeline}, LLM: ${providerLabel}${modeLabel}`);
       if (data.voice_note) addLog(`ℹ️ ${data.voice_note}`);
       activeAgentLabelRef.current = data.voice_pipeline === 'gemini_live'
         ? 'Gemini Live Agent'
@@ -1003,16 +1012,16 @@ export default function VoiceTestPage() {
       addLog('Executing deterministic Identity Outage demo scenario...');
       const res = await runIdentityOutageDemo();
       if (res?.state) {
-        addLog('✅ Seeded deterministic Identity Outage demo scenario into PostgreSQL.');
-        setDemoFeedback('✅ Scenario loaded');
+        addLog('Seeded deterministic Identity Outage demo scenario into PostgreSQL.');
+        setDemoFeedback('Scenario loaded');
       } else {
-        addLog('✅ Executed identity outage demo scenario.');
-        setDemoFeedback('✅ Scenario loaded');
+        addLog('Executed identity outage demo scenario.');
+        setDemoFeedback('Scenario loaded');
       }
       setTimeout(() => setDemoFeedback(null), 3500);
     } catch (err: any) {
-      addLog(`❌ Demo execution error: ${err.message}`);
-      setDemoFeedback(`❌ Error: ${err.message}`);
+      addLog(`Demo execution error: ${err.message}`);
+      setDemoFeedback(`Error: ${err.message}`);
       setTimeout(() => setDemoFeedback(null), 4000);
     } finally {
       setIsDemoRunning(false);
@@ -1047,26 +1056,26 @@ export default function VoiceTestPage() {
     }
 
     if (data?.extraction_method === 'heuristic_fallback') {
-      parts.push('⚠️ Extracted via keyword fallback (LLM unavailable) — treat as UNVERIFIED.');
+      parts.push('Extracted via keyword fallback (LLM unavailable) — treat as UNVERIFIED.');
     }
 
     const conflicts = data?.conflicts_detected ?? 0;
     if (conflicts > 0) {
-      parts.push(`⚡ Contradicts ${conflicts} existing claim${conflicts > 1 ? 's' : ''} — flagged for review, see Conflicts panel.`);
+      parts.push(`Contradicts ${conflicts} existing claim${conflicts > 1 ? 's' : ''} — flagged for review, see Conflicts panel.`);
     }
 
     const actionItems = data?.action_items_created ?? 0;
     if (actionItems > 0) {
-      parts.push(`📋 Created ${actionItems} action item${actionItems > 1 ? 's' : ''}.`);
+      parts.push(`Created ${actionItems} action item${actionItems > 1 ? 's' : ''}.`);
     }
 
     const missing = data?.missing_info_identified ?? 0;
     if (missing > 0) {
-      parts.push(`❓ Flagged ${missing} open question${missing > 1 ? 's' : ''}.`);
+      parts.push(`Flagged ${missing} open question${missing > 1 ? 's' : ''}.`);
     }
 
     if (Array.isArray(data?.persist_errors) && data.persist_errors.length > 0) {
-      parts.push('⚠️ Database persistence failed — this may not survive a refresh.');
+      parts.push('Database persistence failed — this may not survive a refresh.');
     }
 
     return parts.join(' ');
@@ -1104,9 +1113,9 @@ export default function VoiceTestPage() {
         const errBody = await res.json().catch(() => ({}));
         addTranscriptEntry(
           'AI Agent',
-          `⚠️ Could not log that (HTTP ${res.status}${errBody?.detail ? `: ${errBody.detail}` : ''}). Nothing was recorded.`
+          `Could not log that (HTTP ${res.status}${errBody?.detail ? `: ${errBody.detail}` : ''}). Nothing was recorded.`
         );
-        addLog(`⚠️ [Observation] POST failed for incident '${incId}': HTTP ${res.status}`);
+        addLog(`[Observation] POST failed for incident '${incId}': HTTP ${res.status}`);
         return;
       }
 
@@ -1117,13 +1126,13 @@ export default function VoiceTestPage() {
       addTranscriptEntry(
         'AI Agent',
         timedOut
-          ? `⚠️ No reply after ${COMMAND_REPLY_TIMEOUT_MS / 1000}s — the backend may be overloaded. Your message was sent but Tocsin has not confirmed it was logged.`
-          : '⚠️ Could not reach the backend to log that. Check the connection and try again.'
+          ? `No reply after ${COMMAND_REPLY_TIMEOUT_MS / 1000}s — the backend may be overloaded. Your message was sent but Tocsin has not confirmed it was logged.`
+          : 'Could not reach the backend to log that. Check the connection and try again.'
       );
       addLog(
         timedOut
-          ? `⚠️ [Observation] Client-side timeout waiting for incident '${incId}'`
-          : `⚠️ [Observation] Network error for incident '${incId}': ${err?.message || err}`
+          ? `[Observation] Client-side timeout waiting for incident '${incId}'`
+          : `[Observation] Network error for incident '${incId}': ${err?.message || err}`
       );
     } finally {
       clearTimeout(timeoutId);
@@ -1156,12 +1165,12 @@ export default function VoiceTestPage() {
       try {
         await fn();
         await refreshActiveIncident();
-        addLog(`✅ ${label}`);
+        addLog(`${label}`);
       } catch (err: any) {
         const msg = err?.message || 'Request failed';
         setCommandError(msg);
         setCommandErrorKey((k) => k + 1);
-        addLog(`❌ ${label} failed — ${msg}`);
+        addLog(`${label} failed — ${msg}`);
       } finally {
         setBusyId(null);
       }
@@ -1282,20 +1291,20 @@ export default function VoiceTestPage() {
     }
   };
 
-  const actionStatusBadge = (status: string): { bg: string; text: string; border: string; icon: string; iconBg: string } => {
+  const actionStatusBadge = (status: string): { bg: string; text: string; border: string; icon: React.ReactNode; iconBg: string } => {
     switch (status) {
       case 'APPROVED':
       case 'VERIFIED':
-        return { bg: '#f0fdf4', text: '#16a34a', border: '#bbf7d0', icon: '✓', iconBg: '#f0fdf4' };
+        return { bg: '#f0fdf4', text: '#16a34a', border: '#bbf7d0', icon: <CheckIcon />, iconBg: '#f0fdf4' };
       case 'REJECTED':
       case 'FAILED':
-        return { bg: '#fef2f2', text: '#dc2626', border: '#fecaca', icon: '✕', iconBg: '#fef2f2' };
+        return { bg: '#fef2f2', text: '#dc2626', border: '#fecaca', icon: <XIcon />, iconBg: '#fef2f2' };
       case 'EXECUTING':
-        return { bg: '#eff6ff', text: '#2563eb', border: '#bfdbfe', icon: '⚙', iconBg: '#eff6ff' };
+        return { bg: '#eff6ff', text: '#2563eb', border: '#bfdbfe', icon: <ZapIcon />, iconBg: '#eff6ff' };
       case 'PENDING_APPROVAL':
-        return { bg: '#eef2ff', text: '#6366f1', border: '#c7d2fe', icon: '⚡', iconBg: '#eef2ff' };
+        return { bg: '#eef2ff', text: '#6366f1', border: '#c7d2fe', icon: <ClockIcon />, iconBg: '#eef2ff' };
       default: // PROPOSED
-        return { bg: '#f4f4f5', text: '#71717a', border: '#e4e4e7', icon: '•', iconBg: '#f4f4f5' };
+        return { bg: '#f4f4f5', text: '#71717a', border: '#e4e4e7', icon: <MapPinIcon />, iconBg: '#f4f4f5' };
     }
   };
 
@@ -2467,19 +2476,23 @@ export default function VoiceTestPage() {
 
         /* Commander key + errors */
         .vcc-cmd-key { margin-bottom: 8px; }
-        .vcc-cmd-key-row { display: flex; align-items: stretch; gap: 6px; }
-        .vcc-cmd-key-row .vcc-input { flex: 1; min-width: 0; }
-        .vcc-key-toggle {
-          flex-shrink: 0;
-          width: 34px;
-          border: 1px solid #e2e8f0;
-          background: #fff;
-          border-radius: 7px;
-          font-size: 14px;
+        .vcc-key-show-toggle {
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          margin-top: 6px;
+          font-size: 10.5px;
+          color: #64748b;
           cursor: pointer;
-          transition: background 0.15s ease, border-color 0.15s ease;
+          user-select: none;
         }
-        .vcc-key-toggle:hover { background: #f8fafc; border-color: #cbd5e1; }
+        .vcc-key-show-toggle input[type='checkbox'] {
+          width: 13px;
+          height: 13px;
+          margin: 0;
+          accent-color: #6366f1;
+          cursor: pointer;
+        }
         .vcc-key-hint { font-size: 9.5px; color: #64748b; margin: 4px 0 0; line-height: 1.4; }
         .vcc-key-hint code { font-size: 9px; background: #f1f5f9; padding: 1px 5px; border-radius: 4px; color: #334155; }
 
@@ -2496,6 +2509,9 @@ export default function VoiceTestPage() {
         .vcc-cmd-error-slot.open { grid-template-rows: 1fr; opacity: 1; margin-bottom: 8px; }
         .vcc-cmd-error-slot > .vcc-cmd-error { overflow: hidden; }
         .vcc-cmd-error {
+          display: flex;
+          align-items: flex-start;
+          gap: 5px;
           font-size: 10.5px;
           font-weight: 600;
           color: #b91c1c;
@@ -2613,7 +2629,7 @@ export default function VoiceTestPage() {
             <span className="vcc-sys-dot" />
             System Online
             {isConnected && <span style={{ marginLeft: 10, color: '#16a34a', fontWeight: 600 }}>● Voice Connected</span>}
-            {connectionState === 'ERROR' && <span style={{ marginLeft: 10, color: '#dc2626', fontWeight: 600 }}>⚠ Connection Error</span>}
+            {connectionState === 'ERROR' && <span style={{ marginLeft: 10, color: '#dc2626', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4 }}><AlertTriangleIcon /> Connection Error</span>}
           </div>
 
           <div className="vcc-topbar-right">
@@ -3006,8 +3022,8 @@ export default function VoiceTestPage() {
 
                       {/* Bottom Utility Bar */}
                       <div className="vcc-deck-footer">
-                        <span className="vcc-deck-tool-tag" title="FastMCP Streamable HTTP server on port 8001">
-                          ⚡ 13 Tools
+                        <span className="vcc-deck-tool-tag" title="FastMCP Streamable HTTP server on port 8001" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                          <ZapIcon /> 13 Tools
                         </span>
                         <div className="vcc-deck-footer-actions">
                           <button
@@ -3016,7 +3032,7 @@ export default function VoiceTestPage() {
                             onClick={handleRunDemo}
                             title="Load deterministic customer login outage demo scenario into PostgreSQL"
                           >
-                            {isDemoRunning ? 'Loading…' : demoFeedback || '⚡ Load Demo'}
+                            {isDemoRunning ? 'Loading…' : demoFeedback || (<><ZapIcon /> Load Demo</>)}
                           </button>
                           {transcript.length > 0 && (
                             <button
@@ -3065,8 +3081,8 @@ export default function VoiceTestPage() {
                           2026-09-03: a freshly-reset incident with zero claims still
                           showed this badge on its plain creation title). */}
                       {activeIncident?.title_auto_derived && (activeIncident?.claims?.length ?? 0) > 0 && (
-                        <div className="vcc-title-derived" title="This title restates the strongest claim currently on the evidence record. Rename the incident to pin it.">
-                          ⟳ auto-derived from evidence
+                        <div className="vcc-title-derived" title="This title restates the strongest claim currently on the evidence record. Rename the incident to pin it." style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                          <RepeatIcon /> auto-derived from evidence
                         </div>
                       )}
                       <div className="vcc-incident-loc">
@@ -3118,8 +3134,8 @@ export default function VoiceTestPage() {
                   )}
 
                   {activeIncident && (
-                    <div className="vcc-inferred-note">
-                      ⚠ Evidence assembled from ingested observations — verify before operational action
+                    <div className="vcc-inferred-note" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <AlertTriangleIcon /> Evidence assembled from ingested observations — verify before operational action
                     </div>
                   )}
 
@@ -3327,40 +3343,37 @@ export default function VoiceTestPage() {
                   {(activeIncident?.proposed_actions?.length ?? 0) > 0 ? (
                     <>
                       <div className="vcc-cmd-key">
-                        <div className="vcc-cmd-key-row">
+                        <input
+                          type={showCommanderKey ? 'text' : 'password'}
+                          className="vcc-input"
+                          placeholder="Commander key — required to approve or reject"
+                          value={commanderKey}
+                          onChange={(e) => {
+                            setCommanderKey(e.target.value);
+                            // A stale "invalid credentials" message sitting under
+                            // the box while you're actively correcting the key is
+                            // what read as "glitching" -- clear it the moment the
+                            // key changes so the error only ever reflects the
+                            // current value, not the last attempt.
+                            if (commandError) setCommandError(null);
+                          }}
+                          autoComplete="off"
+                        />
+                        <label className="vcc-key-show-toggle">
                           <input
-                            type={showCommanderKey ? 'text' : 'password'}
-                            className="vcc-input"
-                            placeholder="Commander key — required to approve or reject"
-                            value={commanderKey}
-                            onChange={(e) => {
-                              setCommanderKey(e.target.value);
-                              // A stale "invalid credentials" message sitting under
-                              // the box while you're actively correcting the key is
-                              // what read as "glitching" -- clear it the moment the
-                              // key changes so the error only ever reflects the
-                              // current value, not the last attempt.
-                              if (commandError) setCommandError(null);
-                            }}
-                            autoComplete="off"
+                            type="checkbox"
+                            checked={showCommanderKey}
+                            onChange={(e) => setShowCommanderKey(e.target.checked)}
                           />
-                          <button
-                            type="button"
-                            className="vcc-key-toggle"
-                            onClick={() => setShowCommanderKey((v) => !v)}
-                            title={showCommanderKey ? 'Hide key' : 'Show key'}
-                            aria-label={showCommanderKey ? 'Hide commander key' : 'Show commander key'}
-                          >
-                            {showCommanderKey ? '🙈' : '👁'}
-                          </button>
-                        </div>
+                          Show key
+                        </label>
                         <p className="vcc-key-hint">
                           Verified server-side against <code>TOCSIN_COMMANDER_KEY</code>. Never stored in the browser.
                         </p>
                       </div>
 
                       <div className={`vcc-cmd-error-slot ${commandError ? 'open' : ''}`}>
-                        <div className="vcc-cmd-error" key={commandErrorKey}>⚠ {commandError}</div>
+                        <div className="vcc-cmd-error" key={commandErrorKey}><AlertTriangleIcon /> {commandError}</div>
                       </div>
 
                       {activeIncident!.proposed_actions.map((action) => {

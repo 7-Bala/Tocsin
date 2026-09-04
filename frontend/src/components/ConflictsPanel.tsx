@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { ConflictRecord } from '@/types/incident';
 import { resolveEvidenceItem } from '@/hooks/useIncidentApi';
+import { CheckIcon, AlertTriangleIcon, LightbulbIcon } from '@/components/Icon';
 
 interface ConflictsPanelProps {
   conflicts: ConflictRecord[];
@@ -60,7 +61,7 @@ export const ConflictsPanel: React.FC<ConflictsPanelProps> = ({
   if (openConflicts.length === 0 && settledConflicts.length === 0) {
     return (
       <div className="p-4 rounded-xl border border-emerald-500/20 bg-emerald-950/10 text-xs text-emerald-400">
-        <span className="font-semibold">✓ No contradictions detected</span> across recorded observations.
+        <span className="font-semibold inline-flex items-center gap-1"><CheckIcon /> No contradictions detected</span> across recorded observations.
       </div>
     );
   }
@@ -72,7 +73,7 @@ export const ConflictsPanel: React.FC<ConflictsPanelProps> = ({
     >
       <div className="flex items-center justify-between gap-2">
         <h3 className="text-sm font-bold text-rose-400 flex items-center gap-2">
-          <span>⚠️</span> Contradictions ({openConflicts.length} open)
+          <AlertTriangleIcon /> Contradictions ({openConflicts.length} open)
         </h3>
         {openConflicts.length > 0 && (
           <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-rose-500/20 text-rose-300">
@@ -82,8 +83,8 @@ export const ConflictsPanel: React.FC<ConflictsPanelProps> = ({
       </div>
 
       {openConflicts.length === 0 && (
-        <p className="text-xs text-emerald-400">
-          ✓ All detected contradictions have been resolved.
+        <p className="text-xs text-emerald-400 flex items-center gap-1">
+          <CheckIcon /> All detected contradictions have been resolved.
         </p>
       )}
 
@@ -107,8 +108,8 @@ export const ConflictsPanel: React.FC<ConflictsPanelProps> = ({
               </div>
             </div>
             {c.recommended_action && (
-              <p className="text-[11px] text-amber-300 bg-amber-950/30 border border-amber-500/20 p-1.5 rounded">
-                💡 <span className="font-semibold">Recommended:</span> {c.recommended_action}
+              <p className="text-[11px] text-amber-300 bg-amber-950/30 border border-amber-500/20 p-1.5 rounded flex items-start gap-1">
+                <LightbulbIcon /> <span><span className="font-semibold">Recommended:</span> {c.recommended_action}</span>
               </p>
             )}
 

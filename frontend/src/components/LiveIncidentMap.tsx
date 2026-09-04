@@ -132,7 +132,7 @@ function EntityBox({
   const title = node.isConflicted
     ? `${node.label} — CONTRADICTED\n"${node.conflict?.valueA}" (${node.conflict?.speakerA ?? node.conflict?.sourceA})\nvs "${node.conflict?.valueB}" (${node.conflict?.speakerB ?? node.conflict?.sourceB})`
     : `${node.label}\nReported: ${node.value}\nBy: ${node.speaker ?? 'unknown'}\nEvidence: ${node.evidenceStatus}${
-        node.isUnverifiedExtraction ? '\n⚠ Extracted by keyword fallback, not the LLM' : ''
+        node.isUnverifiedExtraction ? '\nExtracted by keyword fallback, not the LLM' : ''
       }`;
 
   return (
@@ -157,8 +157,13 @@ function EntityBox({
 
       {node.isConflicted ? (
         <>
-          <text x={14} y={45} fontSize={11} fontWeight={600} fill={p.conflict.text}>
-            ⚠ Sources disagree
+          <g transform="translate(14, 37)" stroke={p.conflict.text} strokeWidth={1.4} fill="none" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M4.5 0.5 L9 8.5 L0 8.5 Z" />
+            <line x1="4.5" y1="3.2" x2="4.5" y2="5.6" />
+            <circle cx="4.5" cy="7.1" r="0.15" fill={p.conflict.text} stroke="none" />
+          </g>
+          <text x={26} y={45} fontSize={11} fontWeight={600} fill={p.conflict.text}>
+            Sources disagree
           </text>
           <text x={14} y={61} fontSize={10.5} fill={p.muted}>
             {truncate(`"${node.conflict?.valueA}"`, 18)}
@@ -179,9 +184,21 @@ function EntityBox({
       )}
 
       {node.isUnverifiedExtraction && (
-        <text x={NODE_W - 12} y={20} fontSize={10} textAnchor="end" fill={p.conflict.border}>
-          ◇ heuristic
-        </text>
+        <>
+          <rect
+            x={NODE_W - 62}
+            y={13}
+            width={7}
+            height={7}
+            transform={`rotate(45 ${NODE_W - 58.5} 16.5)`}
+            fill="none"
+            stroke={p.conflict.border}
+            strokeWidth={1.2}
+          />
+          <text x={NODE_W - 12} y={20} fontSize={10} textAnchor="end" fill={p.conflict.border}>
+            heuristic
+          </text>
+        </>
       )}
       {node.claimCount > 1 && !node.isConflicted && (
         <text x={NODE_W - 12} y={72} fontSize={9.5} textAnchor="end" fill={p.muted}>

@@ -10,6 +10,7 @@ import {
   ActivePartialUtterance,
 } from '@/lib/utteranceManager';
 import { ingestObservation } from '@/hooks/useIncidentApi';
+import { MicIcon, MicOffIcon, MessageSquareIcon, SparklesIcon } from '@/components/Icon';
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -83,7 +84,7 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
 
       if (decoded.isFinal) {
         addLog(
-          `📡 [Transcript] Finalized frame from '${msgUid}' (id: ${decoded.utteranceId})`
+          `[Transcript] Finalized frame from '${msgUid}' (id: ${decoded.utteranceId})`
         );
         if (incidentId) {
           void ingestObservation(incidentId, {
@@ -91,7 +92,7 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
             speaker: decoded.speaker === 'TOCSIN' ? 'Tocsin AI' : undefined,
             agora_uid: String(msgUid),
             source: decoded.speaker === 'TOCSIN' ? 'agora_agent_transcript' : 'agora_user_transcript',
-          }).catch((err: Error) => addLog(`⚠️ Observation ingestion failed: ${err.message}`));
+          }).catch((err: Error) => addLog(`️ Observation ingestion failed: ${err.message}`));
         }
       }
     },
@@ -201,7 +202,7 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
         addLog(`Remote speaker joined: UID ${user.uid} (${mediaType})`);
         if (Number(user.uid) === 9999) {
           setRemoteAgentPresent(true);
-          addLog('✨ Gemini Live Voice Agent (UID 9999) joined and active!');
+          addLog('Gemini Live Voice Agent (UID 9999) joined and active!');
         }
         await client.subscribe(user, mediaType);
         if (mediaType === 'audio' && user.audioTrack) {
@@ -241,7 +242,7 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
           const decoded = decodeAgoraStreamMessage(msgUid, payload);
           handleDecodedTranscriptEvent(decoded, msgUid);
         } catch (err: any) {
-          addLog(`⚠️ [Stream Decoder Error] ${err?.message || 'Frame decoding issue'}`);
+          addLog(`️ [Stream Decoder Error] ${err?.message || 'Frame decoding issue'}`);
         }
       });
 
@@ -280,7 +281,7 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
           onLog: addLog,
         });
       } catch (rtmErr: any) {
-        addLog(`⚠️ RTM transcript session failed to start: ${rtmErr?.message || rtmErr} (voice call continues; transcripts may not appear)`);
+        addLog(`️ RTM transcript session failed to start: ${rtmErr?.message || rtmErr} (voice call continues; transcripts may not appear)`);
       }
 
       const localAudioTrack = await AgoraRTC.createMicrophoneAudioTrack({
@@ -312,7 +313,7 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
           onSpeechStart: () => {
             if (!isMutedRef.current) {
               setIsSpeaking(true);
-              addLog('🎙️ [Silero VAD] Human speech detected');
+              addLog('️ [Silero VAD] Human speech detected');
             }
           },
           onSpeechEnd: () => {
@@ -331,7 +332,7 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
         });
         vadInstanceRef.current = myVad;
         setVadStatus('READY');
-        addLog('✅ [Silero VAD] Neural VAD active');
+        addLog('[Silero VAD] Neural VAD active');
       } catch (vadErr: any) {
         addLog(`VAD fallback: ${vadErr.message}`);
         setVadStatus('ERROR');
@@ -394,7 +395,7 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
       const data = await res.json();
       setAgentId(data.agent_id);
       setAgentStatus('RUNNING');
-      addLog(`✅ Gemini Live Agent joined (ID: ${data.agent_id})`);
+      addLog(`Gemini Live Agent joined (ID: ${data.agent_id})`);
     } catch (err: any) {
       setAgentStatus('ERROR');
       addLog(`Agent start failed: ${err.message}`);
@@ -443,7 +444,9 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
         <div>
           <h2 style={{ fontSize: '1.1rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            <span>🎙️ Live Voice AI & Responder Radio</span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
+              <MicIcon /> Live Voice AI & Responder Radio
+            </span>
             <span
               style={{
                 fontSize: '0.75rem',
@@ -480,9 +483,12 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
                   fontSize: '0.8rem',
                   fontWeight: 600,
                   cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '0.35rem',
                 }}
               >
-                {isMuted ? '🔇 Unmute Mic' : '🎙️ Mute Mic'}
+                {isMuted ? (<><MicOffIcon /> Unmute Mic</>) : (<><MicIcon /> Mute Mic</>)}
               </button>
               <button
                 onClick={handleLeave}
@@ -543,8 +549,8 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
         >
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', fontWeight: 700 }}>
             <span style={{ color: 'var(--text-secondary)' }}>SPEECH PROBABILITY (VAD)</span>
-            <span style={{ color: isSpeaking ? '#3fb950' : 'var(--text-secondary)' }}>
-              {isSpeaking ? '🗣️ ACTIVE SPEECH' : 'IDLE'} ({speechProbability}%)
+            <span style={{ color: isSpeaking ? '#3fb950' : 'var(--text-secondary)', display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
+              {isSpeaking ? (<><MessageSquareIcon /> ACTIVE SPEECH</>) : 'IDLE'} ({speechProbability}%)
             </span>
           </div>
           <div style={{ width: '100%', height: '8px', backgroundColor: '#21262d', borderRadius: '4px', overflow: 'hidden' }}>
@@ -588,9 +594,12 @@ export const VoiceHUD: React.FC<VoiceHUDProps> = ({
                 borderRadius: '4px',
                 backgroundColor: remoteAgentPresent ? 'rgba(63, 185, 80, 0.2)' : 'rgba(110, 118, 129, 0.2)',
                 color: remoteAgentPresent ? '#3fb950' : '#adbac7',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '0.25rem',
               }}
             >
-              {remoteAgentPresent ? '✨ IN ROOM (UID 9999)' : agentStatus}
+              {remoteAgentPresent ? (<><SparklesIcon /> IN ROOM (UID 9999)</>) : agentStatus}
             </span>
           </div>
 

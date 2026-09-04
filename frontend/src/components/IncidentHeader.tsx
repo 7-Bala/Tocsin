@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import Link from 'next/link';
 import { EventType, IncidentState, IncidentStatus, SeverityLevel } from '@/types/incident';
 import { createIncident, triggerIncidentEvent } from '@/hooks/useIncidentApi';
+import { ZapIcon, MicIcon } from '@/components/Icon';
 
 interface IncidentHeaderProps {
   currentIncident: IncidentState | null;
@@ -247,6 +248,9 @@ export const IncidentHeader: React.FC<IncidentHeaderProps> = ({
           onClick={() => setShowTriggerModal(true)}
           disabled={!currentIncident}
           style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '0.4rem',
             padding: '0.55rem 1rem',
             borderRadius: '8px',
             border: '1px solid #f85149',
@@ -258,7 +262,7 @@ export const IncidentHeader: React.FC<IncidentHeaderProps> = ({
             opacity: currentIncident ? 1 : 0.5,
           }}
         >
-          ⚡ Trigger Crisis Spike
+          <ZapIcon /> Trigger Crisis Spike
         </button>
 
         <button
@@ -295,7 +299,7 @@ export const IncidentHeader: React.FC<IncidentHeaderProps> = ({
             transition: 'background-color 0.15s ease',
           }}
         >
-          🎙️ Voice Test
+          <MicIcon /> Voice Test
         </Link>
       </div>
 
@@ -461,8 +465,8 @@ export const IncidentHeader: React.FC<IncidentHeaderProps> = ({
               maxWidth: '460px',
             }}
           >
-            <h2 style={{ fontSize: '1.15rem', fontWeight: 700, marginBottom: '0.5rem', color: '#f85149' }}>
-              ⚡ Trigger Crisis Degradation Event
+            <h2 style={{ fontSize: '1.15rem', fontWeight: 700, marginBottom: '0.5rem', color: '#f85149', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+              <ZapIcon /> Trigger Crisis Degradation Event
             </h2>
             <p style={{ fontSize: '0.825rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
               Injects a crisis surge into the live simulation engine, triggering progressive metric degradation.

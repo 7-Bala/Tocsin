@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { FinalizedUtterance, ActivePartialUtterance } from '@/lib/utteranceManager';
+import { FileTextIcon, CheckIcon, ClipboardIcon } from '@/components/Icon';
 
 interface LiveTranscriptPanelProps {
   items?: FinalizedUtterance[];
@@ -87,7 +88,7 @@ export const LiveTranscriptPanel: React.FC<LiveTranscriptPanelProps> = ({
               gap: '0.4rem',
             }}
           >
-            📝 LIVE TRANSCRIPT
+            <FileTextIcon /> LIVE TRANSCRIPT
           </span>
           <span
             style={{
@@ -127,7 +128,7 @@ export const LiveTranscriptPanel: React.FC<LiveTranscriptPanelProps> = ({
             }}
             title="Copy clean finalized conversation transcript as plain text"
           >
-            {copied ? '✓ Copied to Clipboard!' : '📋 Copy Transcript'}
+            {copied ? (<><CheckIcon /> Copied to Clipboard!</>) : (<><ClipboardIcon /> Copy Transcript</>)}
           </button>
 
           {items.length > 0 && onClear && (

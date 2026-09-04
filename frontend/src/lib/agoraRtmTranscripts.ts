@@ -75,9 +75,9 @@ export async function startRtmTranscriptSession(options: {
     onAgentState,
   } = options;
 
-  onLog('📡 RTM: loading agora-rtm SDK module...');
+  onLog('RTM: loading agora-rtm SDK module...');
   const AgoraRTM = (await import('agora-rtm')).default;
-  onLog(`📡 RTM: SDK loaded (v${AgoraRTM.VERSION}), creating client as '${userAccount}'...`);
+  onLog(`RTM: SDK loaded (v${AgoraRTM.VERSION}), creating client as '${userAccount}'...`);
   const rtmClient = new AgoraRTM.RTM(appId, userAccount);
 
   // login()/subscribe() have no timeout of their own -- a blocked RTM WSS
@@ -100,9 +100,9 @@ export async function startRtmTranscriptSession(options: {
       ),
     ]);
 
-  onLog('📡 RTM: logging in...');
+  onLog('RTM: logging in...');
   await withTimeout(rtmClient.login({ token: rtmToken }), 'RTM login');
-  onLog(`📡 RTM signaling login succeeded (identity: ${userAccount})`);
+  onLog(`RTM signaling login succeeded (identity: ${userAccount})`);
 
   const { AgoraVoiceAI, AgoraVoiceAIEvents, TranscriptHelperMode, TurnStatus } = await import(
     'agora-agent-client-toolkit'
@@ -122,7 +122,7 @@ export async function startRtmTranscriptSession(options: {
     renderMode: TranscriptHelperMode.AUTO,
     enableLog: true,
   });
-  onLog('📡 ConvoAI toolkit initialized (rtc + rtm engines attached)');
+  onLog('ConvoAI toolkit initialized (rtc + rtm engines attached)');
 
   // ── Handlers MUST be registered before subscribeMessage() ────────────────
 
@@ -172,11 +172,11 @@ export async function startRtmTranscriptSession(options: {
   // Surface pipeline errors instead of failing silently. Requires
   // parameters.enable_error_message: true on the agent join payload.
   ai.on(AgoraVoiceAIEvents.AGENT_ERROR, (_uid: string, error: any) => {
-    onLog(`⚠️ [Agent pipeline error] ${error?.type ?? 'unknown'} (${error?.code}): ${error?.message}`);
+    onLog(`[Agent pipeline error] ${error?.type ?? 'unknown'} (${error?.code}): ${error?.message}`);
   });
 
   ai.on(AgoraVoiceAIEvents.DEBUG_LOG, (msg: string) => {
-    onLog(`🔍 [toolkit] ${msg}`);
+    onLog(`[toolkit] ${msg}`);
   });
 
   // Bind the toolkit's listeners FIRST, then open the transport. Verified
@@ -190,13 +190,13 @@ export async function startRtmTranscriptSession(options: {
   // client to the same channel name you passed to the agent's
   // properties.channel".
   ai.subscribeMessage(channelName);
-  onLog(`📡 ConvoAI listeners bound for '${channelName}'`);
+  onLog(`ConvoAI listeners bound for '${channelName}'`);
 
   await withTimeout(
     rtmClient.subscribe(channelName, { withMessage: true, withPresence: true }),
     'RTM subscribe'
   );
-  onLog(`📡 RTM channel '${channelName}' subscribed — awaiting agent transcripts`);
+  onLog(`RTM channel '${channelName}' subscribed — awaiting agent transcripts`);
 
   return {
     stop: async () => {

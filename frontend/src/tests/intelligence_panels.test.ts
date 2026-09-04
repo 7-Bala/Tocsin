@@ -75,8 +75,9 @@ test('ActionItemsPanel flags an unowned open item distinctly, not as plain "Unas
   ];
   const html = renderToStaticMarkup(React.createElement(ActionItemsPanel, { actionItems: mockTasks }));
   assert.match(html, /Confirm auth DB connection pool size/);
-  // Must be visually flagged (a warning marker), not the old plain "Unassigned" text.
-  assert.match(html, /⚠ Unassigned/);
+  // Must be visually flagged (a warning marker + explanatory title), not the
+  // old plain "Unassigned" text.
+  assert.match(html, /No owner assigned — nobody is accountable for this item/);
 });
 
 test('ActionItemsPanel does not flag a COMPLETE item with no recorded owner as an accountability gap', () => {
@@ -91,9 +92,9 @@ test('ActionItemsPanel does not flag a COMPLETE item with no recorded owner as a
     },
   ];
   const html = renderToStaticMarkup(React.createElement(ActionItemsPanel, { actionItems: mockTasks }));
-  // Completed work isn't an open accountability gap — plain "Unassigned", no warning icon.
+  // Completed work isn't an open accountability gap — plain "Unassigned", no warning marker.
   assert.match(html, /Unassigned/);
-  assert.doesNotMatch(html, /⚠ Unassigned/);
+  assert.doesNotMatch(html, /No owner assigned — nobody is accountable for this item/);
 });
 
 test('ParticipantsPanel renders declared vs inferred role metrics', () => {
@@ -264,7 +265,7 @@ test('HandoffPanel renders idle state without claiming an audio broadcast', () =
   assert.match(html, /Shift Handoff Brief/);
   assert.match(html, /Generate handoff/);
   // Honesty invariant: never imply audio was broadcast without the user acting.
-  assert.doesNotMatch(html, /✅.*[Bb]roadcast/);
+  assert.doesNotMatch(html, /Sent to the live agent/);
 });
 
 test('DecisionsPanel shows only active decisions, not superseded ones, as current', () => {

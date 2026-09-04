@@ -2,6 +2,7 @@
 
 import React from 'react';
 import { ActionItem } from '@/types/incident';
+import { ClipboardIcon, UserIcon, AlertTriangleIcon, ClockIcon } from '@/components/Icon';
 
 interface ActionItemsPanelProps {
   actionItems: ActionItem[];
@@ -20,7 +21,7 @@ export const ActionItemsPanel: React.FC<ActionItemsPanelProps> = ({ actionItems 
     <div className="p-4 rounded-xl border border-zinc-800 bg-zinc-900/60 space-y-3" aria-label="Action items">
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-          <span>📋</span> Action Items & Task Ownership ({actionItems.length})
+          <ClipboardIcon /> Action Items & Task Ownership ({actionItems.length})
         </h3>
       </div>
 
@@ -50,18 +51,20 @@ export const ActionItemsPanel: React.FC<ActionItemsPanelProps> = ({ actionItems 
               <div className="space-y-1 flex-1 min-w-0">
                 <p className="font-medium truncate">{item.description}</p>
                 <div className="flex items-center gap-3 text-[11px] text-zinc-400">
-                  <span>
-                    👤 Owner:{' '}
+                  <span className="inline-flex items-center gap-1">
+                    <UserIcon /> Owner:{' '}
                     {isUnowned ? (
-                      <span className="text-amber-300 font-semibold" title="No owner assigned — nobody is accountable for this item">
-                        ⚠ Unassigned
+                      <span className="text-amber-300 font-semibold inline-flex items-center gap-1" title="No owner assigned — nobody is accountable for this item">
+                        <AlertTriangleIcon /> Unassigned
                       </span>
                     ) : (
                       <span className="text-zinc-200 font-semibold">{item.owner_name || 'Unassigned'}</span>
                     )}
                   </span>
                   {item.due_at && (
-                    <span>⏰ Due: {new Date(item.due_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                    <span className="inline-flex items-center gap-1">
+                      <ClockIcon /> Due: {new Date(item.due_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
                   )}
                 </div>
               </div>

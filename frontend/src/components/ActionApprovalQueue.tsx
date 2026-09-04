@@ -12,6 +12,7 @@ import {
   proposeIncidentAction,
   rejectIncidentAction,
 } from '@/hooks/useIncidentApi';
+import { ShieldIcon, ClockIcon, ZapIcon, CheckIcon, XIcon } from '@/components/Icon';
 
 interface ActionApprovalQueueProps {
   incident: IncidentState | null;
@@ -50,7 +51,8 @@ export const ActionApprovalQueue: React.FC<ActionApprovalQueueProps> = ({
           bg: 'rgba(227, 179, 65, 0.15)',
           border: '#e3b341',
           color: '#e3b341',
-          text: '⏳ PENDING APPROVAL',
+          icon: <ClockIcon />,
+          text: 'PENDING APPROVAL',
         };
       case 'APPROVED':
       case 'EXECUTING':
@@ -58,27 +60,31 @@ export const ActionApprovalQueue: React.FC<ActionApprovalQueueProps> = ({
           bg: 'rgba(88, 166, 255, 0.15)',
           border: '#58a6ff',
           color: '#58a6ff',
-          text: '⚡ EXECUTING',
+          icon: <ZapIcon />,
+          text: 'EXECUTING',
         };
       case 'VERIFIED':
         return {
           bg: 'rgba(63, 185, 80, 0.15)',
           border: '#3fb950',
           color: '#3fb950',
-          text: '✓ VERIFIED / STABILIZED',
+          icon: <CheckIcon />,
+          text: 'VERIFIED / STABILIZED',
         };
       case 'REJECTED':
         return {
           bg: 'rgba(248, 81, 73, 0.15)',
           border: '#f85149',
           color: '#f85149',
-          text: '✕ REJECTED',
+          icon: <XIcon />,
+          text: 'REJECTED',
         };
       default:
         return {
           bg: 'rgba(110, 118, 129, 0.15)',
           border: '#6e7681',
           color: '#adbac7',
+          icon: null,
           text: status,
         };
     }
@@ -170,7 +176,9 @@ export const ActionApprovalQueue: React.FC<ActionApprovalQueueProps> = ({
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
         <div>
           <h2 style={{ fontSize: '1.1rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <span>🛡️ Action Approvals & Verification</span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
+              <ShieldIcon /> Action Approvals & Verification
+            </span>
             {pendingActions.length > 0 && (
               <span
                 style={{
@@ -253,8 +261,8 @@ export const ActionApprovalQueue: React.FC<ActionApprovalQueueProps> = ({
                       <span style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--text-primary)' }}>
                         <code>{action.tool_name}</code>
                       </span>
-                      <span style={{ fontSize: '0.7rem', fontWeight: 700, padding: '0.15rem 0.4rem', borderRadius: '4px', border: `1px solid ${style.border}`, color: style.color }}>
-                        {style.text}
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.7rem', fontWeight: 700, padding: '0.15rem 0.4rem', borderRadius: '4px', border: `1px solid ${style.border}`, color: style.color }}>
+                        {style.icon}{style.text}
                       </span>
                     </div>
                     <p style={{ fontSize: '0.85rem', color: 'var(--text-primary)', marginTop: '0.25rem' }}>
@@ -280,6 +288,9 @@ export const ActionApprovalQueue: React.FC<ActionApprovalQueueProps> = ({
                     }}
                     disabled={isProcessing}
                     style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.35rem',
                       padding: '0.45rem 0.85rem',
                       borderRadius: '6px',
                       border: '1px solid #f85149',
@@ -290,13 +301,16 @@ export const ActionApprovalQueue: React.FC<ActionApprovalQueueProps> = ({
                       cursor: 'pointer',
                     }}
                   >
-                    ✕ Reject
+                    <XIcon /> Reject
                   </button>
 
                   <button
                     onClick={() => handleApprove(action)}
                     disabled={isProcessing}
                     style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.35rem',
                       padding: '0.45rem 1.15rem',
                       borderRadius: '6px',
                       border: 'none',
@@ -308,7 +322,7 @@ export const ActionApprovalQueue: React.FC<ActionApprovalQueueProps> = ({
                       boxShadow: '0 2px 8px rgba(63, 185, 80, 0.4)',
                     }}
                   >
-                    ✓ Authorize & Execute
+                    <CheckIcon /> Authorize & Execute
                   </button>
                 </div>
               </div>
@@ -344,18 +358,21 @@ export const ActionApprovalQueue: React.FC<ActionApprovalQueueProps> = ({
                     <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{action.tool_name}</span>
                     <span style={{ color: 'var(--text-secondary)', marginLeft: '0.5rem' }}>({action.rationale})</span>
                     {action.verified && (
-                      <div style={{ fontSize: '0.75rem', color: '#3fb950', marginTop: '0.2rem' }}>
-                        ✓ {action.verification_result || 'Outcome Verified'}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.75rem', color: '#3fb950', marginTop: '0.2rem' }}>
+                        <CheckIcon /> {action.verification_result || 'Outcome Verified'}
                       </div>
                     )}
                     {action.rejection_reason && (
-                      <div style={{ fontSize: '0.75rem', color: '#f85149', marginTop: '0.2rem' }}>
-                        ✕ Reason: {action.rejection_reason}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.75rem', color: '#f85149', marginTop: '0.2rem' }}>
+                        <XIcon /> Reason: {action.rejection_reason}
                       </div>
                     )}
                   </div>
                   <span
                     style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.3rem',
                       fontSize: '0.7rem',
                       fontWeight: 700,
                       padding: '0.15rem 0.45rem',
@@ -365,7 +382,7 @@ export const ActionApprovalQueue: React.FC<ActionApprovalQueueProps> = ({
                       color: style.color,
                     }}
                   >
-                    {style.text}
+                    {style.icon}{style.text}
                   </span>
                 </div>
               );

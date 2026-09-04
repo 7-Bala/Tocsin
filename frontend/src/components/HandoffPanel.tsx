@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { fetchHandoffBrief, speakIntoChannel } from '@/hooks/useIncidentApi';
+import { RepeatIcon, MicIcon, Volume2Icon, CheckCircleIcon, AlertTriangleIcon } from '@/components/Icon';
 
 interface HandoffPanelProps {
   incidentId?: string | null;
@@ -38,7 +39,7 @@ export const HandoffPanel: React.FC<HandoffPanelProps> = ({ incidentId }) => {
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [broadcasting, setBroadcasting] = useState(false);
-  const [broadcastResult, setBroadcastResult] = useState<string | null>(null);
+  const [broadcastResult, setBroadcastResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   const generate = async () => {
     if (!incidentId) return;
@@ -70,11 +71,15 @@ export const HandoffPanel: React.FC<HandoffPanelProps> = ({ incidentId }) => {
     setBroadcastResult(null);
     try {
       await speakIntoChannel(incidentId, brief.spoken_brief);
-      setBroadcastResult('✅ Sent to the live agent — audio delivery not independently confirmed by this UI.');
+      setBroadcastResult({
+        ok: true,
+        message: 'Sent to the live agent — audio delivery not independently confirmed by this UI.',
+      });
     } catch (e) {
-      setBroadcastResult(
-        `⚠️ ${e instanceof Error ? e.message : 'Broadcast failed.'} (Requires an agent already running for this incident’s voice channel — start one via "Dispatch AI" first.)`
-      );
+      setBroadcastResult({
+        ok: false,
+        message: `${e instanceof Error ? e.message : 'Broadcast failed.'} (Requires an agent already running for this incident’s voice channel — start one via "Dispatch AI" first.)`,
+      });
     } finally {
       setBroadcasting(false);
     }
@@ -91,7 +96,7 @@ export const HandoffPanel: React.FC<HandoffPanelProps> = ({ incidentId }) => {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-            <span>🔁</span> Shift Handoff Brief
+            <span><RepeatIcon /></span> Shift Handoff Brief
           </h3>
           <p className="text-[11px] text-zinc-400 mt-0.5">
             Written record + spoken script from the same evidence, so the two cannot diverge.
@@ -151,8 +156,8 @@ export const HandoffPanel: React.FC<HandoffPanelProps> = ({ incidentId }) => {
           {/* Spoken script */}
           <div className="p-3 rounded-lg bg-zinc-950/70 border border-indigo-500/20 space-y-2">
             <div className="flex items-center justify-between gap-2">
-              <span className="text-[11px] font-semibold uppercase tracking-wide text-indigo-400">
-                🎙 Read this onto the bridge
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-indigo-400 flex items-center gap-1">
+                <MicIcon /> Read this onto the bridge
               </span>
               <div className="flex items-center gap-1.5">
                 <button
@@ -164,15 +169,18 @@ export const HandoffPanel: React.FC<HandoffPanelProps> = ({ incidentId }) => {
                 <button
                   onClick={broadcastSpoken}
                   disabled={broadcasting}
-                  className="text-[11px] px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:bg-zinc-800 disabled:text-zinc-500 text-white border border-indigo-600 disabled:border-zinc-700 transition"
+                  className="text-[11px] px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:bg-zinc-800 disabled:text-zinc-500 text-white border border-indigo-600 disabled:border-zinc-700 transition inline-flex items-center gap-1"
                 >
-                  {broadcasting ? 'Broadcasting…' : '🔊 Broadcast'}
+                  {broadcasting ? 'Broadcasting…' : (<><Volume2Icon /> Broadcast</>)}
                 </button>
               </div>
             </div>
             <p className="text-xs text-zinc-200 leading-relaxed">{brief.spoken_brief}</p>
             {broadcastResult ? (
-              <p className="text-[10px] text-zinc-400">{broadcastResult}</p>
+              <p className={`text-[10px] flex items-start gap-1 ${broadcastResult.ok ? 'text-zinc-400' : 'text-amber-400'}`}>
+                {broadcastResult.ok ? <CheckCircleIcon /> : <AlertTriangleIcon />}
+                <span>{broadcastResult.message}</span>
+              </p>
             ) : (
               <p className="text-[10px] text-zinc-500">
                 Broadcast requires an agent already running for this incident&apos;s voice channel.
@@ -223,11 +231,11 @@ export const HandoffPanel: React.FC<HandoffPanelProps> = ({ incidentId }) => {
                 >
                   <span className="text-zinc-200">{a.description}</span>
                   <span
-                    className={`font-mono whitespace-nowrap ${
+                    className={`font-mono whitespace-nowrap inline-flex items-center gap-1 ${
                       a.overdue ? 'text-rose-400' : a.unowned ? 'text-amber-400' : 'text-zinc-400'
                     }`}
                   >
-                    {a.unowned ? '⚠ UNASSIGNED' : a.owner}
+                    {a.unowned ? (<><AlertTriangleIcon /> UNASSIGNED</>) : a.owner}
                     {a.overdue ? ' · OVERDUE' : ''}
                   </span>
                 </div>

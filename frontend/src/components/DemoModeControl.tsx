@@ -3,6 +3,9 @@
 import React, { useState } from 'react';
 import { runIdentityOutageDemo, simulateTranscript, checkIncidentReminders } from '@/hooks/useIncidentApi';
 import { IncidentState } from '@/types/incident';
+import { CheckCircleIcon, XCircleIcon, MicIcon, ClockIcon, ZapIcon } from '@/components/Icon';
+
+type StatusKind = 'info' | 'success' | 'error';
 
 interface DemoModeControlProps {
   activeIncidentId: string | null;
@@ -19,19 +22,19 @@ export const DemoModeControl: React.FC<DemoModeControlProps> = ({
   const [speaker, setSpeaker] = useState('Dave Miller');
   const [role, setRole] = useState('ENGINEER');
   const [transcriptText, setTranscriptText] = useState('');
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<{ kind: StatusKind; text: string } | null>(null);
 
   const handleRunDemoScenario = async () => {
     try {
       setIsRunning(true);
-      setStatusMessage('Executing deterministic Identity Outage scenario...');
+      setStatusMessage({ kind: 'info', text: 'Executing deterministic Identity Outage scenario...' });
       const res = await runIdentityOutageDemo();
       if (res.state) {
         onIncidentUpdated(res.state);
-        setStatusMessage('✅ Identity Outage demo scenario loaded into PostgreSQL & UI!');
+        setStatusMessage({ kind: 'success', text: 'Identity Outage demo scenario loaded into PostgreSQL & UI!' });
       }
     } catch (err: any) {
-      setStatusMessage(`❌ Demo execution error: ${err.message}`);
+      setStatusMessage({ kind: 'error', text: `Demo execution error: ${err.message}` });
     } finally {
       setIsRunning(false);
     }
@@ -50,9 +53,9 @@ export const DemoModeControl: React.FC<DemoModeControlProps> = ({
         raw_utterance: transcriptText.trim(),
       });
       setTranscriptText('');
-      setStatusMessage(`🎙️ Ingested utterance from ${speaker} into canonical pipeline.`);
+      setStatusMessage({ kind: 'success', text: `Ingested utterance from ${speaker} into canonical pipeline.` });
     } catch (err: any) {
-      setStatusMessage(`❌ Ingestion error: ${err.message}`);
+      setStatusMessage({ kind: 'error', text: `Ingestion error: ${err.message}` });
     } finally {
       setIsSimulating(false);
     }
@@ -63,13 +66,19 @@ export const DemoModeControl: React.FC<DemoModeControlProps> = ({
       setIsCheckingReminders(true);
       const incId = activeIncidentId || 'inc-demo-identity-outage';
       const res = await checkIncidentReminders(incId);
-      setStatusMessage(`⏰ Overdue scan complete: ${res.overdue_reminders_emitted} reminders emitted.`);
+      setStatusMessage({ kind: 'success', text: `Overdue scan complete: ${res.overdue_reminders_emitted} reminders emitted.` });
     } catch (err: any) {
-      setStatusMessage(`❌ Reminder scan error: ${err.message}`);
+      setStatusMessage({ kind: 'error', text: `Reminder scan error: ${err.message}` });
     } finally {
       setIsCheckingReminders(false);
     }
   };
+
+  const statusIcon = statusMessage?.kind === 'success'
+    ? <CheckCircleIcon />
+    : statusMessage?.kind === 'error'
+      ? <XCircleIcon />
+      : null;
 
   return (
     <section
@@ -107,7 +116,9 @@ export const DemoModeControl: React.FC<DemoModeControlProps> = ({
           disabled={isRunning}
           className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-semibold text-white shadow transition flex items-center gap-1.5"
         >
-          <span>{isRunning ? '⏳ Executing...' : '⚡ Run Identity Outage Scenario'}</span>
+          <span className="inline-flex items-center gap-1.5">
+            {isRunning ? (<><ClockIcon /> Executing...</>) : (<><ZapIcon /> Run Identity Outage Scenario</>)}
+          </span>
         </button>
 
         <button
@@ -115,12 +126,15 @@ export const DemoModeControl: React.FC<DemoModeControlProps> = ({
           disabled={isCheckingReminders}
           className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-xs font-medium text-zinc-200 border border-zinc-700 transition flex items-center gap-1.5"
         >
-          <span>{isCheckingReminders ? '⏳ Scanning...' : '⏰ Scan Overdue Action Reminders'}</span>
+          <span className="inline-flex items-center gap-1.5">
+            {isCheckingReminders ? (<><ClockIcon /> Scanning...</>) : (<><ClockIcon /> Scan Overdue Action Reminders</>)}
+          </span>
         </button>
 
         {statusMessage && (
-          <span className="text-xs text-zinc-300 italic font-mono bg-zinc-950/70 px-2 py-1 rounded border border-zinc-800">
-            {statusMessage}
+          <span className="text-xs text-zinc-300 italic font-mono bg-zinc-950/70 px-2 py-1 rounded border border-zinc-800 inline-flex items-center gap-1.5">
+            {statusIcon}
+            {statusMessage.text}
           </span>
         )}
       </div>

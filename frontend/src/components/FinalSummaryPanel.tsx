@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { requestSpokenSummary, getFinalSummary } from '@/hooks/useIncidentApi';
+import { BookmarkIcon, Volume2Icon, FileTextIcon } from '@/components/Icon';
 
 interface FinalSummaryPanelProps {
   incidentId: string;
@@ -35,22 +36,22 @@ export const FinalSummaryPanel: React.FC<FinalSummaryPanelProps> = ({ incidentId
     <div className="p-4 rounded-xl border border-zinc-800 bg-zinc-900/60 space-y-3" aria-label="Incident summaries">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-          <span>📑</span> Evidence-Bounded Incident Summary
+          <BookmarkIcon /> Evidence-Bounded Incident Summary
         </h3>
         <div className="flex items-center gap-2">
           <button
             onClick={() => handleGenerateSummary('spoken')}
             disabled={loading}
-            className="px-2.5 py-1 text-xs font-semibold rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition disabled:opacity-50"
+            className="px-2.5 py-1 text-xs font-semibold rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition disabled:opacity-50 inline-flex items-center gap-1.5"
           >
-            {loading ? 'Generating...' : '🔊 Spoken Summary'}
+            {loading ? 'Generating...' : (<><Volume2Icon /> Spoken Summary</>)}
           </button>
           <button
             onClick={() => handleGenerateSummary('final')}
             disabled={loading}
-            className="px-2.5 py-1 text-xs font-semibold rounded bg-indigo-600 hover:bg-indigo-500 text-white transition disabled:opacity-50"
+            className="px-2.5 py-1 text-xs font-semibold rounded bg-indigo-600 hover:bg-indigo-500 text-white transition disabled:opacity-50 inline-flex items-center gap-1.5"
           >
-            {loading ? 'Generating...' : '📄 Generate Final Report'}
+            {loading ? 'Generating...' : (<><FileTextIcon /> Generate Final Report</>)}
           </button>
         </div>
       </div>
