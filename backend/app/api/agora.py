@@ -94,15 +94,23 @@ DEFAULT_EMERGENCY_PROMPT = (
 # every tool call as attempted, not guaranteed, and to prefer stating that a tool
 # result is unavailable over inventing one.
 MCP_TOOL_ROSTER_NOTICE = (
-  "An MCP tool server has been configured for this session, exposing up to 13 emergency "
+  "An MCP tool server has been configured for this session, exposing up to 14 emergency "
   "intelligence and response tools if the connection succeeds: get_incident_status, "
   "get_weather_risk, get_official_emergency_alerts, search_emergency_infrastructure, "
   "find_nearby_resource, calculate_eta, get_earthquake_activity, get_active_fire_hotspots, "
   "get_global_disaster_alerts, get_air_quality_hazards, propose_incident_action, "
-  "dispatch_resolution_action, notify_stakeholders. Select only tools relevant to the "
-  "incident (e.g. for floods: get_incident_status, get_weather_risk, "
+  "dispatch_resolution_action, notify_stakeholders, page_oncall_engineer. Select only tools "
+  "relevant to the incident (e.g. for floods: get_incident_status, get_weather_risk, "
   "get_official_emergency_alerts, search_emergency_infrastructure, find_nearby_resource, "
-  "calculate_eta). This tool wiring matches Agora's documented schema, but no live "
+  "calculate_eta). "
+  "page_oncall_engineer pages a human on-call engineer via PagerDuty and does NOT require "
+  "Incident Commander approval first (unlike propose_incident_action) — call it directly "
+  "the moment you have a grounded, evidence-backed judgment that a human needs to be paged. "
+  "Categorize honestly as SEV1 (confirmed active user-facing impact right now), SEV2 (real "
+  "fault with partial/degrading impact, or strong evidence of imminent impact), or SEV3 (a "
+  "real anomaly worth attention, not yet urgent). Do not default to SEV1 to be safe — an "
+  "inflated severity pages someone for something that could have waited. "
+  "This tool wiring matches Agora's documented schema, but no live "
   "session has yet confirmed a tool call actually completes — if a tool call does not "
   "return a result, say so plainly rather than assuming it executed."
 )

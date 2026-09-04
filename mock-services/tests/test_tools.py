@@ -1,6 +1,9 @@
 """
-Live Test Suite for the 6 FastMCP Tools in Tocsin
-Executes live queries against real public APIs (Open-Meteo, Nominatim, OSRM) and backend endpoints.
+Test Suite for the FastMCP Tools in Tocsin
+Executes live queries against real public APIs (Open-Meteo, Nominatim, OSRM, USGS,
+NASA FIRMS, GDACS, Copernicus CAMS) and backend endpoints where credential-free;
+mock-fallback and monkeypatched-dispatch coverage for credential-gated tools
+(notify_stakeholders, page_oncall_engineer).
 """
 
 import httpx
@@ -18,6 +21,7 @@ from server import (
     get_official_emergency_alerts,
     get_weather_risk,
     notify_stakeholders,
+    page_oncall_engineer,
     propose_incident_action,
     search_emergency_infrastructure,
 )
@@ -513,3 +517,154 @@ async def test_reasoning_scenario_8_high_impact_action_pending_approval(monkeypa
 
 
 
+
+
+# ==============================================================================
+# Tool 13: page_oncall_engineer (PagerDuty Events API v2)
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_tool_13_page_oncall_engineer_mock_fallback(monkeypatch):
+    """No PAGERDUTY_ROUTING_KEY configured: must return an explicitly labeled mock, page no one."""
+    import server
+
+    monkeypatch.delenv("PAGERDUTY_ROUTING_KEY", raising=False)
+
+    res = await page_oncall_engineer(
+        incident_id="inc-mcp-test-page-1",
+        summary="Login API returning 503s for ~40% of requests since the latest deployment.",
+        severity="SEV2",
+    )
+    assert res["paged"] is False
+    assert res["mode"] == "MOCK_FALLBACK"
+    assert "status_for_agent" in res
+    assert "NOT ACTUALLY PAGED" in res["status_for_agent"]
+    # severity/simulated_summary live under `data`, not the top level -- only
+    # the fields explicitly duplicated into extra_root_fields reach the top.
+    assert res["data"]["severity"] == "SEV2"
+    assert "40%" in res["data"]["simulated_summary"]
+
+
+@pytest.mark.asyncio
+async def test_tool_13_page_oncall_engineer_live_dispatch(monkeypatch):
+    """
+    With PAGERDUTY_ROUTING_KEY set, must POST the documented Events API v2 shape
+    (routing_key, event_action=trigger, dedup_key=incident_id, payload with
+    summary/source/severity) and report success only when PagerDuty's response
+    itself says status=success.
+    """
+    import server
+
+    monkeypatch.setenv("PAGERDUTY_ROUTING_KEY", "test-routing-key-abc123")
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"status": "success", "dedup_key": "inc-mcp-test-page-2"}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, json):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(server.httpx, "AsyncClient", lambda *a, **k: FakeClient())
+
+    res = await page_oncall_engineer(
+        incident_id="inc-mcp-test-page-2",
+        summary="Confirmed active outage: logins failing for majority of users.",
+        severity="SEV1",
+    )
+
+    assert captured["url"] == "https://events.pagerduty.com/v2/enqueue"
+    body = captured["json"]
+    assert body["routing_key"] == "test-routing-key-abc123"
+    assert body["event_action"] == "trigger"
+    assert body["dedup_key"] == "inc-mcp-test-page-2"
+    assert body["payload"]["severity"] == "critical"  # SEV1 -> PagerDuty's "critical"
+    assert body["payload"]["source"] == "tocsin-incident-inc-mcp-test-page-2"
+
+    assert res["paged"] is True
+    assert res["delivery_status"] == "delivered"
+    assert res["tool_classification"] == "LIVE_EXTERNAL"
+
+
+@pytest.mark.asyncio
+async def test_tool_13_severity_mapping_sev2_sev3(monkeypatch):
+    """SEV2 -> PagerDuty 'error', SEV3 -> PagerDuty 'warning' (SEV1->critical covered above)."""
+    import server
+
+    monkeypatch.setenv("PAGERDUTY_ROUTING_KEY", "test-routing-key-abc123")
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"status": "success", "dedup_key": "x"}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, json):
+            captured["severity"] = json["payload"]["severity"]
+            return FakeResponse()
+
+    monkeypatch.setattr(server.httpx, "AsyncClient", lambda *a, **k: FakeClient())
+
+    await page_oncall_engineer(incident_id="inc-x", summary="s", severity="SEV2")
+    assert captured["severity"] == "error"
+
+    await page_oncall_engineer(incident_id="inc-x", summary="s", severity="SEV3")
+    assert captured["severity"] == "warning"
+
+
+@pytest.mark.asyncio
+async def test_tool_13_falls_back_to_mock_when_pagerduty_response_lacks_success(monkeypatch):
+    """A configured key that gets a non-success response must fall back honestly, not report a fake page."""
+    import server
+
+    monkeypatch.setenv("PAGERDUTY_ROUTING_KEY", "test-routing-key-abc123")
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"status": "invalid event"}  # not "success"
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(server.httpx, "AsyncClient", lambda *a, **k: FakeClient())
+
+    res = await page_oncall_engineer(incident_id="inc-y", summary="s", severity="SEV3")
+    assert res["paged"] is False
+    assert res["mode"] == "MOCK_FALLBACK"
+
+
+@pytest.mark.asyncio
+async def test_tool_13_empty_summary_rejected():
+    res = await page_oncall_engineer(incident_id="inc-z", summary="   ", severity="SEV1")
+    assert "error" in res

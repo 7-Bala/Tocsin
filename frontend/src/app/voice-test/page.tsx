@@ -2936,7 +2936,7 @@ export default function VoiceTestPage() {
                       {/* Bottom Utility Bar */}
                       <div className="vcc-deck-footer">
                         <span className="vcc-deck-tool-tag" title="FastMCP Streamable HTTP server on port 8001" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                          <ZapIcon /> 13 Tools
+                          <ZapIcon /> 14 Tools
                         </span>
                         <div className="vcc-deck-footer-actions">
                           <Button

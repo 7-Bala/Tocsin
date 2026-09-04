@@ -191,7 +191,50 @@ actually reflects the pushed prompt. Needs a live agent session (billed).
 
 ## P2 — Smaller, cheap, queued
 
-None open right now.
+### `SLACK_WEBHOOK_URL` was documented in `.env.example` but never wired into `mock-services`' docker-compose environment
+**Status:** fixed 2026-09-05, found while wiring `PAGERDUTY_ROUTING_KEY` through the
+same container. `notify_stakeholders`' live-Slack-dispatch path had been silently
+dead code in the dockerized deployment since it was written -- the container never
+actually received the value, so it always fell through to the mock fallback
+regardless of what was in `.env`. `TELEGRAM_BOT_TOKEN` was wired correctly the whole
+time; only Slack was missing. Confirmed the pre-existing
+`test_tool_6_notify_stakeholders_mock_fallback` test failure (asserting
+`"simulated_message" in res` at the top level, when that field only ever existed
+under `res["data"]`) is unrelated and pre-dates this fix -- reproduced against the
+last known-good checkpoint commit before touching anything.
+
+### On-call paging via PagerDuty (`page_oncall_engineer`) — new MCP tool, CREDENTIAL REQUIRED
+**Status:** implemented and tested 2026-09-05, per a mentor call (Nitin) plan: the
+agent detects something critical, categorizes SEV1/SEV2/SEV3, and pages the on-call
+engineer without needing commander pre-approval first (unlike
+`propose_incident_action`'s high-impact-action gate). Deliberately has no on-call
+roster of its own -- PagerDuty's own escalation policy (configured on their side)
+owns who gets contacted and how; this tool only triggers a real PagerDuty alert.
+
+Request/response shape verified against PagerDuty's own official example
+(`github.com/PagerDuty/API_Python_Examples`), not memory or a blog post. The
+`severity` enum (critical/error/warning/info) could not be fetched from
+developer.pagerduty.com's own prose docs in this session (returned empty/truncated
+both times) so it is corroborated by two independent third-party sources instead of
+one first-party quote -- see `docs/pagerduty/RESEARCH.md` for the full account and
+why that distinction matters.
+
+Live-verified: real MCP protocol call through the actual running FastMCP server
+(`list_tools()` shows 14 tools including this one; `call_tool()` executes it) and a
+correctly-labeled `MOCK_FALLBACK` response with no `PAGERDUTY_ROUTING_KEY` set.
+5 new tests (mock fallback, live-dispatch request-shape assertion against a
+monkeypatched httpx client, SEV1/2/3 -> critical/error/warning mapping, honest
+fallback when PagerDuty's own response lacks `status: success`, empty-summary
+rejection) -- all pass, zero regressions in the pre-existing 4 unrelated test
+failures (confirmed identical before/after against the checkpoint commit).
+
+**Not yet done:** no real `PAGERDUTY_ROUTING_KEY` configured, so the live dispatch
+path (not just its request-shape correctness) has never actually reached PagerDuty's
+API. Needs: a real PagerDuty account + Events API v2 integration key, a configured
+on-call schedule, and one live end-to-end test confirming an incident actually
+appears in PagerDuty's console. Also unverified: whether the agent, given real
+conversation context under `composed_tools`, actually chooses to call this tool
+unprompted -- same open question as every other MCP tool in this project.
 
 ---
 

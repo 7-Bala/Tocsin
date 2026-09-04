@@ -56,6 +56,13 @@ services:
       - HOST=0.0.0.0
       - BACKEND_URL=http://backend:8000
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      # Was missing entirely until 2026-09-05 despite being documented in
+      # .env.example -- notify_stakeholders' live Slack dispatch path was
+      # silently dead code in the dockerized deployment; it always hit the
+      # mock fallback regardless of what was in .env, since the container
+      # never received the value.
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+      - PAGERDUTY_ROUTING_KEY=${PAGERDUTY_ROUTING_KEY:-}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
       - backend

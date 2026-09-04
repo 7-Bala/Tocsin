@@ -1,6 +1,6 @@
 """
 Tocsin Mock Services - FastMCP Tool Server
-Exposes 13 specialized disaster coordination and intelligence tools with standardized evidence provenance.
+Exposes 14 specialized disaster coordination and intelligence tools with standardized evidence provenance.
 """
 
 import logging
@@ -1778,6 +1778,162 @@ async def search_emergency_infrastructure(
 
 
 # ==============================================================================
+# 13. On-Call Paging Tool (PagerDuty Events API v2)
+# ==============================================================================
+# Verified against PagerDuty's own official example
+# (github.com/PagerDuty/API_Python_Examples, EVENTS_API_v2/trigger/
+# trigger_without_incident_key.py, checked 2026-09-05): endpoint, request
+# shape (routing_key, event_action, payload.{summary,source,severity}), and
+# the response fields (status, dedup_key) all match that first-party example.
+# The `severity` enum (critical/error/warning/info) is corroborated by a
+# second, independent source (Argo Rollouts' PagerDuty v2 notification
+# service docs) rather than taken on one source alone. Not yet exercised
+# against a live PagerDuty account with a real routing key -- see
+# docs/pagerduty/RESEARCH.md for the full account and current status.
+#
+# Deliberately has NO on-call roster of its own: PagerDuty's own escalation
+# policy (configured on the PagerDuty side, outside this codebase) is what
+# actually knows who is on call and how to reach them -- phone, SMS, push,
+# whatever that policy specifies. This tool's only job is to trigger a real
+# PagerDuty alert; who gets paged and how is PagerDuty's responsibility, not
+# something Tocsin tracks or fabricates.
+PAGERDUTY_EVENTS_URL = "https://events.pagerduty.com/v2/enqueue"
+
+# Maps the agent's incident-severity judgment onto PagerDuty's documented
+# payload.severity enum. SEV1 (page immediately, on-call phone rings) down to
+# SEV3 (needs attention, does not justify waking someone at 3am) is the
+# on-call-paging convention this mentor session's plan was built around; it
+# is a superset mapping onto PagerDuty's four-value enum, not a PagerDuty
+# concept itself.
+_SEV_TO_PAGERDUTY = {
+    "SEV1": "critical",
+    "SEV2": "error",
+    "SEV3": "warning",
+}
+
+
+@mcp.tool()
+async def page_oncall_engineer(
+    incident_id: str,
+    summary: str,
+    severity: Literal["SEV1", "SEV2", "SEV3"],
+) -> dict[str, Any]:
+    """
+    Trigger a real PagerDuty alert against the on-call engineer's escalation
+    policy. Use this when the incident is credibly impacting users right now
+    and a human needs to be paged -- not for routine status updates (use
+    notify_stakeholders for those instead).
+
+    This does NOT require Incident Commander pre-approval (unlike
+    propose_incident_action's high-impact actions): paging a human to look at
+    something is escalation, not an irreversible operational action, so it is
+    safe for the agent to call this directly the moment it has formed a
+    grounded judgment that someone needs to be paged.
+
+    Categorize honestly:
+    - SEV1: confirmed, active, user-facing impact right now (e.g. "logins are
+      failing for a meaningful share of users").
+    - SEV2: a real fault with partial or degrading impact, or a strong,
+      evidence-backed suspicion of imminent user-facing impact.
+    - SEV3: a real anomaly worth a human's attention, but not yet
+      user-facing or urgent.
+    Do not default to SEV1 to be safe -- an inflated severity wakes someone up
+    for something that could have waited, which is its own kind of harm.
+
+    :param incident_id: Associated incident identifier. Also used as the
+        PagerDuty dedup_key, so repeated pages for the SAME incident update
+        the existing PagerDuty alert instead of creating duplicate pages for
+        the same underlying problem.
+    :param summary: Concise (PagerDuty truncates over ~1024 bytes), specific
+        description of what is actually happening -- this is what the on-call
+        engineer sees before they've looked at anything else.
+    :param severity: SEV1, SEV2, or SEV3. See categorization guidance above.
+    """
+    if not summary or not summary.strip():
+        return {"error": "summary cannot be empty."}
+
+    routing_key = os.getenv("PAGERDUTY_ROUTING_KEY", "").strip()
+    pagerduty_severity = _SEV_TO_PAGERDUTY[severity]
+
+    if routing_key:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(
+                    PAGERDUTY_EVENTS_URL,
+                    json={
+                        "routing_key": routing_key,
+                        "event_action": "trigger",
+                        "dedup_key": incident_id,
+                        "payload": {
+                            "summary": summary.strip()[:1024],
+                            "source": f"tocsin-incident-{incident_id}",
+                            "severity": pagerduty_severity,
+                            "custom_details": {"incident_id": incident_id, "tocsin_severity": severity},
+                        },
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("status") != "success":
+                    raise ValueError(f"PagerDuty responded without status=success: {data}")
+                return make_evidence_envelope(
+                    source="PagerDuty Events API v2",
+                    source_type="EXTERNAL_DISPATCH",
+                    summary=f"Paged on-call via PagerDuty for incident '{incident_id}' at {severity}.",
+                    data={
+                        "paged": True,
+                        "dedup_key": data.get("dedup_key", incident_id),
+                        "severity": severity,
+                        "incident_id": incident_id,
+                    },
+                    confidence="CONFIRMED_TRANSMITTED",
+                    limitations=[
+                        "Confirms the PagerDuty event was accepted, not that the on-call "
+                        "engineer has answered or acknowledged the page."
+                    ],
+                    extra_root_fields={
+                        "paged": True,
+                        "delivery_status": "delivered",
+                        "channel": "pagerduty",
+                        "incident_id": incident_id,
+                        "tool_classification": "LIVE_EXTERNAL",
+                    },
+                )
+        except Exception as exc:
+            logger.error(f"PagerDuty event dispatch failed: {exc}")
+
+    # Transparent mock fallback when PAGERDUTY_ROUTING_KEY is not configured.
+    logger.info("No PAGERDUTY_ROUTING_KEY configured. Returning explicit mock fallback.")
+    notice = (
+        "NOT ACTUALLY PAGED - Simulated response because no live PAGERDUTY_ROUTING_KEY is "
+        "configured. No on-call engineer was actually contacted."
+    )
+    return make_evidence_envelope(
+        source="Tocsin Local Mock Dispatcher",
+        source_type="SIMULATED",
+        summary=f"Simulated on-call page for incident '{incident_id}' at {severity}.",
+        data={
+            "paged": False,
+            "delivery_status": "skipped_no_credentials",
+            "mode": "MOCK_FALLBACK",
+            "incident_id": incident_id,
+            "severity": severity,
+            "simulated_summary": summary.strip(),
+        },
+        confidence="SIMULATED_ONLY",
+        limitations=["No on-call engineer was actually paged. Mock dev mode active."],
+        extra_root_fields={
+            "paged": False,
+            "delivery_status": "skipped_no_credentials",
+            "mode": "MOCK_FALLBACK",
+            "status_for_agent": notice,
+            "incident_id": incident_id,
+            "tool_classification": "MOCK_FALLBACK",
+        },
+    )
+
+
+# ==============================================================================
 # Server Entrypoint
 # ==============================================================================
 if __name__ == "__main__":
@@ -1795,6 +1951,6 @@ if __name__ == "__main__":
     # dispatching a call. Not yet live-confirmed as the fix -- see TODO.md.
     logger.info(
         f"Starting Tocsin Mock Services MCP Server on {host}:{port} "
-        "(Streamable HTTP transport, path /mcp) with 13 specialized tools..."
+        "(Streamable HTTP transport, path /mcp) with 14 specialized tools..."
     )
     mcp.run(transport="http", host=host, port=port)
