@@ -41,6 +41,7 @@
  */
 
 import type { DecodedStreamEvent } from './agoraStreamDecoder';
+import { TurnSettler } from './turnSettler';
 
 export interface RtmTranscriptSession {
   stop: () => Promise<void>;
@@ -126,11 +127,29 @@ export async function startRtmTranscriptSession(options: {
 
   // ── Handlers MUST be registered before subscribeMessage() ────────────────
 
-  // TRANSCRIPT_UPDATED carries the full history every time. Emit only what is
-  // new or has changed since the last emission, keyed by speaker+turn, so the
-  // page's append-style consumer stays correct.
-  const emitted = new Map<string, string>();
+  // TRANSCRIPT_UPDATED carries the full history every time, and each turn's
+  // text arrives as a live-growing stream (ASR/LLM tokens appended one at a
+  // time) long before item.status ever reaches END -- confirmed live
+  // 2026-09-04, the first session with working RTM delivery at all: a single
+  // six-line conversation produced 30 near-identical hypotheses, each just a
+  // few more words than the last, because every intermediate growth step of
+  // one spoken sentence was being forwarded and ingested as its own complete
+  // observation. See turnSettler.ts for the debounce this now goes through --
+  // one settled event per turn, not one per growth step.
   let seq = 0;
+  const settler = new TurnSettler({
+    stableMs: 700,
+    onSettled: ({ key, text, isUser, objectType }) => {
+      onEvent({
+        utteranceId: key,
+        speaker: isUser ? 'YOU' : 'TOCSIN',
+        text,
+        isFinal: true,
+        seq: seq++,
+        rawType: objectType ?? 'transcript',
+      });
+    },
+  });
 
   ai.on(AgoraVoiceAIEvents.TRANSCRIPT_UPDATED, (items: any[]) => {
     for (const item of items ?? []) {
@@ -138,8 +157,6 @@ export async function startRtmTranscriptSession(options: {
       if (!text) continue;
 
       const key = `${item?.uid}:${item?.turn_id}`;
-      if (emitted.get(key) === text) continue;
-      emitted.set(key, text);
 
       // metadata.object is authoritative for who spoke. Fallback matches Agora's
       // own official quickstart (agent-quickstart-nextjs/lib/conversation.ts):
@@ -152,14 +169,8 @@ export async function startRtmTranscriptSession(options: {
         objectType === 'user.transcription' ||
         (objectType === undefined && String(item?.uid) === '0');
 
-      onEvent({
-        utteranceId: key,
-        speaker: isUser ? 'YOU' : 'TOCSIN',
-        text,
-        isFinal: item?.status === TurnStatus.END || item?.status === TurnStatus.INTERRUPTED,
-        seq: seq++,
-        rawType: objectType ?? 'transcript',
-      });
+      const isFinal = item?.status === TurnStatus.END || item?.status === TurnStatus.INTERRUPTED;
+      settler.ingest(key, text, isFinal, isUser, objectType);
     }
   });
 
@@ -200,6 +211,10 @@ export async function startRtmTranscriptSession(options: {
 
   return {
     stop: async () => {
+      // A turn still mid-debounce when the session ends must not fire after
+      // teardown -- onEvent's page-side handler may reference state (refs,
+      // the incident id) that's already been torn down by handleLeave.
+      settler.destroy();
       try {
         ai.unsubscribe();
         ai.destroy();

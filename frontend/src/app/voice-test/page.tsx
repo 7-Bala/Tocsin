@@ -944,11 +944,13 @@ export default function VoiceTestPage() {
           // does not create or join one of its own.
           rtcClient: client,
           onEvent: (decoded) => {
+            // agoraRtmTranscripts.ts now only calls this once a turn has
+            // settled (debounced against Agora's live-growing transcript
+            // stream) -- every event here is already final, so there is
+            // nothing left to gate on.
             if (!decoded.text) return;
             const speakerLabel: 'You' | 'AI Agent' = decoded.speaker === 'TOCSIN' ? 'AI Agent' : 'You';
-            if (decoded.isFinal || decoded.text.length > 5) {
-              ingestObservationRef.current(speakerLabel, decoded.text);
-            }
+            ingestObservationRef.current(speakerLabel, decoded.text);
           },
           // Primary mic-echo guard signal. AGENT_STATE_CHANGED is pushed over RTM
           // the instant the agent's pipeline state changes -- unlike RTC's

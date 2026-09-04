@@ -94,6 +94,43 @@ structured observation.** Regression test:
 `test_agora_token.py::test_start_agent_token_is_token007_not_legacy_token006`.
 Full account: `docs/agora/RESEARCH.md` §9's 2026-09-04 update.
 
+### ✅ Agent transcript duplication (whiteboard, hypotheses, action items, timeline) — ROOT CAUSE FOUND AND FIXED (2026-09-04)
+**Status:** resolved and live-verified, found the same session as the RTM fix
+above (this bug was invisible until RTM worked at all). First real live test
+after the Token 007 fix produced 110 claims / 30 hypotheses / 396 timeline
+entries / 128 action items from a ~6-line script -- the whiteboard showed the
+same "possible cause" node four times over, and Action Items had ~30 near-copies
+of the same sentence.
+
+Root cause: `TRANSCRIPT_UPDATED` delivers each turn's text as a live-growing
+stream (ASR/LLM tokens appended one at a time) long before `item.status` ever
+reaches END. `agoraRtmTranscripts.ts`'s old dedup (`emitted.get(key) === text`)
+only caught an *exact* repeat of a previous string, which a monotonically
+growing transcript never is -- so every intermediate growth step of one spoken
+sentence ("That correlation...", "That correlation strongly...", "That
+correlation strongly suggests...") was forwarded to `page.tsx` and ingested as
+its own complete observation, independently extracted into its own
+near-duplicate claim/hypothesis/action-item, each producing its own timeline
+entry. This was pure over-ingestion at the transport boundary, not a bug in
+extraction, conflict detection, or the evidence model itself -- confirmed by
+checking the raw incident JSON: the 30 "duplicate" hypotheses were 30 distinct
+strings, each a longer prefix of the same sentence.
+
+Fixed by extracting the debounce logic into `frontend/src/lib/turnSettler.ts`
+(`TurnSettler`, independently unit-tested with an injectable fake clock in
+`turnSettler.test.ts`): a turn is forwarded to the page exactly once -- either
+immediately when Agora marks it final, or after 700ms of no further growth for
+that turn key (belt-and-suspenders, in case `status` delivery is itself
+unreliable). `agoraRtmTranscripts.ts` now wires `TRANSCRIPT_UPDATED` items into
+a `TurnSettler` instance instead of forwarding every growth step; its `destroy()`
+is called on session teardown so a turn still mid-debounce can't fire after
+`handleLeave` has already torn down the state it would reference.
+
+Not yet re-verified with a fresh live conversation (found via a completed
+session's data, fixed, container rebuilt, but the next live test is the actual
+proof this doesn't regress). Should produce roughly one claim per real sentence
+spoken, not one per word the agent's speech grew by.
+
 Everything below this line is the (now-explained) investigation history, kept
 for context rather than deleted, since it correctly ruled out every client-side
 cause before the real one was found on the agent side:
