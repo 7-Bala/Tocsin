@@ -9,7 +9,7 @@ import { HypothesesPanel } from '@/components/HypothesesPanel';
 import { TimelineFeed } from '@/components/TimelineFeed';
 import { VoiceHUD } from '@/components/VoiceHUD';
 import { IntelligencePanel } from '@/components/IntelligencePanel';
-import LiveIncidentMap from '@/components/LiveIncidentMap';
+import ExcalidrawIncidentMap from '@/components/ExcalidrawIncidentMap';
 import { DemoModeControl } from '@/components/DemoModeControl';
 import { ShieldIcon, SirenIcon } from '@/components/Icon';
 
@@ -71,13 +71,13 @@ export default function IncidentCommandDashboard() {
         status={activeIncident?.status}
       />
 
-      {/* Live Incident Map — the evidence record drawn as a graph.
-          Sits above the written record deliberately: the shape of the incident
-          (what is broken, what contradicts what, which causes implicate which
-          systems) is the thing a list of claims cannot show. Same data, same
-          WebSocket, dark variant to match this dashboard. */}
+      {/* Live Incident Whiteboard — the evidence record drawn on an Excalidraw
+          canvas. Sits above the written record deliberately: the shape of the
+          incident (what is broken, what contradicts what, which causes
+          implicate which systems) is the thing a list of claims cannot show.
+          Same data, same WebSocket, dark variant to match this dashboard. */}
       <div style={{ marginBottom: 16 }}>
-        <LiveIncidentMap incident={activeIncident} theme="dark" />
+        <ExcalidrawIncidentMap incident={activeIncident} theme="dark" />
       </div>
 
       {/* Shared Intelligence Record */}

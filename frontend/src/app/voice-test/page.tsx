@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useIncidentState } from '@/hooks/useIncidentState';
 import { DynamicSituationTiles } from '@/components/DynamicSituationTiles';
-import LiveIncidentMap from '@/components/LiveIncidentMap';
+import ExcalidrawIncidentMap from '@/components/ExcalidrawIncidentMap';
 import {
   approveIncidentAction,
   rejectIncidentAction,
@@ -129,16 +129,16 @@ export default function VoiceTestPage() {
   const [tokenDetails,       setTokenDetails]      = useState<{
     uid?: number | string; channel?: string; expiresIn?: number;
   } | null>(null);
-  const [commandInput, setCommandInput] = useState('');
-  const [isAwaitingReply, setIsAwaitingReply] = useState(false);
   const [isMounted,    setIsMounted]    = useState(false);
   const [currentTime,  setCurrentTime]  = useState<Date | null>(null);
   const [waveStartedAt, setWaveStartedAt] = useState<number | null>(null);
 
   // ── Transcript state ───────────────────────────────────────────────────
+  // No longer rendered as a feed (the left conversation panel was removed),
+  // but kept as the underlying record: addTranscriptEntry's last-entry check
+  // is a real dedup guard for the observation-ingestion pipeline below, and
+  // transcript.length still drives the status-bar utterance count.
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
-  const transcriptContainerRef      = useRef<HTMLDivElement | null>(null);
-  const userScrolledUpRef           = useRef<boolean>(false);
 
   // ── Real incident state (item 1, step 4 of
   // docs/strategy/VOICE_TEST_DYNAMIC_TILES_PLAN.md) ──────────────────────
@@ -315,20 +315,6 @@ export default function VoiceTestPage() {
 
   const ingestObservationRef = useRef(ingestObservation);
   useEffect(() => { ingestObservationRef.current = ingestObservation; }, [ingestObservation]);
-
-  // ── Auto-scroll transcript ─────────────────────────────────────────────
-  useEffect(() => {
-    if (!userScrolledUpRef.current && transcriptContainerRef.current) {
-      transcriptContainerRef.current.scrollTop = transcriptContainerRef.current.scrollHeight;
-    }
-  }, [transcript]);
-
-  const handleTranscriptScroll = () => {
-    const el = transcriptContainerRef.current;
-    if (!el) return;
-    const isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 15;
-    userScrolledUpRef.current = !isAtBottom;
-  };
 
   // ── handleLeave ────────────────────────────────────────────────────────
   const handleLeave = useCallback(async () => {
@@ -1028,118 +1014,6 @@ export default function VoiceTestPage() {
     }
   };
 
-  /**
-   * Turn a real /observations response into a chat-readable reply.
-   *
-   * Deliberately reports what the extraction pipeline actually did rather than
-   * generating free-form conversational text: this reply is a readout of structured
-   * evidence-record state (category, evidence status, claims, conflicts), not a
-   * simulated personality. That keeps it consistent with the rest of the product's
-   * anti-hallucination stance — Tocsin does not say anything here that isn't backed
-   * by what the backend actually returned.
-   */
-  const buildTocsinReply = (data: any): string => {
-    if (data?.skipped) {
-      return "Already logged — that's a duplicate of something said in the last 30 seconds.";
-    }
-
-    const parts: string[] = [];
-    const category = data?.category ?? 'UNCLASSIFIED';
-    const evidenceStatus = data?.evidence_status ?? 'UNVERIFIED';
-    parts.push(`Logged as ${category} (${evidenceStatus}).`);
-
-    const claims = data?.observation?.claims ?? [];
-    if (claims.length > 0) {
-      const first = claims[0];
-      const extra = claims.length > 1 ? ` +${claims.length - 1} more` : '';
-      parts.push(`Claim: "${first.entity}" → "${first.value}"${extra}.`);
-    }
-
-    if (data?.extraction_method === 'heuristic_fallback') {
-      parts.push('Extracted via keyword fallback (LLM unavailable) — treat as UNVERIFIED.');
-    }
-
-    const conflicts = data?.conflicts_detected ?? 0;
-    if (conflicts > 0) {
-      parts.push(`Contradicts ${conflicts} existing claim${conflicts > 1 ? 's' : ''} — flagged for review, see Conflicts panel.`);
-    }
-
-    const actionItems = data?.action_items_created ?? 0;
-    if (actionItems > 0) {
-      parts.push(`Created ${actionItems} action item${actionItems > 1 ? 's' : ''}.`);
-    }
-
-    const missing = data?.missing_info_identified ?? 0;
-    if (missing > 0) {
-      parts.push(`Flagged ${missing} open question${missing > 1 ? 's' : ''}.`);
-    }
-
-    if (Array.isArray(data?.persist_errors) && data.persist_errors.length > 0) {
-      parts.push('Database persistence failed — this may not survive a refresh.');
-    }
-
-    return parts.join(' ');
-  };
-
-  // Client-side ceiling on how long we'll wait for a reply, independent of whatever
-  // the backend's own extraction timeout is. Live-observed 2026-08-31: a Gemini call
-  // with no server-side timeout hung for 173s with zero feedback to the user. The
-  // backend now enforces its own 12s cap (GEMINI_EXTRACTION_TIMEOUT_SECONDS), but this
-  // is defense in depth — a proxy, DNS issue, or a future backend regression must not
-  // be able to freeze this chat again. 20s gives the backend's 12s budget headroom for
-  // DB writes and network round-trip before we give up client-side.
-  const COMMAND_REPLY_TIMEOUT_MS = 20000;
-
-  const handleCommandSubmit = async () => {
-    if (!commandInput.trim() || isAwaitingReply) return;
-    const text = commandInput.trim();
-    addTranscriptEntry('You', text);
-    setCommandInput('');
-    setIsAwaitingReply(true);
-
-    const incId = channelName.trim() || 'inc-demo-identity-outage';
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), COMMAND_REPLY_TIMEOUT_MS);
-
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/incidents/${incId}/observations`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ raw_utterance: text, speaker: 'Operator', source: 'command_input' }),
-        signal: controller.signal,
-      });
-
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => ({}));
-        addTranscriptEntry(
-          'AI Agent',
-          `Could not log that (HTTP ${res.status}${errBody?.detail ? `: ${errBody.detail}` : ''}). Nothing was recorded.`
-        );
-        addLog(`[Observation] POST failed for incident '${incId}': HTTP ${res.status}`);
-        return;
-      }
-
-      const data = await res.json();
-      addTranscriptEntry('AI Agent', buildTocsinReply(data));
-    } catch (err: any) {
-      const timedOut = err?.name === 'AbortError';
-      addTranscriptEntry(
-        'AI Agent',
-        timedOut
-          ? `No reply after ${COMMAND_REPLY_TIMEOUT_MS / 1000}s — the backend may be overloaded. Your message was sent but Tocsin has not confirmed it was logged.`
-          : 'Could not reach the backend to log that. Check the connection and try again.'
-      );
-      addLog(
-        timedOut
-          ? `[Observation] Client-side timeout waiting for incident '${incId}'`
-          : `[Observation] Network error for incident '${incId}': ${err?.message || err}`
-      );
-    } finally {
-      clearTimeout(timeoutId);
-      setIsAwaitingReply(false);
-    }
-  };
-
   // Replaces the old handleResetIncident, which cleared the local fake-simulator
   // state (incidentData/tasks/actionStates — all removed, item 1 step 4). There is no
   // honest equivalent of "reset the incident" now that this page shows the real
@@ -1386,7 +1260,7 @@ export default function VoiceTestPage() {
         .vcc-body {
           flex: 1;
           display: grid;
-          grid-template-columns: 310px 1fr 620px;
+          grid-template-columns: 1fr 620px;
           min-height: 0;
           overflow: hidden;
         }
@@ -1407,42 +1281,6 @@ export default function VoiceTestPage() {
         .vcc-panel-scroll::-webkit-scrollbar-thumb:hover { background: rgba(100, 116, 139, 0.6); }
         .vcc-panel-scroll::-webkit-scrollbar-track { background: transparent; }
 
-        /* ── Left panel (Transcript & Manual Ingestion) ── */
-        .vcc-left {
-          background: #f8fafc;
-          border-right: 1px solid #e2e8f0;
-        }
-        .vcc-left-header {
-          padding: 14px 16px 10px;
-          border-bottom: 1px solid #e2e8f0;
-          flex-shrink: 0;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-        }
-        .vcc-left-title {
-          font-size: 10.5px;
-          font-weight: 700;
-          letter-spacing: 0.06em;
-          text-transform: uppercase;
-          color: #334155;
-        }
-        .vcc-conn-badge {
-          display: flex;
-          align-items: center;
-          font-size: 10.5px;
-          font-weight: 600;
-          color: ${connectionState === 'CONNECTED' ? '#16a34a' : connectionState === 'ERROR' ? '#dc2626' : '#94a3b8'};
-        }
-
-        /* ── Transcript ── */
-        .vcc-transcript-section {
-          flex: 1;
-          display: flex;
-          flex-direction: column;
-          min-height: 0;
-          padding: 12px 12px 0;
-        }
         .vcc-section-label {
           font-size: 10px;
           font-weight: 700;
@@ -1451,93 +1289,6 @@ export default function VoiceTestPage() {
           color: #64748b;
           margin-bottom: 8px;
           flex-shrink: 0;
-        }
-        .vcc-transcript {
-          flex: 1;
-          overflow-y: auto;
-          overflow-x: hidden;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-          padding-bottom: 8px;
-        }
-        .vcc-transcript::-webkit-scrollbar { width: 6px; }
-        .vcc-transcript::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.35); border-radius: 9999px; }
-        .vcc-transcript::-webkit-scrollbar-thumb:hover { background: rgba(100, 116, 139, 0.6); }
-        .vcc-transcript::-webkit-scrollbar-track { background: transparent; }
-        .vcc-transcript-empty {
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          flex: 1;
-          gap: 6px;
-          color: #94a3b8;
-          font-size: 12px;
-          text-align: center;
-          font-style: italic;
-          padding: 24px 12px;
-        }
-        .vcc-msg {
-          display: flex;
-          flex-direction: column;
-          gap: 4px;
-          padding: 10px 12px;
-          border-radius: 12px;
-          border-left: 3.5px solid transparent;
-          background: #ffffff;
-          border: 1px solid #e2e8f0;
-          box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
-          animation: vcc-msg-in 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-        @keyframes vcc-msg-in {
-          from { opacity: 0; transform: translateY(4px); }
-          to   { opacity: 1; transform: translateY(0); }
-        }
-        .vcc-msg.you {
-          border-left: 3.5px solid #0284c7;
-          background: #ffffff;
-        }
-        .vcc-msg.ai {
-          border-left: 3.5px solid #16a34a;
-          background: #f0fdf4;
-          border-color: #bbf7d0;
-        }
-        .vcc-msg-header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-        }
-        .vcc-msg-speaker {
-          font-size: 9px;
-          font-weight: 700;
-          letter-spacing: 0.05em;
-          text-transform: uppercase;
-          padding: 1.5px 7px;
-          border-radius: 9999px;
-        }
-        .vcc-msg-speaker.you { background: #e0f2fe; color: #0369a1; }
-        .vcc-msg-speaker.ai  { background: #dcfce7; color: #15803d; }
-        .vcc-msg-time {
-          font-size: 9px;
-          color: #94a3b8;
-          font-variant-numeric: tabular-nums;
-        }
-        .vcc-msg-text {
-          font-size: 12px;
-          line-height: 1.5;
-          color: #1e293b;
-          word-break: break-word;
-        }
-
-        /* ── Left controls ── */
-        .vcc-left-controls {
-          flex-shrink: 0;
-          padding: 10px 12px;
-          border-top: 1px solid #e2e8f0;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
         }
         .vcc-card-sm {
           background: #ffffff;
@@ -1620,63 +1371,6 @@ export default function VoiceTestPage() {
           padding: 5px 12px;
         }
         .vcc-btn-reject:hover:not(:disabled)  { background: #fecaca; color: #7f1d1d; }
-
-        /* ── Command input (Observation ingestion) ── */
-        .vcc-cmd-row {
-          display: flex;
-          align-items: center;
-          gap: 6px;
-          background: #ffffff;
-          border: 1px solid #cbd5e1;
-          border-radius: 12px;
-          padding: 7px 10px;
-          transition: border-color 0.15s, box-shadow 0.15s;
-          box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
-        }
-        .vcc-cmd-row:focus-within {
-          border-color: #0284c7;
-          box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.15);
-        }
-        .vcc-cmd-input {
-          flex: 1;
-          border: none;
-          outline: none;
-          font-size: 12px;
-          color: #0f172a;
-          background: transparent;
-          font-family: inherit;
-        }
-        .vcc-cmd-input::placeholder { color: #94a3b8; }
-        .vcc-cmd-send {
-          width: 28px;
-          height: 28px;
-          border-radius: 9px;
-          background: #0284c7;
-          color: #ffffff;
-          border: none;
-          cursor: pointer;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          flex-shrink: 0;
-          transition: opacity 0.15s, transform 0.15s, background 0.15s;
-        }
-        .vcc-cmd-send:hover:not(:disabled) { background: #0369a1; transform: scale(1.04); }
-        .vcc-cmd-send:active:not(:disabled) { transform: scale(0.96); }
-        .vcc-cmd-send-spinner {
-          width: 11px; height: 11px;
-          border: 1.5px solid rgba(255,255,255,0.35);
-          border-top-color: #fff;
-          border-radius: 50%;
-          animation: vcc-spin 0.7s linear infinite;
-        }
-        @keyframes vcc-spin { to { transform: rotate(360deg); } }
-        .vcc-cmd-thinking {
-          font-size: 10.5px;
-          color: #64748b;
-          padding: 4px 2px 0 2px;
-          font-style: italic;
-        }
 
         /* ── Voice select ── */
         .vcc-select {
@@ -1966,10 +1660,10 @@ export default function VoiceTestPage() {
           min-height: 0;
         }
         .vcc-right-inner {
-          padding: 16px;
+          padding: 20px;
           display: flex;
           flex-direction: column;
-          gap: 12px;
+          gap: 20px;
           flex: 1;
           min-height: 0;
           overflow-y: auto;
@@ -2291,7 +1985,7 @@ export default function VoiceTestPage() {
           background: #ffffff;
           border: 1px solid #e2e8f0;
           border-radius: 16px;
-          padding: 14px 16px;
+          padding: 16px 18px;
           box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
         }
 
@@ -2585,23 +2279,21 @@ export default function VoiceTestPage() {
 
         /* ── Responsive ── */
         @media (max-width: 1280px) {
-          .vcc-body { grid-template-columns: 280px 1fr 520px; }
+          .vcc-body { grid-template-columns: 1fr 520px; }
         }
         @media (max-width: 1024px) {
-          .vcc-body { grid-template-columns: 260px 1fr 420px; }
+          .vcc-body { grid-template-columns: 1fr 420px; }
           .vcc-right-inner { padding: 12px; }
         }
         @media (max-width: 900px) {
           .vcc-body {
             grid-template-columns: 1fr;
-            grid-template-rows: auto auto auto;
+            grid-template-rows: auto auto;
             overflow-y: auto;
           }
           .vcc-panel { height: auto; }
-          .vcc-left  { border-right: none; border-bottom: 1px solid #e5e5e5; min-height: 320px; }
           .vcc-center { border-right: none; border-bottom: 1px solid #e5e5e5; }
           .vcc-right { border-left: none; }
-          .vcc-transcript-section { max-height: 220px; }
         }
         @media (prefers-reduced-motion: reduce) {
           .vcc-dynamic-island { transition: none !important; }
@@ -2648,107 +2340,6 @@ export default function VoiceTestPage() {
 
         {/* ═══════════════════════════════════════ BODY ═══════════════════════════════════════ */}
         <div className="vcc-body">
-
-          {/* ════════════════════ LEFT PANEL ════════════════════ */}
-          <aside className="vcc-panel vcc-left">
-            <div className="vcc-left-header">
-              <span className="vcc-left-title">Live Incident Room</span>
-              <span className="vcc-conn-badge">
-                <Dot color={connDotColor} />
-                {connectionState === 'CONNECTED' ? 'Connected' :
-                 connectionState === 'FETCHING_TOKEN' ? 'Authorizing...' :
-                 connectionState === 'JOINING' ? 'Joining...' :
-                 connectionState === 'ERROR' ? 'Error' : 'Disconnected'}
-              </span>
-            </div>
-
-            {/* Live Conversation */}
-            <div className="vcc-transcript-section">
-              <div className="vcc-section-label">Live Conversation</div>
-              <div
-                ref={transcriptContainerRef}
-                onScroll={handleTranscriptScroll}
-                className="vcc-transcript"
-                role="log"
-                aria-label="Live conversation transcript"
-                aria-live="polite"
-              >
-                {transcript.length === 0 ? (
-                  <div className="vcc-transcript-empty">
-                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#d0d0d0" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginBottom: 6 }}>
-                      <path d="M12 2a3 3 0 00-3 3v7a3 3 0 006 0V5a3 3 0 00-3-3z"/>
-                      <path d="M19 10v2a7 7 0 01-14 0v-2"/>
-                      <line x1="12" y1="19" x2="12" y2="22"/>
-                    </svg>
-                    No conversation yet
-                    <span style={{ fontSize: 10.5, marginTop: 2 }}>
-                      {isConnected ? 'Speak to begin real-time transcription' : 'Join the incident room to begin'}
-                    </span>
-                  </div>
-                ) : (
-                  transcript.map(entry => (
-                    <div key={entry.id} className={`vcc-msg ${entry.speaker === 'You' ? 'you' : 'ai'}`}>
-                      <div className="vcc-msg-header">
-                        <span className={`vcc-msg-speaker ${entry.speaker === 'You' ? 'you' : 'ai'}`}>
-                          {entry.speaker === 'You' ? 'Field Operator' : 'TOCSIN'}
-                        </span>
-                        <span className="vcc-msg-time">{entry.time}</span>
-                      </div>
-                      <div className="vcc-msg-text">{entry.text}</div>
-                    </div>
-                  ))
-                )}
-                {/* Streaming indicator when AI is speaking */}
-                {aiSpeaking && transcript.length > 0 && transcript[transcript.length - 1].speaker === 'AI Agent' && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', fontSize: 11, color: '#30d158', fontStyle: 'italic' }}>
-                    <span style={{ display: 'flex', gap: 3 }}>
-                      {[0, 0.2, 0.4].map((d, i) => (
-                        <span key={i} style={{ width: 5, height: 5, borderRadius: '50%', background: '#30d158', display: 'inline-block', animation: `vcc-blink 1s ${d}s ease-in-out infinite` }} />
-                      ))}
-                    </span>
-                    Tocsin is responding...
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Controls area */}
-            <div className="vcc-left-controls">
-              {/* Command / text input */}
-              <div className="vcc-cmd-row">
-                <input
-                  className="vcc-cmd-input"
-                  type="text"
-                  placeholder={isAwaitingReply ? 'Waiting for Tocsin to reply…' : 'Describe the incident or type a command...'}
-                  value={commandInput}
-                  onChange={e => setCommandInput(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleCommandSubmit()}
-                  aria-label="Type incident description or command"
-                  disabled={isAwaitingReply}
-                />
-                <button
-                  className="vcc-cmd-send"
-                  onClick={handleCommandSubmit}
-                  aria-label="Send command"
-                  disabled={isAwaitingReply}
-                  style={isAwaitingReply ? { opacity: 0.5, cursor: 'not-allowed' } : undefined}
-                >
-                  {isAwaitingReply ? (
-                    <span className="vcc-cmd-send-spinner" aria-hidden="true" />
-                  ) : (
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
-                    </svg>
-                  )}
-                </button>
-              </div>
-              {isAwaitingReply && (
-                <div className="vcc-cmd-thinking" aria-live="polite">
-                  TOCSIN is processing…
-                </div>
-              )}
-            </div>
-          </aside>
 
           {/* ════════════════════ CENTER PANEL (DYNAMIC ISLAND CALL UI) ════════════════════ */}
           <main className="vcc-panel vcc-center" role="main">
@@ -2844,14 +2435,14 @@ export default function VoiceTestPage() {
 
 
 
-              {/* ── Live Incident Map ──
+              {/* ── Live Incident Whiteboard (Excalidraw) ──
                   The centre column is where the conversation happens, so this is
                   where the incident gets drawn. Redraws itself from the evidence
                   record over the same WebSocket that feeds every other panel — no
                   refresh, no manual arranging, and nothing on it that a person in
-                  the room didn't actually say. See LiveIncidentMap.tsx. */}
+                  the room didn't actually say. See ExcalidrawIncidentMap.tsx. */}
               <div className="vcc-map-slot">
-                <LiveIncidentMap incident={activeIncident} />
+                <ExcalidrawIncidentMap incident={activeIncident} />
               </div>
             </div>
 
@@ -3136,14 +2727,6 @@ export default function VoiceTestPage() {
                   {activeIncident && (
                     <div className="vcc-inferred-note" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                       <AlertTriangleIcon /> Evidence assembled from ingested observations — verify before operational action
-                    </div>
-                  )}
-
-                  {transcript.length > 0 && (
-                    <div style={{ marginTop: 8, display: 'flex', justifyContent: 'flex-end' }}>
-                      <button onClick={handleClearTranscript} className="vcc-btn" style={{ fontSize: 10, padding: '3px 8px' }}>
-                        Clear Transcript
-                      </button>
                     </div>
                   )}
                 </div>

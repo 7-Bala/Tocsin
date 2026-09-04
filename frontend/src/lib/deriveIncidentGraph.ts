@@ -35,7 +35,7 @@ import {
  *     a real result, and hiding it would silently rewrite the room's history.
  *
  * Pure function: state in, structure out, no geometry and no side effects. Layout
- * lives in the renderer (LiveIncidentMap.tsx) so this whole ruleset stays testable
+ * lives in the renderer (ExcalidrawIncidentMap.tsx) so this whole ruleset stays testable
  * without a DOM.
  */
 

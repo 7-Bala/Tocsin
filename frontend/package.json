@@ -10,6 +10,7 @@
     "test": "npx tsx --test src/tests/*.test.ts"
   },
   "dependencies": {
+    "@excalidraw/excalidraw": "^0.18.1",
     "@ricky0123/vad-web": "0.0.30",
     "agora-agent-client-toolkit": "^2.9.1",
     "agora-rtc-sdk-ng": "4.24.7",
