@@ -4,6 +4,7 @@ import os
 import tempfile
 import pytest
 
+from app.engine import extraction
 from app.engine.database import init_db, close_db
 from app.engine.simulator import simulator
 
@@ -41,6 +42,13 @@ async def setup_test_env():
     # test_security_and_state_machine.py) override per-test via monkeypatch, which
     # runs after this fixture and restores cleanly.
     os.environ["TOCSIN_COMMANDER_KEY"] = "tocsin-commander-key"
+
+    # extraction.py's Gemini quota circuit breaker is deliberately module-level
+    # state (it has to survive across requests within one process to be useful
+    # at all), which makes it test-order-dependent unless reset here: a test
+    # that simulates a 429 would otherwise leave later, unrelated tests seeing
+    # Gemini as still "on cooldown" and skipping straight to Groq.
+    extraction._gemini_quota_blocked_until = 0.0
 
     try:
         await init_db()

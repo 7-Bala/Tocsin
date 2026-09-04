@@ -1132,3 +1132,69 @@ async def test_list_agents_blocked_when_credentials_missing(monkeypatch):
         resp = await client.get("/api/agora/agents")
 
     assert resp.status_code == 503
+
+
+# ─── Agent's combined RTC+RTM token must be Token 007 ───────────────────────
+# Regression test for the root cause confirmed live 2026-09-04 by an Agora
+# engineer inspecting the agent process directly: the agent's `properties.token`
+# was a Token 006 with a `kRtmLogin` privilege bolted onto it, which signs that
+# privilege against the RTC (channel, uid) pair instead of a real RTM login
+# grant. Agora's backend correctly rejected it -- the agent could still speak
+# (RTC still validated) but could never log into RTM, so it never published a
+# transcript. See app/vendor/agora_token007/__init__.py for the full account.
+#
+# Uses a real 32-character hex App ID/Certificate (unlike this file's other
+# `mock_app_id_...` fixtures) because Token 007's own validation rejects
+# non-hex identifiers outright (returns '' rather than raising) -- silently
+# masking exactly the kind of mistake this test exists to catch.
+_VALID_HEX_APP_ID = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+_VALID_HEX_APP_CERT = "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5"
+
+
+@pytest.mark.asyncio
+async def test_start_agent_token_is_token007_not_legacy_token006(monkeypatch):
+    monkeypatch.setenv("AGORA_APP_ID", _VALID_HEX_APP_ID)
+    monkeypatch.setenv("AGORA_APP_CERTIFICATE", _VALID_HEX_APP_CERT)
+    monkeypatch.setenv("AGORA_CUSTOMER_ID", "mock_customer_id")
+    monkeypatch.setenv("AGORA_CUSTOMER_SECRET", "mock_customer_secret")
+    monkeypatch.setenv("GEMINI_API_KEY", "mock_gemini_api_key")
+    monkeypatch.delenv("MCP_SERVER_PUBLIC_URL", raising=False)
+
+    mock_agora_response = Response(
+        status_code=200,
+        json={"agent_id": "agent_session_abc123", "status": "idle"},
+    )
+    mock_client_instance = AsyncMock()
+    mock_client_instance.post.return_value = mock_agora_response
+    mock_client_instance.__aenter__.return_value = mock_client_instance
+    mock_client_instance.__aexit__.return_value = None
+
+    with patch("app.api.agora.httpx.AsyncClient", return_value=mock_client_instance):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as test_client:
+            resp = await test_client.post(
+                "/api/agora/start-agent",
+                json={"channel_name": "emergency_test_room", "agent_uid": 9999, "voice": "Puck"},
+            )
+    assert resp.status_code == 200
+
+    sent_payload = mock_client_instance.post.call_args.kwargs["json"]
+    token = sent_payload["properties"]["token"]
+    assert token, "agent token must not be empty -- an empty token means build() silently rejected the app_id/cert"
+    assert token.startswith("007"), (
+        f"agent token must be Token 007 (prefix '007'), got prefix {token[:3]!r} -- "
+        "this is the exact defect that made the agent unable to log into RTM"
+    )
+
+    # The real builder, not a hand-rolled equivalent: cross-check against a
+    # directly-built token's decoded services rather than trusting the prefix
+    # alone. Token 007 is non-deterministic (random salt), so compare structure,
+    # not byte-for-byte equality.
+    from app.vendor.agora_token007.AccessToken2 import AccessToken as AccessToken007
+
+    parsed = AccessToken007(_VALID_HEX_APP_ID, _VALID_HEX_APP_CERT)
+    assert parsed.from_string(token) is True, "Agora's own AccessToken007 parser must accept this token"
+    service_types = {service.service_type() for service in parsed.services}
+    # kServiceTypeRtc = 1, kServiceTypeRtm = 2 (AccessToken2.py) -- both scopes
+    # must be present for the agent to have both RTC publish and RTM login.
+    assert service_types == {1, 2}, f"expected both RTC and RTM services, got {service_types}"

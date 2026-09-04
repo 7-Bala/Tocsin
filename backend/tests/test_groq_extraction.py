@@ -194,3 +194,82 @@ async def test_extract_intelligence_reaches_heuristic_when_neither_key_set(monke
     result = await extract_intelligence("The main pump is down and failing.", speaker="Field Tech")
 
     assert result.extraction_method == "heuristic_fallback"
+
+
+# ─── Gemini quota circuit breaker ────────────────────────────────────────────
+# Verifies the latency optimization added 2026-09-04: once a 429
+# RESOURCE_EXHAUSTED is observed, Gemini is skipped (not called at all) for the
+# rest of its stated retryDelay window, so every subsequent utterance during an
+# exhausted quota window doesn't pay a doomed round-trip before falling over to
+# Groq. This is a latency fix only -- extraction_method stays "llm" throughout.
+
+
+@pytest.fixture(autouse=True)
+def _reset_gemini_cooldown():
+    """Isolate the breaker's module-level state between tests in this file too."""
+    extraction_module._gemini_quota_blocked_until = 0.0
+    yield
+    extraction_module._gemini_quota_blocked_until = 0.0
+
+
+def test_note_gemini_quota_exhausted_opens_the_breaker():
+    error = Exception(
+        "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, "
+        "'details': [{'@type': 'type.googleapis.com/google.rpc.RetryInfo', "
+        "'retryDelay': '58s'}]}}"
+    )
+    assert extraction_module._gemini_quota_cooldown_active() is False
+    extraction_module._note_gemini_quota_exhausted(error)
+    assert extraction_module._gemini_quota_cooldown_active() is True
+
+
+def test_note_gemini_quota_exhausted_ignores_unrelated_errors():
+    """A network error or bad response must not open the breaker -- only a
+    confirmed quota exhaustion should skip Gemini on future calls."""
+    extraction_module._note_gemini_quota_exhausted(Exception("Connection reset by peer"))
+    assert extraction_module._gemini_quota_cooldown_active() is False
+
+
+@pytest.mark.asyncio
+async def test_extract_intelligence_skips_gemini_call_while_cooldown_active(monkeypatch):
+    """
+    The actual latency fix: while the breaker is open, extract_with_gemini is
+    never invoked at all (not called-and-failed) -- the call is skipped
+    outright -- and Groq serves the request instead, still labeled "llm".
+    """
+    monkeypatch.setenv("GROQ_API_KEY", "fake-groq-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini-key")
+    extraction_module._note_gemini_quota_exhausted(
+        Exception("429 RESOURCE_EXHAUSTED 'retryDelay': '58s'")
+    )
+
+    claim_payload = {
+        "category": "REPORT",
+        "content": "Groq handled this while Gemini was cooling down.",
+        "confidence": 0.9,
+        "evidence_status": "REPORTED",
+        "claims": [],
+        "action_items": [],
+        "missing_info": [],
+        "risks": [],
+        "decisions": [],
+    }
+    mock_response = _mock_groq_response(200, json_content=claim_payload)
+    gemini_call = AsyncMock(return_value=None)
+
+    with patch("app.engine.extraction.extract_with_gemini", gemini_call), \
+         patch("app.engine.extraction.httpx.AsyncClient", return_value=_mock_async_client(mock_response)):
+        result = await extract_intelligence("The main pump is failing.", speaker="Field Tech")
+
+    gemini_call.assert_not_called()
+    assert result.extraction_method == "llm"
+    assert result.content == "Groq handled this while Gemini was cooling down."
+
+
+def test_gemini_cooldown_never_exceeds_the_max_even_with_a_bogus_retry_delay():
+    """A malformed or absurd retryDelay must not disable Gemini indefinitely."""
+    extraction_module._note_gemini_quota_exhausted(
+        Exception("429 RESOURCE_EXHAUSTED 'retryDelay': '999999s'")
+    )
+    remaining = extraction_module._gemini_quota_blocked_until - __import__("time").monotonic()
+    assert remaining <= extraction_module._GEMINI_MAX_COOLDOWN_SECONDS

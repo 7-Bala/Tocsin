@@ -48,6 +48,15 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
  * database; the random suffix keeps two people opening the app in the same minute
  * from colliding into one another's incident.
  */
+/**
+ * How long after the agent stops speaking its audio is still treated as possibly
+ * bleeding into the microphone. Evaluated when an utterance STARTS (VAD, real
+ * time), so it only needs to cover the agent's trailing audio decay -- not
+ * Chrome's 1-3s SpeechRecognition finalization lag, which the old result-time
+ * check had to absorb by suppressing a full 3 seconds of genuine speech.
+ */
+const AGENT_ECHO_TAIL_MS = 700;
+
 function newRoomId(): string {
   const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
   const suffix = Math.random().toString(36).slice(2, 7);
@@ -300,11 +309,17 @@ export default function VoiceTestPage() {
   const isSpeakingRef      = useRef<boolean>(false);
   const aiSpeakingRef      = useRef<boolean>(false);
   const isConnectedRef     = useRef<boolean>(false);
-  // Chrome's local SpeechRecognition finalizes results with 1-3s of lag behind
-  // the actual audio, so checking aiSpeakingRef.current at result-time misses
-  // agent speech that already ended by the time onresult fires. Track when the
-  // agent last stopped speaking and extend suppression past that lag window.
+  // When the agent last stopped speaking. Used at VAD speech-start time (not at
+  // SpeechRecognition result time) to cover the agent's trailing audio still
+  // decaying out of the speakers as a new utterance begins.
   const aiSpeechEndedAtRef = useRef<number>(0);
+
+  // Whether the utterance currently being spoken belongs to the operator rather
+  // than to the agent's audio leaking back through the microphone. Decided once,
+  // in real time, when the VAD detects speech starting -- see onSpeechStart in
+  // handleJoin for why the decision cannot be deferred to result-time. Starts
+  // true so speech that begins before any agent activity is kept.
+  const currentUtteranceIsOperatorRef = useRef<boolean>(true);
 
   // ── Speech recognition refs ────────────────────────────────────────────
   const speechRecognitionRef       = useRef<any>(null);
@@ -1011,7 +1026,21 @@ export default function VoiceTestPage() {
       const { MicVAD } = await import('@ricky0123/vad-web');
       const myVad = await MicVAD.new({
         baseAssetPath: '/vad/', onnxWASMBasePath: '/vad/', model: 'v5',
-        onSpeechStart:    () => { vadCandidateRef.current = true; },
+        onSpeechStart: () => {
+          vadCandidateRef.current = true;
+          // Attribute this utterance NOW, while we still know whether the agent
+          // is speaking. Chrome finalizes SpeechRecognition results 1-3s after
+          // the speech actually ended, so deciding at finalize time (what this
+          // used to do) asks the question at the worst possible moment: the
+          // agent has typically started replying by then, and the operator's
+          // own sentence gets discarded as echo. Each reply pushed the cooldown
+          // forward, so in a real back-and-forth every line was dropped and the
+          // evidence record stayed empty. VAD fires in real time, so this is
+          // the honest point to judge who is talking.
+          currentUtteranceIsOperatorRef.current =
+            !aiSpeakingRef.current &&
+            Date.now() - aiSpeechEndedAtRef.current >= AGENT_ECHO_TAIL_MS;
+        },
         onSpeechEnd:      () => { vadCandidateRef.current = false; },
         onFrameProcessed: (p: any) => {
           const prob = Math.round((p?.isSpeech || 0) * 100);
@@ -1045,19 +1074,22 @@ export default function VoiceTestPage() {
           for (let i = event.resultIndex; i < event.results.length; i++) {
             if (!event.results[i].isFinal) continue;
             // Chrome's local SpeechRecognition transcribes whatever the mic
-            // picks up -- it cannot distinguish the operator's own voice from the
-            // agent's speaker audio leaking back into the mic (common on
+            // picks up -- it cannot distinguish the operator's own voice from
+            // the agent's speaker audio leaking back into the mic (common on
             // built-in laptop mic+speaker setups without headphones). Every
             // result from this path is unconditionally labeled 'You' below, so
-            // without this guard, agent speech bleeding into the mic gets
-            // mislabeled as the operator's own words. Suppress results while the
-            // agent is actively speaking (aiSpeakingRef, tracked via the RTC
-            // volume indicator) AND for a cooldown window after it stops --
-            // Chrome finalizes SpeechRecognition results 1-3s behind the actual
-            // audio, so a same-instant check alone misses agent speech that
-            // already ended by the time onresult fires.
-            if (aiSpeakingRef.current) continue;
-            if (Date.now() - aiSpeechEndedAtRef.current < 3000) continue;
+            // agent speech bleeding into the mic must not reach the evidence
+            // record as the operator's own words.
+            //
+            // The verdict was decided in real time by the VAD's onSpeechStart
+            // above, not here. Re-checking aiSpeakingRef at this point (what
+            // this code used to do) is unreliable in the one direction that
+            // matters: Chrome delivers this callback 1-3s after the speech
+            // ended, by which time the agent is usually mid-reply, so genuine
+            // operator speech was being thrown away. Live-reported 2026-09-04:
+            // a full six-line incident script produced zero observations
+            // because every line was suppressed this way.
+            if (!currentUtteranceIsOperatorRef.current) continue;
             const text = event.results[i][0].transcript.trim();
             if (text.length < 2) continue;
             ingestObservationRef.current('You', text);

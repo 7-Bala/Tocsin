@@ -696,6 +696,75 @@ answer from Agora directly (mentor channel or support), with this section handed
 as the precise, already-isolated repro: RTM connects, subscribes, agent audibly
 speaks, nothing arrives.
 
+### UPDATE 2026-09-04 — ROOT CAUSE FOUND AND FIXED: the agent's own RTM token was invalid; RTM transcript delivery now VERIFIED IN CODE (live)
+
+Escalated the exact repro above to an Agora engineer (mentor's contact, works at
+Agora) via the project's App ID. He inspected the agent process directly and
+reported: **"the token for rtm provided to the agent is wrong... the agent side is
+unable to connect to rtm because of faulty token -> the agent isn't able to send
+the transcript to the client."**
+
+Traced this to `app/api/agora.py`'s construction of the agent's combined RTC+RTM
+token (`properties.token` in the join payload — official docs confirm this single
+field, quoted via a fresh fetch of
+`docs-md.agora.io/en/conversational-ai/rest-api/agent/join.md`: *"Before enabling
+the Signaling service, make sure the token includes both RTC and RTM
+privileges... When an agent joins an RTM channel, it reuses the token specified in
+the `token` field."*). The code built a **Token 006** (`agora_token_builder`'s
+`AccessToken` class — the only token version that PyPI package implements) and
+manually added a `kRtmLogin` privilege bit to it. Reading that library's own
+source (`RtmTokenBuilder.py`) shows why this doesn't work: a real standalone RTM
+token signs its privilege with the account in the *channelName* slot and an
+*empty* uid slot (`AccessToken(appId, appCertificate, userAccount, "")`) — but
+this project's combined token signed everything against the real RTC
+`(channel_name, agent_uid)` pair instead, because Token 006 can only bind
+privileges to one (channelName, uid) tuple for the whole token. There is no way
+to express "RTC on channel X for account Y" AND "RTM login for account Y, no
+channel" in one Token 006 signature. The agent's RTC privileges validated fine
+(hence audible speech, confirmed working this whole time); RTM login did not.
+
+Confirmed via the official token-generation FAQ
+(`docs.agora.io/en/help/integration-issues/rtc_rtm_token`, and the RtcTokenBuilder2
+source it points to, `github.com/AgoraIO/Tools/.../python3/src/RtcTokenBuilder2.py`,
+MIT licensed) that the actually-documented way to build this combined token is
+**Token 007**, via `RtcTokenBuilder2.build_token_with_rtm()`. Token 007 signs each
+privilege scope ("service") independently — one token can carry a `ServiceRtc`
+scope (bound to channel+account) and a `ServiceRtm` scope (bound to just the
+account) at once, which is the actual documented mechanism for what
+`properties.token` is required to do.
+
+`agora-token-builder==1.0.0` (the PyPI package this project already depends on for
+the browser's own RTC/RTM tokens, which remain correct and unchanged) has no Token
+007 implementation at all — this isn't a version bump, it's a genuinely separate
+builder. Vendored the three relevant files directly from `AgoraIO/Tools` (MIT) into
+`app/vendor/agora_token007/` (`AccessToken2.py`, `Packer.py`, `RtcTokenBuilder2.py`,
+plus a provenance `__init__.py`) since Agora does not publish this as an installable
+package. `app/api/agora.py`'s agent-token construction now calls
+`agora_token007.RtcTokenBuilder.build_token_with_rtm(app_id, app_certificate,
+channel_name, str(agent_uid), Role_Publisher, expire_seconds, expire_seconds)`.
+
+**Live-verified end-to-end**, not just "Agora's REST API accepted the join" (which
+the broken token also achieved, since it validated fine for RTC): joined a real
+channel as a real RTC+RTM client in Chrome, started a real agent with the new
+token, forced verbatim speech via `POST /api/agora/speak`
+(`"Testing transcript delivery over signaling channel now."`), and confirmed via
+`docker compose logs backend` that `POST /api/incidents/{id}/observations` fired
+multiple times with `speaker: "AI Agent"`, and via
+`docker compose exec postgres psql` that the resulting claims table held content
+directly derived from that sentence (`entity="signaling channel",
+value="testing transcript delivery"`, `entity="transcript delivery over signaling",
+value="testing"`, both `extraction_method="llm"`). The dashboard's whiteboard,
+Live Situation tiles, and incident title (auto-derived to "Signaling Channel —
+Testing Transcript Delivery") all reflected it live. **This is the first time in
+this project's history that an agent's spoken words have become a structured
+observation.**
+
+**Status:** RTM transcript delivery — `VERIFIED IN CODE`, live-tested against a
+real Agora account, real ConvoAI agent, and real Postgres. Regression test added:
+`backend/tests/test_agora_token.py::test_start_agent_token_is_token007_not_legacy_token006`
+asserts the outbound `properties.token` starts with `"007"` and, using Agora's own
+`AccessToken2` parser, that it decodes into both an RTC and an RTM service scope.
+
 ## 10. Spoken audio summary broadcast — now IMPLEMENTED (2026-08-31)
 
 Official schema (`docs.agora.io/en/api-reference/api-ref/conversational-ai/speak`,
@@ -964,6 +1033,7 @@ carries that status, because no live credentialed run was performed in this pass
 | Agora RTC channel-name policy (local regex) | `VERIFIED IN CODE` | Deliberately stricter than Agora's documented allowed character set; this is a local safety choice, not a claim about Agora's behavior, so it needed no live verification. |
 | `agora-token-builder` (PyPI) as the token-generation implementation | `UNVERIFIED` | Functions correctly in this repo's own mocked tests; official docs name only the reference GitHub repo, not this specific PyPI package, as canonical. |
 | Spoken audio summary broadcast into an active Agora channel | `VERIFIED IN CODE` | See the `/speak` row above — implemented 2026-08-31, audio delivery live-verified 2026-09-03. |
+| Agent-side RTM transcript delivery (`properties.token` combined RTC+RTM auth) | `VERIFIED IN CODE` | **Root cause found and fixed 2026-09-04** (see §9 update): agent's combined token was Token 006 with a bolted-on `kRtmLogin` bit, invalid for RTM login (confirmed by an Agora engineer inspecting the agent process). Fixed via a vendored Token 007 builder (`app/vendor/agora_token007/`, `RtcTokenBuilder2.build_token_with_rtm`). Live-verified: forced agent speech via `/speak`, confirmed `POST /api/incidents/{id}/observations` fired with `speaker: "AI Agent"` and matching claim content in Postgres. |
 
 ---
 

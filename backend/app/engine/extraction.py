@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -241,8 +242,59 @@ async def extract_with_gemini(
         )
         return None
     except Exception as e:
+        _note_gemini_quota_exhausted(e)
         logger.warning(f"Gemini extraction failed: {type(e).__name__}: {e}. Falling back to heuristics.")
         return None
+
+
+# ─── Gemini quota circuit breaker ────────────────────────────────────────────
+#
+# Gemini's free tier is 20 requests/day/model and its 429 response carries a
+# retryDelay saying when the window reopens. Without this, every observation
+# during an exhausted window still pays a full doomed round-trip to Gemini
+# before failing over to Groq -- adding ~1-2s of latency to each utterance,
+# which is visible on screen as every panel lagging behind the conversation.
+# This is a latency optimization only: the fallback chain and the extraction
+# labels are unchanged, and the breaker opens for at most _GEMINI_MAX_COOLDOWN.
+_gemini_quota_blocked_until: float = 0.0
+_GEMINI_MAX_COOLDOWN_SECONDS = 3600.0
+_GEMINI_DEFAULT_COOLDOWN_SECONDS = 60.0
+
+
+def _gemini_quota_cooldown_active() -> bool:
+    """True while Gemini's quota window is known to still be exhausted."""
+    return time.monotonic() < _gemini_quota_blocked_until
+
+
+def _note_gemini_quota_exhausted(error: Exception) -> None:
+    """
+    Record a 429 RESOURCE_EXHAUSTED so the next utterances skip Gemini.
+
+    Prefers the server's own `retryDelay` when present; falls back to a
+    conservative default when the message cannot be parsed. Never trusts the
+    value beyond an hour -- a malformed or absurd delay must not disable Gemini
+    for the rest of the process's life.
+    """
+    global _gemini_quota_blocked_until
+
+    text = str(error)
+    if "RESOURCE_EXHAUSTED" not in text and "429" not in text:
+        return
+
+    seconds = _GEMINI_DEFAULT_COOLDOWN_SECONDS
+    match = re.search(r"'retryDelay':\s*'(\d+(?:\.\d+)?)s'", text)
+    if match:
+        try:
+            seconds = float(match.group(1))
+        except ValueError:
+            pass
+
+    seconds = max(0.0, min(seconds, _GEMINI_MAX_COOLDOWN_SECONDS))
+    _gemini_quota_blocked_until = time.monotonic() + seconds
+    logger.warning(
+        f"Gemini quota exhausted; skipping Gemini for {seconds:.0f}s and using Groq. "
+        "Extraction stays LLM-backed -- this is not a downgrade to heuristics."
+    )
 
 
 async def extract_with_groq(
@@ -532,14 +584,24 @@ async def extract_intelligence(
     Pipeline (user-directed order, 2026-09-01: Gemini stays primary; Groq is the
     fallback for when Gemini's tighter free-tier quota (20 req/day, observed
     exhausted live 2026-08-31) runs out, not a replacement for it):
-    1. Try Gemini LLM extraction via modern google.genai SDK.
+    1. Try Gemini LLM extraction via modern google.genai SDK -- unless a
+       recent 429 already told us its quota window is exhausted, in which
+       case this call is skipped for that window (see
+       _gemini_quota_cooldown_active) rather than paying a doomed round-trip
+       on every single utterance.
     2. If unavailable or fails (including quota exhaustion): try Groq, if
        GROQ_API_KEY is configured.
     3. If both unavailable or fail: use HeuristicExtractor (fallback, clearly labeled).
     """
-    result = await extract_with_gemini(utterance, speaker, incident_context)
-    if result is not None:
-        return result
+    if _gemini_quota_cooldown_active():
+        # Skip a call that is known to fail. Gemini's 429 tells us exactly how
+        # long its quota window has left; retrying inside that window costs a
+        # round-trip per utterance and delays every panel on screen behind it.
+        logger.debug("Gemini quota cooldown active; going straight to Groq.")
+    else:
+        result = await extract_with_gemini(utterance, speaker, incident_context)
+        if result is not None:
+            return result
 
     result = await extract_with_groq(utterance, speaker, incident_context)
     if result is not None:

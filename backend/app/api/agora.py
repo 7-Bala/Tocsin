@@ -23,9 +23,11 @@ import time
 from typing import Any, Literal
 
 import httpx
-from agora_token_builder import AccessToken, RtcTokenBuilder, RtmTokenBuilder  # type: ignore[import-untyped]
+from agora_token_builder import RtcTokenBuilder, RtmTokenBuilder  # type: ignore[import-untyped]
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
+
+from app.vendor import agora_token007
 
 logger = logging.getLogger("tocsin.api.agora")
 
@@ -703,21 +705,34 @@ async def start_conversational_agent(
   # Generate short-lived combined RTC+RTM token specifically for the agent participant.
   # Per official Agora join.md docs, the agent joins the RTM channel by reusing
   # properties.token, which requires both RTC (publisher/subscriber) and RTM privileges.
+  #
+  # MUST be Token 007 (RtcTokenBuilder2.build_token_with_rtm), not Token 006. Root
+  # cause found live 2026-09-04 by an Agora engineer inspecting the agent process
+  # directly: the previous code below built a Token 006 (agora_token_builder's
+  # AccessToken class) and bolted a `kRtmLogin` privilege onto it. Token 006
+  # signs all privileges against a single
+  # (channelName, uid) pair, so that token asserted "RTM login for account
+  # str(agent_uid), scoped to channel_name" -- not a real RTM login grant, which
+  # Agora's backend correctly rejected. The agent could still speak (RTC
+  # validated fine) but could never log into RTM, so it could never publish a
+  # transcript message -- this is *the* root cause of "the agent speaks but no
+  # transcript ever arrives" (docs/agora/RESEARCH.md §9, TODO.md). Token 007
+  # signs each privilege scope ("service") independently, so one token can
+  # correctly carry both "RTC publish on channel_name for this account" and
+  # "RTM login for this account" (no channel) at once. See
+  # app/vendor/agora_token007/__init__.py for provenance and why this is a new
+  # vendored module rather than a fix inside agora_token_builder (that PyPI
+  # package has no Token 007 implementation at all).
   expire_seconds = 3600
-  current_timestamp = int(time.time())
-  privilege_expired_ts = current_timestamp + expire_seconds
-  tok = AccessToken.AccessToken(
+  agent_token = agora_token007.RtcTokenBuilder.build_token_with_rtm(
     app_id,
     app_certificate,
     channel_name,
     str(request.agent_uid),
+    agora_token007.Role_Publisher,
+    expire_seconds,
+    expire_seconds,
   )
-  tok.addPrivilege(AccessToken.kJoinChannel, privilege_expired_ts)
-  tok.addPrivilege(AccessToken.kPublishAudioStream, privilege_expired_ts)
-  tok.addPrivilege(AccessToken.kPublishVideoStream, privilege_expired_ts)
-  tok.addPrivilege(AccessToken.kPublishDataStream, privilege_expired_ts)
-  tok.addPrivilege(AccessToken.kRtmLogin, privilege_expired_ts)
-  agent_token = tok.build()
 
   # Construct Basic Auth header
   auth_str = f"{customer_id}:{customer_secret}"

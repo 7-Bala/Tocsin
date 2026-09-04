@@ -5,11 +5,25 @@ Auto-maintained by Claude: an entry is added when work is identified, and delete
 it's done. Do not treat an entry's presence here as "not started"; check the note for
 current state. This file is the resume point after any session/context reset.
 
-Last updated: 2026-09-03 (real Chrome connected with real mic access for the first
-time this session — confirmed `/speak` actually produces audible output, not just
-an accepted API call, by tapping the page's own audio analyser and catching a real
+Last updated: 2026-09-04 (found and fixed the actual root cause of the long-standing
+"agent speaks but transcripts never arrive" mystery, escalated to and confirmed by
+an Agora engineer directly: the agent's combined RTC+RTM token was built with the
+wrong token version — Token 006 with a bolted-on RTM privilege bit, instead of the
+documented Token 007 combined-service format. Vendored a Token 007 builder from
+AgoraIO/Tools and switched the agent-token construction to it; live-verified
+end-to-end via `/speak` + real observation ingestion + real Postgres claims, not
+just Agora accepting the join. Also this session: rebuilt the incident model so
+the voice room *is* the incident (created on join, purged on leave, no picker, no
+pre-seeded data); fixed the operator's-own-speech echo guard (moved attribution
+from SpeechRecognition's delayed result-time to VAD's real-time speech-start, not
+yet live-mic-verified); added a Gemini-quota circuit breaker so an exhausted quota
+window doesn't pay a doomed round-trip per utterance.
+
+Prior session (2026-09-03): real Chrome connected with real mic access for the
+first time — confirmed `/speak` actually produces audible output, not just an
+accepted API call, by tapping the page's own audio analyser and catching a real
 speech envelope; found and fixed a stale hardcoded "Gemini Live Agent" join-log
-message that didn't reflect the actual running pipeline. Earlier this session:
+message that didn't reflect the actual running pipeline. Earlier that session:
 installed Agora Skills on a mentor's recommendation and found the real root cause
 of the long-standing "MCP tools get listed but never called" mystery (undocumented
 "sse" transport instead of the documented "streamable_http") — fixed and
@@ -23,75 +37,70 @@ evidence existed.).
 
 ## P0 — Breaks the demo / actively misleading
 
-### The agent's spoken replies never become transcript text or evidence — corrects an earlier overclaim
-**Status:** re-opened and downgraded 2026-09-04 after exhaustive live testing. The
-2026-09-01 entry below this one claimed RTM transcript delivery was "producing
-correctly-labeled agent transcripts," verified by one agent response appearing
-correctly labeled TOCSIN in the transcript panel. That was **not actually proof of
-RTM delivery** — a fresh, much more careful live session tonight (real Chrome, real
-mic, real Agora account, both pipelines, `agent-think` and `/speak`) found that
-**zero RTM (or RTC stream-message fallback) transcript messages have ever been
-received from the agent**, despite: the join payload matching every documented
-requirement (`enable_rtm: true`, `data_channel: "rtm"`); RTM login and channel
-subscribe both completing successfully every single time; and the agent **audibly
-speaking**, independently confirmed two different ways (a direct Web Audio analyser
-tap on its RTC track showing real speech envelopes, and Agora's own SDK emitting
-real `AUDIO_OUTPUT_LEVEL_TOO_LOW`/`RECOVER` events at the right moments).
+### Operator's own speech was being suppressed by the mic-echo guard — fixed, NOT YET LIVE-VERIFIED
+**Status:** code changed 2026-09-04, backend suite green, but the fix itself needs a
+real microphone in a live join to confirm. Do not mark done until that happens.
 
-Also fixed in the same pass, per the official `agora-agent-client-toolkit`'s own
-documented requirement ("RTM identity must match the RTM token subject; often
-`String(rtcUid)`"): the RTM login identity was `tocsin-voicetest-<uid>`, not the
-bare uid. Corrected to `String(uid)` in `voice-test/page.tsx`. This did **not**
-close the gap — transcripts still never arrive, so the identity mismatch was a real
-bug worth fixing but not the (or not the only) root cause.
+Root cause, confirmed via `docker compose logs backend`: across a full live test
+session reading the identity-outage script, **zero**
+`POST /api/incidents/{id}/observations` ever reached the backend. The old guard in
+`voice-test/page.tsx`'s `SpeechRecognition.onresult` checked `aiSpeakingRef.current`
+and a 3s post-agent-speech cooldown **at result-finalization time** — but Chrome
+finalizes results 1-3s after the audio actually happened, so by the time a check
+ran, the agent had usually already started replying (it greets on join and answers
+every line). Every operator line landed inside the suppression window and was
+silently dropped; each agent reply pushed the cooldown forward, cascading.
 
-**What this means concretely:** the operator's own spoken words still work — they
-reach evidence via the browser's own `SpeechRecognition`, entirely independent of
-RTM — so tiles/map/timeline do update from what a human says. What's actually
-broken is one direction only: nothing Tocsin *says back* ever becomes transcript
-text or feeds back into the evidence record structurally.
+Fix: moved the attribution decision to `onSpeechStart` (VAD, real-time) instead of
+result-finalize time — `currentUtteranceIsOperatorRef` is set once when speech
+begins, using `aiSpeakingRef` + a much shorter 700ms tail (`AGENT_ECHO_TAIL_MS`,
+just covering the agent's own trailing audio decay, not Chrome's lag). `onresult`
+now just reads that verdict instead of re-deciding it too late.
 
-**Update (later same day):** migrated the client transport to the official
-`agora-agent-client-toolkit` and fixed a genuine RTM channel-subscribe bug in
-doing so (the toolkit itself never opens the RTM channel; the app must). RTM
-events started flowing for the first time (`presence` confirmed arriving) — but
-`assistant.transcription` still never did.
+Next step: join a real channel with a real mic, read the identity-outage script,
+confirm utterances land in `/observations` and the title/tiles/timeline update.
 
-Four further, previously-untried fixes were then made and live-tested one at a
-time: `remote_rtc_uids` from wildcard to an explicit uid (matches every official
-example; no other example uses a wildcard), `output_modalities` to
-`["text","audio"]`, and the exact payload verified byte-for-byte against the
-official `agora-agents` Python SDK's own `GeminiLiveOptions.to_config()` source —
-confirming this project's hand-built JSON already matches what the SDK itself
-would generate, field for field. None of the four changed the outcome. With
-every fix applied together, the agent still spoke audibly (confirmed via a real
-`RemoteAudioTrack.play`/`playing` event in the console) — the pipeline runs
-end-to-end — but RTM never delivered a `message` event of any kind, only the
-`presence` events Signaling generates automatically on join/leave.
+### ✅ The agent's spoken replies never became transcript text or evidence — ROOT CAUSE FOUND AND FIXED (2026-09-04)
+**Status:** resolved and live-verified. Everything below this line, going back to
+2026-09-01, was investigation of a real defect from the client side, which was
+the wrong side to look at: the agent connects to RTM correctly, subscribes
+correctly, and speaks audibly — but the agent's own RTM **login** was silently
+rejected by Agora's backend the entire time, because the agent's combined RTC+RTM
+authorization token was built wrong.
 
-**This is now closed as a local investigation.** Every documented and
-SDK-source-level lever has been pulled, correctly, and verified live twice. The
-remaining candidates (a preview-model transcription limitation, or an
-account-level restriction on agent-side RTM publish specifically) are outside
-what this codebase can diagnose further. See `docs/agora/RESEARCH.md` §9's final
-2026-09-04 update for the isolated repro to hand to Agora support directly.
+Escalated the exact repro (RTM connects, subscribes, agent speaks, nothing
+arrives) to an Agora engineer via the mentor channel. He inspected the agent
+process directly and reported the token was invalid. Traced it to
+`app/api/agora.py`: the agent's `properties.token` was built as a **Token 006**
+(`agora_token_builder.AccessToken`, the only version that project's existing PyPI
+dependency implements) with a `kRtmLogin` privilege bit manually added — but
+Token 006 signs every privilege against one `(channelName, uid)` pair, so this
+signed "RTM login for the agent's account, scoped to the RTC channel," which is
+not a real RTM login grant and was correctly rejected. Official docs (fetched
+fresh) name the actual mechanism: **Token 007** via
+`RtcTokenBuilder2.build_token_with_rtm()`, which signs RTC and RTM as independent
+scopes in one token. Vendored the three needed files from `AgoraIO/Tools` (MIT
+licensed; not published as an installable package) into
+`app/vendor/agora_token007/` and switched the agent-token construction to it.
+
+**Live-verified end-to-end, not just "Agora accepted the join"** (the broken
+token was accepted too, since RTC still validated): joined a real channel in
+Chrome, started a real agent with the new token, forced verbatim speech via
+`POST /api/agora/speak`, and confirmed `POST /api/incidents/{id}/observations`
+fired with `speaker: "AI Agent"` and matching claim content in Postgres —
+the whiteboard, tiles, and auto-derived title all updated live from it. **This
+is the first time in this project's history an agent's spoken words became a
+structured observation.** Regression test:
+`test_agora_token.py::test_start_agent_token_is_token007_not_legacy_token006`.
+Full account: `docs/agora/RESEARCH.md` §9's 2026-09-04 update.
+
+Everything below this line is the (now-explained) investigation history, kept
+for context rather than deleted, since it correctly ruled out every client-side
+cause before the real one was found on the agent side:
 
 ---
 
 ## P1 — Real but narrower
-
-### 5. RTM transcript delivery — now producing correctly-labeled agent transcripts
-**Status:** substantially more verified 2026-09-01. Root cause of the whole day's
-"never works" pattern found: `agora-rtm` was declared in `package.json` but its
-dynamic `import('agora-rtm')` had no logging around it and no timeout, so a stall
-was indistinguishable from "still trying" — fixed with explicit step logging and a
-10s timeout per call in `agoraRtmTranscripts.ts`. Live-verified in real Chrome with
-a real microphone: a genuine agent response ("Logged as UNCLASSIFIED (UNVERIFIED)...")
-appeared correctly labeled **TOCSIN**, not Field Operator — confirming
-speaker-correct transcript delivery is working end-to-end, through either RTM or
-the legacy stream-message fallback (both call the same labeling path; which one
-fired specifically was not pinned down this pass due to console-log capture
-unreliability in this environment — worth confirming precisely next session).
 
 ### 7. Gemini API latency is inconsistent in this environment — worth monitoring
 **Status:** observed, mitigated (not "fixed" — the underlying cause is external).
@@ -560,6 +569,20 @@ None open right now.
   live API slowness to verify. Live-verified: a real call now either completes in
   ~1-12s or falls back cleanly at the 12s mark with a labeled, honest reply — never
   hangs.
+- ✅ **Gemini quota circuit breaker** (2026-09-04): free-tier quota (20 req/day/model)
+  was observed exhausted live (`429 RESOURCE_EXHAUSTED`), and every single utterance
+  after that point still paid a full doomed round-trip to Gemini before falling
+  over to Groq — extraction stayed correctly labeled `"llm"` throughout (Groq
+  covers for Gemini transparently), but with added latency on every panel update.
+  `extract_intelligence()` now records the 429's own `retryDelay` and skips the
+  Gemini call outright for that window (capped at 1h against a malformed delay),
+  going straight to Groq. Verified live: `docker compose logs backend` showed
+  `429 ... retryDelay: '59s'` immediately followed by `POST
+  api.groq.com/... 200 OK`, confirmed `extraction_method='llm'` in Postgres.
+  Regression tests added in `test_groq_extraction.py`; found and fixed a real
+  cross-test leak from the new module-level cooldown state via a conftest.py
+  autouse reset (`test_extract_intelligence_tries_gemini_before_groq` was failing
+  in the full suite run only, not in isolation, until fixed).
 - ✅ **Gemini model retirement fix** (2026-08-31): `gemini-2.5-flash` was retired by
   Google (404, "no longer available to new users"), silently degrading every
   extraction to the heuristic fallback. Live-tested `gemini-3.6-flash` (worked, then
