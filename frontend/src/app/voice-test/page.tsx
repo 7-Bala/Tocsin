@@ -1551,7 +1551,7 @@ export default function VoiceTestPage() {
         .vcc-map-slot {
           width: 100%;
           max-width: 760px;
-          margin-top: 24px;
+          margin-bottom: 24px;
           flex-shrink: 0;
         }
 
@@ -2458,6 +2458,17 @@ export default function VoiceTestPage() {
           <main className="vcc-panel vcc-center" role="main">
             <div className="vcc-center-inner">
 
+              {/* ── Live Incident Whiteboard (Excalidraw) ──
+                  Moved above the mic/dynamic-island cluster so the evidence
+                  map is the first thing in view. Redraws itself from the
+                  evidence record over the same WebSocket that feeds every
+                  other panel — no refresh, no manual arranging, and nothing
+                  on it that a person in the room didn't actually say. See
+                  ExcalidrawIncidentMap.tsx. */}
+              <div className="vcc-map-slot">
+                <ExcalidrawIncidentMap incident={activeIncident} />
+              </div>
+
               {/* ── Centered Interaction Cluster (42px Mic + 12px Gap + 310px Dynamic Island) ── */}
               <div className="vcc-interaction-cluster" role="region" aria-label="Voice interaction control and visualizer">
                 {/* Standalone 42px Circular Mic Button */}
@@ -2544,18 +2555,6 @@ export default function VoiceTestPage() {
                     )}
                   </div>
                 )}
-              </div>
-
-
-
-              {/* ── Live Incident Whiteboard (Excalidraw) ──
-                  The centre column is where the conversation happens, so this is
-                  where the incident gets drawn. Redraws itself from the evidence
-                  record over the same WebSocket that feeds every other panel — no
-                  refresh, no manual arranging, and nothing on it that a person in
-                  the room didn't actually say. See ExcalidrawIncidentMap.tsx. */}
-              <div className="vcc-map-slot">
-                <ExcalidrawIncidentMap incident={activeIncident} />
               </div>
             </div>
 
