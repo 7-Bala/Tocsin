@@ -92,7 +92,7 @@ docker compose up --build -d
 echo -ne "${CYAN}⏳ Verifying health of backend, database, and mock services...${NC}"
 MAX_HEALTH_RETRIES=30
 HEALTH_COUNT=0
-until curl -s -f http://localhost:8000/health >/dev/null 2>&1 && curl -s --head --max-time 1 http://localhost:8001/sse >/dev/null 2>&1; do
+until curl -s -f http://localhost:8000/health >/dev/null 2>&1 && curl -s --max-time 1 http://localhost:8001/mcp >/dev/null 2>&1; do
   sleep 1
   HEALTH_COUNT=$((HEALTH_COUNT + 1))
   if [ $HEALTH_COUNT -ge $MAX_HEALTH_RETRIES ]; then
@@ -215,7 +215,7 @@ echo -e "${BOLD}📍 Access URLs:${NC}"
 echo -e "  • ${BOLD}Command Dashboard:${NC}   ${CYAN}http://localhost:3000${NC}"
 echo -e "  • ${BOLD}Voice AI Test Room:${NC}  ${CYAN}http://localhost:3000/voice-test${NC}"
 echo -e "  • ${BOLD}Backend REST API:${NC}    ${CYAN}http://localhost:8000/docs${NC}"
-echo -e "  • ${BOLD}Emergency Tools MCP:${NC} ${CYAN}http://localhost:8001/sse${NC}"
+echo -e "  • ${BOLD}Emergency Tools MCP:${NC} ${CYAN}http://localhost:8001/mcp${NC}"
 if [ -n "$NGROK_URL" ]; then
   echo -e "  • ${BOLD}🔗 MCP Public Tunnel:${NC} ${GREEN}${BOLD}${NGROK_URL}${NC} ${YELLOW}(may change on next restart — free tier)${NC}"
 else

@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tocsin-stack",
+      "url": "http://localhost:3002"
+    },
+    {
+      "name": "tocsin-backend",
+      "url": "http://localhost:8000/docs"
+    },
+    {
+      "name": "tocsin-mock-services",
+      "url": "http://localhost:8001/mcp"
+    }
+  ]
+}
