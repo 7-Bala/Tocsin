@@ -106,3 +106,45 @@ the request contract stays pinned without paging a human on every test run.
 (microphone → ASR → LLM → tool call) rather than `agent-think` injection. The
 injection path exercises the agent's judgment and the full MCP/PagerDuty chain, but
 not Agora's ASR front-end. Needs a human at a microphone; Claude has none.
+
+## "How does Tocsin know who is on call this week?"
+
+**It doesn't — deliberately.** Tocsin stores no on-call roster, no schedule, and no
+phone numbers or contact details for anyone.
+
+PagerDuty's **escalation policy** owns that entirely. Tocsin fires one event at a
+routing key; PagerDuty then resolves "who is on call right now" against its own
+schedule and contacts them however that policy specifies (push, SMS, phone call),
+including retry and escalation to a secondary if the first responder doesn't ack.
+
+Why this is the right split, not a shortcut:
+- **No stale roster.** An on-call rota changes weekly. A copy inside Tocsin would
+  silently page last week's engineer the moment it drifted.
+- **No PII.** Tocsin never holds a real person's phone number or email, which
+  matters for a hackathon prototype handled by people other than its author.
+- **Escalation is a solved, hard problem.** Retry timing, ack windows, secondary
+  escalation, timezone-aware handoffs, holiday overrides — PagerDuty does all of
+  this. Reimplementing it badly would be strictly worse.
+
+The only thing Tocsin decides is **whether this is worth paging a human about, and
+at what severity** — which is the actual judgment call, and the part that is
+verified working (see the status table above).
+
+### Possible extensions, if wanted later
+
+Ranked by value-to-effort, none implemented:
+
+1. **Read back who was paged.** After a successful trigger, PagerDuty's REST API
+   (`GET /incidents/{id}`, needs a separate API token — not the routing key) can
+   report which responder it actually reached. The agent could then say "I've
+   paged Dave, he's on call" out loud instead of "I've paged the on-call
+   engineer." Highest demo value for the least work.
+2. **Acknowledge/resolve from the room.** `event_action` also accepts
+   `acknowledge` and `resolve`. A commander saying "I've got this" could ack the
+   page without leaving the call.
+3. **Link the PagerDuty incident back into the Tocsin record.** Store the returned
+   `dedup_key` on the Tocsin incident so the two systems cross-reference, and the
+   final report can state exactly who was paged and when.
+4. **Escalate on silence.** If a page goes unacknowledged for N minutes and the
+   conversation is still active, the agent could say so in the room — turning
+   PagerDuty's escalation into something the humans in the call actually hear.
