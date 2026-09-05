@@ -12,6 +12,7 @@ Pipeline:
 
 import hashlib
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -56,10 +57,30 @@ router = APIRouter(prefix="/api/incidents", tags=["Observations"])
 _dedup_cache: dict[str, dict[str, datetime]] = {}
 _DEDUP_WINDOW_SECONDS = 30
 
+# Recent normalized utterance text per incident, for prefix (not just exact)
+# deduplication: (incident_id → [(normalized_text, speaker, timestamp)]).
+_recent_texts: dict[str, list[tuple[str, str, datetime]]] = {}
+_RECENT_TEXT_WINDOW = 25
+
+# An utterance shorter than this is treated as a transcript fragment rather than
+# a statement. Deliberately 2, not 3: the growing-partial flood is already
+# handled by prefix dedup below, so this only needs to catch stray one-word
+# fragments ("Customers", "Platform", "Next,"). A 3-word floor would also
+# discard real two-word commands like "Rollback approved", and losing genuine
+# operator speech is the worse failure -- it is what a too-aggressive echo guard
+# did on 2026-09-04, when a six-line script produced zero observations.
+_MIN_SUBSTANCE_WORDS = 2
+
 
 def _utterance_hash(incident_id: str, raw_utterance: str, speaker: str | None) -> str:
     key = f"{incident_id}:{raw_utterance}:{speaker or ''}"
     return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
+def _normalize_utterance(text: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace — so that the same
+    sentence with and without a trailing period compares equal."""
+    return " ".join(re.sub(r"[^a-z0-9\s]", " ", text.lower()).split())
 
 
 def _is_duplicate(incident_id: str, content_hash: str) -> bool:
@@ -72,6 +93,46 @@ def _is_duplicate(incident_id: str, content_hash: str) -> bool:
     if content_hash in cache:
         return True
     cache[content_hash] = now
+    return False
+
+
+def _is_superseded_prefix(incident_id: str, raw_utterance: str, speaker: str | None) -> bool:
+    """
+    True when this utterance is a strict prefix of something the same speaker
+    already said within the window — i.e. a partial transcript whose complete
+    form is already on the record.
+
+    Scope, stated precisely: in arrival order the SHORT partial comes first, so
+    this does not by itself stop the growing-transcript flood — `TurnSettler` on
+    the client is what does that. What this catches is RE-DELIVERY: Agora's
+    TRANSCRIPT_UPDATED carries the full history on every emission, so a partial
+    can arrive again after its complete form is already recorded, and a client
+    reconnect or a new settler instance replays it. It is a cheap backstop for a
+    transport that has already surprised us twice, not the primary defence.
+
+    Deliberately one-directional. An utterance that EXTENDS a stored one is
+    never dropped here: doing so would leave a truncated sentence as the
+    permanent record, and losing evidence is worse than storing it twice.
+    """
+    now = datetime.now(timezone.utc)
+    normalized = _normalize_utterance(raw_utterance)
+    if not normalized:
+        return False
+
+    speaker_key = speaker or ""
+    recent = _recent_texts.setdefault(incident_id, [])
+    recent[:] = [
+        entry for entry in recent if (now - entry[2]).total_seconds() <= _DEDUP_WINDOW_SECONDS
+    ]
+
+    for prior_text, prior_speaker, _ts in recent:
+        if prior_speaker != speaker_key:
+            continue
+        if prior_text != normalized and prior_text.startswith(normalized):
+            return True
+
+    recent.append((normalized, speaker_key, now))
+    del recent[:-_RECENT_TEXT_WINDOW]
     return False
 
 
@@ -135,6 +196,35 @@ async def ingest_observation(
             "incident_id": incident_id,
         }
 
+    # 3b. Fragment gates. Both run BEFORE extraction, so a rejected fragment also
+    # costs no LLM call -- which is why the 2026-09-05 run burned a full day of
+    # Gemini and Groq quota on ~10 real sentences. Every rejection is logged at
+    # INFO with the text, so speech missing from a live demo can be diagnosed
+    # with one grep rather than a forensic pass over the database.
+    if len(request.raw_utterance.split()) < _MIN_SUBSTANCE_WORDS:
+        logger.info(
+            "Observation skipped (below minimum substance) for %s: %r",
+            incident_id,
+            request.raw_utterance,
+        )
+        return {
+            "skipped": True,
+            "reason": "below_minimum_substance",
+            "incident_id": incident_id,
+        }
+
+    if _is_superseded_prefix(incident_id, request.raw_utterance, speaker):
+        logger.info(
+            "Observation skipped (partial transcript, longer form already recorded) for %s: %r",
+            incident_id,
+            request.raw_utterance,
+        )
+        return {
+            "skipped": True,
+            "reason": "superseded_partial_transcript",
+            "incident_id": incident_id,
+        }
+
     # 4. Build incident context for LLM
     incident_context = (
         f"Incident: {state.title} | Type: {state.event_type.value} | "
@@ -193,6 +283,13 @@ async def ingest_observation(
     created_claims: list[Claim] = []
     detected_conflicts: list[ConflictRecord] = []
 
+    # Fetched once per observation rather than once per claim: the candidate set
+    # is the same for every claim in this utterance, and detect_conflicts does
+    # its own entity filtering.
+    conflict_candidates = (
+        await claim_repo.find_conflict_candidates(incident_id) if claim_set.claims else []
+    )
+
     for raw_claim in claim_set.claims:
         claim_id = new_id("clm-")
         try:
@@ -223,8 +320,11 @@ async def ingest_observation(
         )
         created_claims.append(claim)
 
-        # Run conflict detection against existing claims for same entity
-        existing = await claim_repo.find_by_entity(incident_id, raw_claim.entity)
+        # Run conflict detection against every recent claim on this incident.
+        # `detect_conflicts` matches entities by subject, so the candidate set
+        # must NOT be pre-filtered by exact entity string -- doing so was what
+        # made the matcher unreachable and kept conflicts at zero.
+        existing = conflict_candidates
         raw_conflicts = detect_conflicts(
             new_entity=raw_claim.entity,
             new_value=raw_claim.value,

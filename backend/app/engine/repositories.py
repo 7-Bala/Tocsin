@@ -410,6 +410,30 @@ class ClaimRepository:
             incident_id, entity,
         )
 
+    async def find_conflict_candidates(
+        self, incident_id: str, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """
+        Every claim on this incident, for `detect_conflicts` to filter in Python.
+
+        `find_by_entity` above cannot serve this: it selects on `entity = $2`,
+        exact SQL string equality, so the fuzzy subject matching in
+        `conflict_detector._entities_match` / `_subject_of` only ever ran on
+        pairs that were already byte-identical. 'authentication database' vs
+        'database cpu' never reached the comparison at all, which is why zero
+        conflicts were recorded across all three live runs of 2026-09-05 --
+        including one with 18 LLM-extracted claims. The matcher was not wrong;
+        it was unreachable.
+
+        Bounded rather than unbounded: an incident that has accumulated hundreds
+        of claims is past the point where a fresh contradiction against the
+        oldest of them is worth an O(n) scan per ingest.
+        """
+        return await fetch_all(
+            "SELECT * FROM claims WHERE incident_id = $1 ORDER BY timestamp DESC LIMIT $2",
+            incident_id, limit,
+        )
+
 
 # ─── Conflict Repository ─────────────────────────────────────────────────────
 

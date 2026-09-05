@@ -11,9 +11,33 @@ a verification step for the Incident Commander to assess.
 
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.engine.extraction import normalize_value
+
+# Two opposite readings of the same entity far enough apart in time are a state
+# change ("the database is down" ... twenty minutes later ... "the database is
+# back up"), not a disagreement. Flagging recovery as a contradiction is the
+# cry-wolf failure CLAUDE.md warns destroys trust in the tool.
+RECOVERY_WINDOW = timedelta(minutes=10)
+
+
+def _claim_age_exceeds_recovery_window(existing_timestamp: Any) -> bool:
+    """True when the existing claim is old enough to be a superseded state."""
+    if not existing_timestamp:
+        return False
+    ts = existing_timestamp
+    if isinstance(ts, str):
+        try:
+            ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+    if not isinstance(ts, datetime):
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - ts) > RECOVERY_WINDOW
 
 logger = logging.getLogger("tocsin.conflict_detector")
 
@@ -118,9 +142,12 @@ def _values_conflict(val_a: str, val_b: str) -> bool:
     # would destroy it: "40% error rate" and "5% error rate" both collapse to
     # "unhealthy" (both contain "error"), so any polarity-first ordering would call
     # them equal and silently miss a real quantitative disagreement.
-    a_num = _extract_measurement(val_a)
-    b_num = _extract_measurement(val_b)
-    if a_num is not None and b_num is not None:
+    a_measure = _extract_measurement(val_a)
+    b_measure = _extract_measurement(val_b)
+    # Only comparable when both measure the same thing. Mismatched units fall
+    # through to polarity rather than being forced into a numeric comparison.
+    if a_measure is not None and b_measure is not None and a_measure[1] == b_measure[1]:
+        a_num, b_num = a_measure[0], b_measure[0]
         max_val = max(abs(a_num), abs(b_num))
         if max_val == 0:
             return False
@@ -160,16 +187,34 @@ _MEASUREMENT_RE = re.compile(
 )
 
 
-def _extract_measurement(val: str) -> float | None:
+def _normalize_unit(unit: str | None) -> str | None:
+    if not unit:
+        return None
+    u = unit.strip().lower()
+    if u in ("percent", "%"):
+        return "%"
+    return u.rstrip("s") or u
+
+
+def _extract_measurement(val: str) -> tuple[float, str | None] | None:
     """
-    Extract a comparable measurement from a claim value, or None if the string holds
-    no standalone quantity. Returning None means "not numerically comparable" — the
-    caller then falls back to polarity comparison rather than inventing a comparison.
+    Extract a comparable measurement as (quantity, unit), or None if the string
+    holds no standalone quantity. Returning None means "not numerically
+    comparable" — the caller then falls back to polarity comparison rather than
+    inventing a comparison.
+
+    The unit is returned, not discarded, because two numbers are only comparable
+    when they measure the same thing. Without it, "login api returning 503
+    errors" and "login api at a 40% error rate" were read as a 92% divergence
+    and reported as a contradiction — comparing an HTTP status code against a
+    percentage. That is the exact pair this module's own docstring cites as
+    complementary rather than contradictory, and it stayed invisible only
+    because the candidate query made the comparison unreachable until 2026-09-05.
     """
     m = _MEASUREMENT_RE.search(val)
     if m:
         try:
-            return float(m.group(1))
+            return float(m.group(1)), _normalize_unit(m.group(2))
         except ValueError:
             return None
     return None
@@ -209,10 +254,23 @@ def detect_conflicts(
         existing_source = existing.get("source", "unknown")
         existing_speaker = existing.get("speaker")
 
-        # Skip if same claim or same source
+        # Skip only the claim comparing against itself.
+        #
+        # This used to also skip any pair sharing a source AND a speaker. In a
+        # live voice room that is every pair: all three runs of 2026-09-05 wrote
+        # every observation as speaker='Operator', source='voice_transcript', so
+        # the rule discarded 100% of candidates before they were ever compared.
+        # It also encoded a wrong assumption -- an incident commander relaying
+        # "engineering suspects the auth DB" and then "SRE says CPU is normal"
+        # is exactly one person voicing a contradiction, which is the case this
+        # detector most needs to catch.
         if existing_id == new_claim_id:
             continue
-        if existing_source == new_source and existing_speaker == new_speaker:
+
+        # A later reading that contradicts a much older one is a state change,
+        # not a disagreement. Handled by time rather than by speaker, because
+        # time is what actually distinguishes the two.
+        if _claim_age_exceeds_recovery_window(existing.get("timestamp")):
             continue
 
         if _entities_match(existing_entity, new_entity) and _values_conflict(existing_value, new_value):

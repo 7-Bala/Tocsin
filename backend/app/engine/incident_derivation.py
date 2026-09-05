@@ -48,6 +48,10 @@ from app.models.incident import (
 UNHEALTHY_VALUES = frozenset({
     "down", "failing", "failed", "error", "unavailable", "offline", "broken",
     "degraded", "unresponsive", "critical", "red", "dead", "crashed",
+    # The heuristic extractor now records the state word the speaker actually
+    # used rather than a fixed per-pattern constant, so every keyword its health
+    # patterns match must be classifiable here or an outage reads as healthy.
+    "unreachable", "timeout", "timeouts",
 })
 
 # How many distinct unhealthy entities it takes to reach each severity band. These

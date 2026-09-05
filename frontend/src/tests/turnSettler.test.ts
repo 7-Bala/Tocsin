@@ -120,11 +120,15 @@ describe('TurnSettler', () => {
     assert.strictEqual(settled[1].isUser, false);
   });
 
-  test('destroy() cancels pending timers so a mid-debounce turn never fires after teardown', () => {
+  // This test previously asserted the opposite -- that destroy() drops a
+  // mid-debounce turn. That expectation encoded a data-loss bug: the last thing
+  // said before leaving the room is ALWAYS mid-debounce, so every conversation
+  // lost its final utterance, and raising stableMs to 2000ms widens that window.
+  test('destroy() flushes pending turns instead of dropping the final utterance', () => {
     const settled: SettledTurn[] = [];
     const clock = fakeClock();
     const settler = new TurnSettler({
-      stableMs: 700,
+      stableMs: 2000,
       onSettled: (turn) => settled.push(turn),
       setTimeoutFn: clock.setTimeoutFn,
       clearTimeoutFn: clock.clearTimeoutFn,
@@ -135,8 +139,102 @@ describe('TurnSettler', () => {
 
     settler.destroy();
     assert.strictEqual(clock.pendingCount(), 0, 'destroy must clear the pending timer');
+    assert.strictEqual(settled.length, 1, 'the in-flight turn must be flushed, not discarded');
+    assert.strictEqual(settled[0].text, 'Still speaking when the session ends');
 
-    clock.fireAll(); // no-op: nothing left to fire
-    assert.strictEqual(settled.length, 0, 'a turn cancelled by destroy() must never settle');
+    clock.fireAll(); // no-op: the timer was cleared
+    assert.strictEqual(settled.length, 1, 'flushing must not also let the timer fire a duplicate');
+  });
+
+  // ── Regression suite for the 2026-09-05 Scenario B run ──────────────────
+  // 115 observations were recorded for ~10 spoken sentences. stableMs was 700ms
+  // while the real inter-token gap was ~1s, so every growth step settled; and
+  // suppression compared only for EXACT equality, so a turn that kept growing
+  // after settling re-emitted the whole sentence again, one word longer.
+
+  test('growth after a settle emits only the new suffix, never the whole sentence again', () => {
+    const settled: SettledTurn[] = [];
+    const clock = fakeClock();
+    const settler = new TurnSettler({
+      stableMs: 2000,
+      onSettled: (turn) => settled.push(turn),
+      setTimeoutFn: clock.setTimeoutFn,
+      clearTimeoutFn: clock.clearTimeoutFn,
+    });
+
+    settler.ingest('0:turn_1', 'That does not hold up.', false, true, 'user.transcription');
+    clock.fireAll(); // speaker paused longer than stableMs -- settles early
+    assert.strictEqual(settled.length, 1);
+
+    // ...then carries on with the same sentence.
+    settler.ingest(
+      '0:turn_1',
+      'That does not hold up. Request volume is about twenty percent below normal for this hour.',
+      false,
+      true,
+      'user.transcription'
+    );
+    clock.fireAll();
+
+    assert.strictEqual(settled.length, 2, 'the continuation is one further event');
+    assert.strictEqual(
+      settled[1].text,
+      'Request volume is about twenty percent below normal for this hour.',
+      'only the part not already on the record may be forwarded'
+    );
+  });
+
+  test('a trivial trailing fragment after a settle is absorbed, not recorded', () => {
+    const settled: SettledTurn[] = [];
+    const clock = fakeClock();
+    const settler = new TurnSettler({
+      stableMs: 2000,
+      onSettled: (turn) => settled.push(turn),
+      setTimeoutFn: clock.setTimeoutFn,
+      clearTimeoutFn: clock.clearTimeoutFn,
+    });
+
+    settler.ingest('0:turn_1', "That doesn't hold", false, true, 'user.transcription');
+    clock.fireAll();
+    settler.ingest('0:turn_1', "That doesn't hold up", false, true, 'user.transcription');
+    clock.fireAll();
+
+    assert.strictEqual(settled.length, 1, 'a two-word tail must not become its own observation');
+  });
+
+  test('the real Scenario B growth trace collapses to one observation per sentence', () => {
+    const settled: SettledTurn[] = [];
+    const clock = fakeClock();
+    const settler = new TurnSettler({
+      stableMs: 2000,
+      onSettled: (turn) => settled.push(turn),
+      setTimeoutFn: clock.setTimeoutFn,
+      clearTimeoutFn: clock.clearTimeoutFn,
+    });
+
+    // Verbatim from the observations table of incident room-202609051125-3zuj4:
+    // one spoken sentence delivered as 13 growing partials, each of which became
+    // its own observation, its own claim, and its own LLM call.
+    const growth = [
+      'Platform team confirmed',
+      'Platform team confirmed that the auto service',
+      'Platform team confirmed that the auto service bots are crash',
+      'Platform team confirmed that the order service bots are cross looking.',
+      'Platform team confirmed that the order service bots are cross looking. They are getting',
+      'Platform team confirmed that the order service bots are cross looking. They are getting OOM',
+      'Platform team confirmed that the order service bots are cross looking. They are getting OOM killed and',
+      'Platform team confirmed that the order service bots are cross looking. They are getting OOM killed and restarting',
+      'Platform team confirmed that the order service bots are cross looking. They are getting OOM killed and restarting roughly every ninety',
+      'Platform team confirmed that the order service bots are cross looking. They are getting OOM killed and restarting roughly every ninety seconds. Nothing is still',
+      'Platform team confirmed that the order service bots are cross looking. They are getting OOM killed and restarting roughly every ninety seconds. Nothing is staying up long enough',
+      'Platform team confirmed that the order service bots are cross looking. They are getting OOM killed and restarting roughly every ninety seconds. Nothing is staying up long enough to serve traffic.',
+    ];
+    for (const step of growth) {
+      settler.ingest('0:turn_3', step, false, true, 'user.transcription');
+    }
+    clock.fireAll();
+
+    assert.strictEqual(settled.length, 1, `13 growth steps must settle once, got ${settled.length}`);
+    assert.match(settled[0].text, /to serve traffic\.$/, 'the settled text must be the complete sentence');
   });
 });

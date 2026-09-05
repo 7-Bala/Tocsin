@@ -138,7 +138,13 @@ export async function startRtmTranscriptSession(options: {
   // one settled event per turn, not one per growth step.
   let seq = 0;
   const settler = new TurnSettler({
-    stableMs: 700,
+    // 700ms was SHORTER than the real inter-token gap (~1s, measured from the
+    // 2026-09-05 Scenario B run), so every growth step went quiet long enough to
+    // settle and was forwarded as its own observation -- 115 of them for ~10
+    // spoken sentences. The debounce has to exceed the worst gap, not the
+    // median. Latency cost is bounded: TurnStatus.END still settles instantly
+    // via the isFinal path whenever Agora delivers it.
+    stableMs: 2000,
     onSettled: ({ key, text, isUser, objectType }) => {
       onEvent({
         utteranceId: key,

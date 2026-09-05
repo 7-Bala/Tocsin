@@ -415,6 +415,16 @@ HEALTHY_VALUES = frozenset({
 UNHEALTHY_VALUES = frozenset({
     "down", "failing", "failed", "error", "errors", "unavailable", "offline",
     "broken", "degraded", "unresponsive", "critical", "red", "dead", "crashed",
+    # The heuristic health patterns now record the state word the speaker used
+    # rather than a fixed constant, so every keyword they can match must have a
+    # polarity here. Without these, "the order service pods are crash-looping"
+    # normalizes to itself, contradicts nothing, and reads as neither healthy
+    # nor unhealthy anywhere downstream.
+    # "looping" is listed alongside the hyphenated forms because matching is
+    # whole-word: "crash-looping" tokenizes to crash/looping, so the compound
+    # spellings alone would never match.
+    "crashing", "crash-looping", "crashlooping", "looping", "unreachable",
+    "timeout", "timeouts", "oom", "restarting",
     # Saturation / exhaustion. Added 2026-09-05: these are the most common way an
     # engineer describes a struggling dependency, and their absence is why
     # CLAUDE.md's own canonical contradiction ("the authentication database is
@@ -495,6 +505,101 @@ def _clean_entity(raw: str) -> str:
     return ent if ent else raw.strip()
 
 
+# Operational nouns. An entity with none of these is almost certainly a fragment
+# of ordinary conversation that a loose regex happened to capture, not a system
+# anyone is reporting on. The 2026-09-05 run filed `t hold`, `s wrap`,
+# `standing`, `ending` and `nothing is staying` as system-health claims, and the
+# whiteboard rendered every one of them as a node labelled "healthy".
+#
+# Deliberately small and scenario-shaped rather than general. It does not need to
+# generalise -- it needs to be honest about what this fallback can actually
+# recognise, and everything it emits is already labelled `heuristic_fallback` /
+# UNVERIFIED. Rejecting a claim never discards the observation: the raw utterance
+# and its provenance are still recorded, which is the part that matters.
+_ENTITY_NOUNS = frozenset({
+    "api", "apis", "service", "services", "system", "systems", "server", "servers",
+    "endpoint", "endpoints", "component", "components", "subsystem",
+    "temperature", "pressure", "level", "levels", "rate", "rates", "usage", "load",
+    "database", "databases", "db", "cache", "queue", "broker", "cluster", "node", "nodes",
+    "pod", "pods", "container", "containers", "instance", "instances", "replica", "replicas",
+    "gateway", "proxy", "loadbalancer", "balancer", "cdn", "dns", "network",
+    "login", "auth", "authentication", "authorization", "identity", "session", "sessions",
+    "token", "tokens", "account", "accounts", "user", "users", "customer", "customers",
+    "order", "orders", "checkout", "cart", "inventory", "billing", "subscription",
+    "cpu", "memory", "ram", "heap", "disk", "storage", "volume", "bandwidth",
+    "deployment", "deploy", "release", "rollout", "build", "image", "version", "dependency",
+    "traffic", "request", "requests", "volume", "latency", "throughput", "error", "errors",
+    "job", "jobs", "worker", "workers", "task", "tasks", "pipeline", "index", "bucket",
+    "dashboard", "monitor", "alert", "log", "logs", "metric", "metrics", "region", "zone",
+    "connection", "connections", "pool", "thread", "threads", "process", "processes",
+    # Physical/emergency infrastructure. Tocsin's other scenario family is
+    # disaster coordination, not just software incidents -- a tech-only lexicon
+    # silently stopped extracting from "the main water pump is down", which is
+    # exactly the sort of sentence this fallback exists to handle.
+    "pump", "pumps", "generator", "generators", "valve", "valves", "sensor", "sensors",
+    "dam", "levee", "bridge", "road", "roads", "tunnel", "shelter", "shelters",
+    "hospital", "hospitals", "clinic", "boat", "boats", "vehicle", "vehicles", "truck",
+    "radio", "power", "grid", "water", "gas", "fuel", "line", "lines", "main", "mains",
+    "tower", "antenna", "camera", "cameras", "gate", "alarm", "siren", "supply",
+})
+
+
+# Tokens that mark where a subject ends and a predicate begins. The health
+# regexes make their connective words optional, so a lazy capture still absorbs
+# them -- "The login API is returning HTTP 503 errors" yielded the entity
+# `login api is returning http`. Cutting the phrase at the first of these
+# recovers the noun phrase without needing a parser.
+_ENTITY_STOP_TOKENS = frozenset({
+    "is", "are", "was", "were", "be", "been", "being", "has", "have", "had",
+    "looks", "look", "looking", "seems", "seem", "appears", "appear",
+    "returning", "return", "returns", "returned", "showing", "shows", "showed",
+    "getting", "get", "gets", "got", "going", "goes", "went", "will", "would",
+    "keeps", "keep", "staying", "stay", "started", "start", "starts",
+    "and", "but", "so", "that", "this", "it", "they", "we", "i", "he", "she",
+    "to", "of", "for", "in", "on", "at", "with", "from", "still", "now", "just",
+    "compare", "check", "verify", "run", "pull", "restart", "rollback", "roll",
+    "deploy", "monitor", "investigate", "analyze", "analyse", "confirm",
+    # Reporting verbs. "We verified that the cooling system temperature..."
+    # otherwise trims to the entity `verified`, which then fails the noun gate
+    # and silently drops a perfectly good metric claim.
+    "verified", "confirmed", "reported", "said", "says", "noticed", "observed",
+    "stated", "mentioned", "told", "seeing", "see", "saw", "found",
+})
+
+
+def _trim_entity_phrase(entity: str) -> str:
+    """Reduce a captured span to the noun phrase at its head."""
+    tokens = [t for t in re.split(r"\s+", entity.lower().strip()) if t]
+    while tokens and tokens[0] in _ENTITY_STOP_TOKENS:
+        tokens.pop(0)
+    trimmed: list[str] = []
+    for token in tokens:
+        if token in _ENTITY_STOP_TOKENS:
+            break
+        trimmed.append(token)
+    # Keep the phrase short; operational entities are one to three words
+    # ("login api", "authentication database", "database cpu").
+    return " ".join(trimmed[-3:])
+
+
+def _is_plausible_entity(entity: str) -> bool:
+    """
+    True when the phrase names something operational rather than being a scrap of
+    conversation. Requires at least one recognised operational noun, or a
+    hyphen/underscore compound (`identity-service`, `order_worker`) which is
+    almost always a real system name.
+    """
+    if not entity or len(entity) < 3:
+        return False
+    tokens = [t for t in re.split(r"[^a-z0-9]+", entity.lower()) if t]
+    if not tokens:
+        return False
+    if any(t in _ENTITY_NOUNS for t in tokens):
+        return True
+    # service-name shapes the lexicon cannot enumerate, e.g. "identity-service"
+    return bool(re.search(r"[a-z0-9]+[-_][a-z0-9]+", entity.lower()))
+
+
 class HeuristicExtractor:
     """
     Keyword-pattern based fallback extractor.
@@ -502,21 +607,50 @@ class HeuristicExtractor:
     Heuristic claims are NEVER promoted to CONFIRMED automatically.
     """
 
+    # Each pattern captures the ENTITY in group 1 and the STATE WORD in group 2.
+    # Group 2 exists because `value` used to be a fixed per-pattern constant: any
+    # match of the "healthy" pattern recorded the literal string "healthy"
+    # regardless of what was actually said, so "standing down" was filed as
+    # entity `standing` / value `down`, and that claim became the incident title
+    # "Ending — Down" on 2026-09-05. The value must be what the speaker said.
+    #
+    # The entity class now includes the apostrophe. Excluding it meant the regex
+    # could not span a contraction, so "That doesn't hold up" matched from the
+    # `t` after the apostrophe and yielded entity `t hold`, value `healthy`.
+    # Keeping the word intact lets `_is_plausible_entity` reject it properly.
     HEALTH_PATTERNS = [
-        (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9\s_-]+?)\s+(?:is\s+)?(?:down|failing|failed|unreachable|offline|unavailable|broken|crashed)", "system_health", "REPORT", "down"),
-        (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9\s_-]+?)\s+(?:is\s+)?(?:up|running|healthy|operational|stable|working|online)", "system_health", "REPORT", "healthy"),
-        (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9\s_-]+?)\s+(?:is\s+)?(?:returning\s+)?(\d+xx|errors?|timeouts?)", "error_rate", "REPORT", "error"),
-        (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9\s_-]+?)\s+(?:exceeded|reached|is at|dropped to|rose to)\s+([\d\w\s%]+)", "metric_value", "REPORT", "metric_reported"),
+        (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9'\s_-]+?)\s+(?:is\s+|are\s+)?(down|failing|failed|unreachable|offline|unavailable|broken|crashed|crashing|crash-looping|crashlooping)", "system_health", "REPORT"),
+        (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9'\s_-]+?)\s+(?:is\s+|are\s+)?(up|running|healthy|operational|stable|working|online|normal)", "system_health", "REPORT"),
+        (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9'\s_-]+?)\s+(?:is\s+|are\s+)?(?:returning\s+)?(\d+xx|\d{3}\s+errors?|errors?|timeouts?)", "error_rate", "REPORT"),
+        (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9'\s_-]+?)\s+(?:exceeded|reached|is at|dropped to|rose to)\s+([\d\w\s%]+)", "metric_value", "REPORT"),
     ]
+    # Every trigger is word-bounded. Without \b, `i'?ll` matched the "ill" inside
+    # "still", so "is that still a theory? what if it is not" was recorded as an
+    # action item reading "a theory? what if it is not" — six such rows appeared
+    # in the 2026-09-05 run.
     ACTION_PATTERNS = [
-        r"(?:i\'?ll|i will|i\'m going to|going to|will|let me|someone needs to|we need to|need to)\s+(.+?)(?:\.|$)",
-        r"(\w+)\s+(?:will|is going to|should)\s+(.+?)(?:\.|$)",
+        r"(?:\bi\'?ll\b|\bi will\b|\bi\'m going to\b|\bgoing to\b|\blet me\b|\bsomeone needs to\b|\bwe need to\b|\bneed to\b)\s+(.+?)(?:\.|$)",
+        r"\b(\w+)\s+(?:will|is going to|should)\s+(.+?)(?:\.|$)",
     ]
     MISSING_PATTERNS = [
         r"(?:we don\'t know|unclear|not sure|need to check|unknown|we haven\'t|haven\'t confirmed)\s+(.+?)(?:\.|$)",
     ]
     ASSUMPTION_PATTERNS = [
         r"(?:i think|probably|might be|could be|maybe|possibly|assume|assuming)\s+(.+?)(?:\.|$)",
+    ]
+    # Speculation attributed to a person, which is a HYPOTHESIS rather than a
+    # bare assumption. Until these existed the heuristic could not emit
+    # HYPOTHESIS at all, so `hypotheses` was empty in every live run ever
+    # recorded and CLAUDE.md's own canonical line -- "I suspect the
+    # authentication database is overloaded" -- produced nothing speculative.
+    # That is the "distinguishes facts from assumptions" requirement, and this
+    # delivers it with no LLM call, which matters on a quota-exhausted day.
+    SUSPICION_PATTERNS = [
+        r"\bi suspect\b\s+(.+?)(?:\.|$)",
+        r"\bmy (?:hunch|gut|theory)\b[^.]*?\bis\b\s+(.+?)(?:\.|$)",
+        r"\bit looks like\b\s+(.+?)(?:\.|$)",
+        r"\b(?:he|she|they|someone|somebody|one of the engineers|an engineer)\s+(?:thinks|suspects|believes)\b\s+(?:it\'?s\s+)?(.+?)(?:\.|$)",
+        r"\b(?:that\'?s|it\'?s)\s+(?:his|her|their|my)\s+(?:gut feeling|hunch|theory)\b",
     ]
     DECISION_PATTERNS = [
         r"(?:we decided|decision is|we are going to|we\'ve agreed|agreed to)\s+(.+?)(?:\.|$)",
@@ -537,21 +671,31 @@ class HeuristicExtractor:
 
         # Health claims
         for item in self.HEALTH_PATTERNS:
-            pattern, claim_type, cat, def_val = item
+            pattern, claim_type, cat = item
             for m in re.finditer(pattern, text_lower):
                 raw_ent = m.group(1).strip()
-                entity = _clean_entity(raw_ent)
-                if entity and len(entity) > 2:
-                    claims.append(RawClaimData(
-                        claim_type=claim_type,
-                        entity=entity,
-                        value=def_val,
-                        confidence=0.4,
-                    ))
-                    category = cat
-                    evidence_status = "REPORTED"
-                    confidence = 0.4
-                    break
+                entity = _trim_entity_phrase(_clean_entity(raw_ent))
+                if not _is_plausible_entity(entity):
+                    continue
+                value = (m.group(2) or "").strip()
+                if not value:
+                    continue
+                # A qualifier immediately before the state word inverts it:
+                # "twenty percent below normal" is not a report that traffic is
+                # normal. Cheaper and safer than trying to parse the comparison.
+                preceding = text_lower[max(0, m.start(2) - 14):m.start(2)]
+                if re.search(r"\b(?:below|above|under|over|not|far from|nowhere near)\b\s*$", preceding):
+                    continue
+                claims.append(RawClaimData(
+                    claim_type=claim_type,
+                    entity=entity,
+                    value=value,
+                    confidence=0.4,
+                ))
+                category = cat
+                evidence_status = "REPORTED"
+                confidence = 0.4
+                break
 
         # Action items
         for pattern in self.ACTION_PATTERNS:
@@ -576,15 +720,28 @@ class HeuristicExtractor:
                     category = "MISSING_INFO"
                 break
 
-        # Assumptions
-        for pattern in self.ASSUMPTION_PATTERNS:
-            m = re.search(pattern, text_lower)
-            if m:
-                if category == "UNCLASSIFIED":
-                    category = "ASSUMPTION"
+        # Attributed speculation -> HYPOTHESIS. This OVERRIDES an earlier REPORT
+        # classification rather than deferring to it: "I suspect the
+        # authentication database is overloaded" also matches a health pattern,
+        # so leaving REPORT in place would file a hunch as a report -- exactly
+        # the fact/assumption collapse the product exists to prevent.
+        for pattern in self.SUSPICION_PATTERNS:
+            if re.search(pattern, text_lower):
+                category = "HYPOTHESIS"
                 evidence_status = "ASSUMED"
                 confidence = 0.25
                 break
+
+        # Assumptions
+        if category != "HYPOTHESIS":
+            for pattern in self.ASSUMPTION_PATTERNS:
+                m = re.search(pattern, text_lower)
+                if m:
+                    if category == "UNCLASSIFIED":
+                        category = "ASSUMPTION"
+                    evidence_status = "ASSUMED"
+                    confidence = 0.25
+                    break
 
         # Decisions
         for pattern in self.DECISION_PATTERNS:
@@ -595,8 +752,16 @@ class HeuristicExtractor:
                     category = "DECISION"
                 break
 
-        # Risks
-        risk_pat = r"(?:risk of|if .+? (?:then|we|could)|danger of|warning)\s+(.+?)(?:\.|$)"
+        # Risks. The old pattern included a bare `if .+? (?:then|we|could)` arm,
+        # which made EVERY conditional sentence a risk -- "if it gets worse then
+        # monitor the situation" was recorded as the risk "monitor the
+        # situation" on 2026-09-05. That is not cosmetic: each open risk adds +1
+        # pressure in derive_severity(), so junk risks silently inflate the
+        # incident's severity band. An explicit risk lexeme is now required.
+        risk_pat = (
+            r"(?:\brisk of\b|\bdanger of\b|\bat risk of\b|\bcould cause\b|"
+            r"\bmight cause\b|\bmight break\b|\bwe could lose\b|\bwe risk\b)\s+(.+?)(?:\.|$)"
+        )
         m = re.search(risk_pat, text_lower)
         if m:
             risks.append(m.group(1).strip())

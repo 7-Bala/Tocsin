@@ -31,9 +31,33 @@ export interface TurnSettlerOptions {
   clearTimeoutFn?: (handle: ReturnType<typeof setTimeout>) => void;
 }
 
+/**
+ * A settled turn that only extends what was already emitted for its key is not
+ * a new sentence -- it is the tail of one we forwarded too early. Emitting the
+ * whole grown string again would duplicate the part already on the record, so
+ * only the suffix is forwarded, and only when it carries enough to stand as its
+ * own utterance. Anything shorter is absorbed silently: a trailing " up." on
+ * the record is worse than nothing at all.
+ */
+const MIN_SUFFIX_CHARS = 40;
+const MIN_TERMINATED_SUFFIX_CHARS = 12;
+
+function isSubstantialSuffix(suffix: string): boolean {
+  const trimmed = suffix.trim();
+  if (trimmed.length >= MIN_SUFFIX_CHARS) return true;
+  return trimmed.length >= MIN_TERMINATED_SUFFIX_CHARS && /[.!?]$/.test(trimmed);
+}
+
+interface PendingTurn {
+  text: string;
+  isUser: boolean;
+  objectType: string | undefined;
+}
+
 export class TurnSettler {
   private readonly emitted = new Map<string, string>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly pending = new Map<string, PendingTurn>();
   private readonly setTimeoutFn: NonNullable<TurnSettlerOptions['setTimeoutFn']>;
   private readonly clearTimeoutFn: NonNullable<TurnSettlerOptions['clearTimeoutFn']>;
 
@@ -44,31 +68,58 @@ export class TurnSettler {
 
   /** Feed one TRANSCRIPT_UPDATED item's current state for a turn key. */
   ingest(key: string, text: string, isFinal: boolean, isUser: boolean, objectType: string | undefined): void {
-    if (this.emitted.get(key) === text) return; // exact repeat of what was already settled
+    const alreadyEmitted = this.emitted.get(key);
+    if (alreadyEmitted === text) return; // exact repeat of what was already settled
 
     const existing = this.timers.get(key);
     if (existing) this.clearTimeoutFn(existing);
 
+    // Growth arriving AFTER this key already settled means the debounce fired
+    // mid-sentence -- the speaker paused for longer than stableMs. Re-arm rather
+    // than forwarding immediately, so the rest of the sentence can finish
+    // arriving before anything else is emitted.
+    this.pending.set(key, { text, isUser, objectType });
+
     if (isFinal) {
-      this.settle(key, text, isUser, objectType);
+      this.settle(key);
       return;
     }
 
-    this.timers.set(
-      key,
-      this.setTimeoutFn(() => this.settle(key, text, isUser, objectType), this.opts.stableMs)
-    );
+    this.timers.set(key, this.setTimeoutFn(() => this.settle(key), this.opts.stableMs));
   }
 
-  private settle(key: string, text: string, isUser: boolean, objectType: string | undefined): void {
+  private settle(key: string): void {
     this.timers.delete(key);
-    this.emitted.set(key, text);
-    this.opts.onSettled({ key, text, isUser, objectType });
+    const turn = this.pending.get(key);
+    if (!turn) return;
+    this.pending.delete(key);
+
+    const alreadyEmitted = this.emitted.get(key);
+    this.emitted.set(key, turn.text);
+
+    // Only the part not already on the record is forwarded. A revision that is
+    // not an extension (ASR rewriting "forty" to "40%") falls through to the
+    // full-text path, since we cannot tell which half changed.
+    if (alreadyEmitted !== undefined && turn.text.startsWith(alreadyEmitted)) {
+      const suffix = turn.text.slice(alreadyEmitted.length).trim();
+      if (!isSubstantialSuffix(suffix)) return;
+      this.opts.onSettled({ key, text: suffix, isUser: turn.isUser, objectType: turn.objectType });
+      return;
+    }
+
+    this.opts.onSettled({ key, text: turn.text, isUser: turn.isUser, objectType: turn.objectType });
   }
 
-  /** Cancel every pending timer. Call on session teardown. */
+  /**
+   * Flush every pending turn, then cancel outstanding timers. Call on session
+   * teardown. Flushing rather than dropping matters more the larger stableMs
+   * gets: the last thing said before leaving the room is always mid-debounce,
+   * and silently discarding it loses the end of every conversation.
+   */
   destroy(): void {
     for (const timer of this.timers.values()) this.clearTimeoutFn(timer);
     this.timers.clear();
+    for (const key of [...this.pending.keys()]) this.settle(key);
+    this.pending.clear();
   }
 }
