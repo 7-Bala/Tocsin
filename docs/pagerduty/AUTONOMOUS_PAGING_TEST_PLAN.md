@@ -374,6 +374,38 @@ Added explicit argument logging to `page_oncall_engineer` so future runs capture
 `incident_id`, chosen `severity`, and `summary`. Re-run a session to capture that
 detail for the demo.
 
+### 2026-09-05 — Re-run with severity logging: the agent's own judgment, captured
+
+Second session (`room-202609050444-u00ux`), same `composed_tools` + `openai` setup,
+same step-2 injection, now with argument logging in place:
+
+```
+page_oncall_engineer invoked:
+  incident_id = 'identity-service-deployment'
+  severity    = SEV2  (-> PagerDuty 'error')
+  summary     = 'Login API returning HTTP 503 errors for ~40% of requests after deployment.'
+```
+
+**The agent chose SEV2, not SEV1 — which is the correct call.** The prompt defines
+SEV1 as "confirmed, active, user-facing impact right now" and SEV2 as "a real fault
+with partial or degrading impact." 40% of requests failing is genuinely partial, not
+total. It also declined to inflate severity "to be safe", which the prompt explicitly
+warns against — and it wrote its own summary and named the incident itself
+(`identity-service-deployment`), neither of which was given to it.
+
+Reproduced across two independent sessions: it paged both times, at step 2 both
+times, never at step 1.
+
+Ground truth confirmed visually in the PagerDuty UI: incident **#4**, "Login API
+returning HTTP 503 errors for ~40% of requests after deployment.", status Triggered,
+service "Tocsin Incident Commander", assigned to Balachandran R.
+
+Cleanup: incidents `identity-service-deployment` and `live-pagerduty-verify-1`
+resolved via the Events API (202 each). Incident **#2** — the very first autonomous
+page, from *before* argument logging existed — is still open because the agent chose
+its own `dedup_key` that run and it was never recorded. That is precisely the gap the
+new logging closes; resolve #2 manually from the PagerDuty UI.
+
 **Still outstanding:**
 - Visual confirmation in the PagerDuty UI (its session expired mid-test; Claude
   cannot sign in — credentials are off-limits). The `202 Accepted` from PagerDuty's

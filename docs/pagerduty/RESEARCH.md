@@ -51,14 +51,18 @@ sources agreeing is stronger than one, but this is still corroborated
 third-party evidence, not a direct quote from PagerDuty's own current docs —
 flagged here rather than silently upgraded to "confirmed by official docs."
 
-**Not verified**: an actual live PagerDuty account and routing key have not been
-exercised end-to-end. Live-verified so far is `page_oncall_engineer`'s own dispatch
-logic against a *mocked* `httpx` client asserting the exact request shape (see
-`mock-services/tests/test_tools.py::test_tool_13_page_oncall_engineer_live_dispatch`)
-and the tool's real reachability through the actual running FastMCP server over
-Streamable HTTP (`list_tools()` shows it; `call_tool()` executes it) — but with no
-`PAGERDUTY_ROUTING_KEY` configured yet, so only the mock-fallback path has been
-exercised against the live server, not the real PagerDuty API.
+**Since verified live (2026-09-05)** — this paragraph originally recorded that no
+real account had been exercised; that is no longer true and is kept here only so the
+progression is traceable. A real PagerDuty account, service, escalation policy and
+routing key were configured, and real incidents were triggered end-to-end: first by
+a direct `call_tool()` through the running MCP server, then — the harder claim —
+by the agent itself deciding to page during a `composed_tools` session. See the
+status table below and `docs/pagerduty/AUTONOMOUS_PAGING_TEST_PLAN.md`.
+
+Still mocked (deliberately, as unit tests rather than live calls):
+`mock-services/tests/test_tools.py::test_tool_13_page_oncall_engineer_live_dispatch`
+asserts the exact outbound request shape against a monkeypatched `httpx` client, so
+the request contract stays pinned without paging a human on every test run.
 
 ## Status
 
@@ -69,7 +73,7 @@ exercised against the live server, not the real PagerDuty API.
 | `page_oncall_engineer` MCP tool implementation | `VERIFIED IN CODE (mocked dispatch + live MCP protocol reachability)` | Real request shape asserted against a mocked httpx client; genuinely reachable and callable through the live, running MCP server. Not yet exercised against a real PagerDuty account. |
 | Mock fallback when `PAGERDUTY_ROUTING_KEY` is unset | `VERIFIED IN CODE` | Live-called through the actual running MCP server; returned a clearly labeled `MOCK_FALLBACK` envelope, `paged: false`. |
 | Live dispatch to a real PagerDuty account/on-call engineer | `VERIFIED LIVE (2026-09-05)` | Real `PAGERDUTY_ROUTING_KEY` configured against a real service ("Tocsin Incident Commander", auto-generated escalation policy with the account owner as default on-call). Called `page_oncall_engineer` through the live, running MCP server (not a direct Python call) with `severity="SEV2"`; got back `paged: true`, `delivery_status: "delivered"`. Confirmed independently in the PagerDuty UI: a real incident (#1, status "Triggered", correct title, correct service, "Assigned To" the account owner) appeared within seconds. Resolved afterward via a `event_action: "resolve"` call with the same `dedup_key` — confirmed the incident count returned to 0 triggered / 0 acknowledged. |
-| Agent actually choosing to call this tool mid-conversation, unprompted | `NOT YET LIVE-VERIFIED` | Same open question as every other MCP tool under `composed_tools` per `docs/agora/RESEARCH.md` — tool wiring matches Agora's documented schema, but whether the LLM autonomously decides to invoke it in a real conversation has not been observed yet for this specific tool. |
+| Agent actually choosing to call this tool mid-conversation, unprompted | `VERIFIED LIVE (2026-09-05)` | Observed twice, in two independent `composed_tools` sessions. Escalating context was injected via `agent-think` **without ever naming the tool or asking for a page**. Low-severity context ("a few users said logins feel slow") → no tool call. Real partial-impact fault ("login API returning 503s for ~40% of requests, right after the deploy") → agent called `page_oncall_engineer` on its own, choosing **SEV2, not SEV1** — the correct call for partial rather than total impact, and notably declining to inflate severity "to be safe" as the prompt warns against. It also authored its own summary and `incident_id` (`identity-service-deployment`), neither of which was supplied. Real PagerDuty incident confirmed in their UI. Not yet observed via the spoken-voice/ASR path — only via `agent-think` injection. |
 | Works under `gemini_live` (mllm) pipeline | `NOT SUPPORTED` | Same as every other MCP tool in this project — `mcp_servers` is documented only under `llm`, not `mllm`. Requires `composed_tools`. |
 
 ## To go live — DONE for steps 1-5 (2026-09-05)
@@ -90,8 +94,15 @@ exercised against the live server, not the real PagerDuty API.
    afterward with a matching `event_action: "resolve"` + same `dedup_key`;
    confirmed the incident count returned to 0/0.
 
-**Remaining (not yet done):** whether the agent, given real conversation context
-under `composed_tools`, autonomously chooses to call this tool unprompted during
-a live voice session — the tool's own correctness is now proven, but "the LLM
-decides to use it" has not been observed yet, same open question as every other
-MCP tool in this project.
+6. ✅ **Agent autonomy verified (2026-09-05).** Under `composed_tools`, with
+   escalating context injected via `agent-think` and the tool never named, the agent
+   declined to page on a vague low-impact report and then paged on its own once given
+   a real partial-impact fault — choosing SEV2 rather than inflating to SEV1, and
+   writing its own summary and incident id. Reproduced across two sessions. Full
+   transcript of what was injected and what it chose:
+   `docs/pagerduty/AUTONOMOUS_PAGING_TEST_PLAN.md`.
+
+**Remaining (not yet done):** the same behavior via the **spoken-voice path**
+(microphone → ASR → LLM → tool call) rather than `agent-think` injection. The
+injection path exercises the agent's judgment and the full MCP/PagerDuty chain, but
+not Agora's ASR front-end. Needs a human at a microphone; Claude has none.
