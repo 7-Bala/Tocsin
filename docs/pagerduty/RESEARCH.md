@@ -73,7 +73,8 @@ the request contract stays pinned without paging a human on every test run.
 | `page_oncall_engineer` MCP tool implementation | `VERIFIED IN CODE (mocked dispatch + live MCP protocol reachability)` | Real request shape asserted against a mocked httpx client; genuinely reachable and callable through the live, running MCP server. Not yet exercised against a real PagerDuty account. |
 | Mock fallback when `PAGERDUTY_ROUTING_KEY` is unset | `VERIFIED IN CODE` | Live-called through the actual running MCP server; returned a clearly labeled `MOCK_FALLBACK` envelope, `paged: false`. |
 | Live dispatch to a real PagerDuty account/on-call engineer | `VERIFIED LIVE (2026-09-05)` | Real `PAGERDUTY_ROUTING_KEY` configured against a real service ("Tocsin Incident Commander", auto-generated escalation policy with the account owner as default on-call). Called `page_oncall_engineer` through the live, running MCP server (not a direct Python call) with `severity="SEV2"`; got back `paged: true`, `delivery_status: "delivered"`. Confirmed independently in the PagerDuty UI: a real incident (#1, status "Triggered", correct title, correct service, "Assigned To" the account owner) appeared within seconds. Resolved afterward via a `event_action: "resolve"` call with the same `dedup_key` — confirmed the incident count returned to 0 triggered / 0 acknowledged. |
-| Agent actually choosing to call this tool mid-conversation, unprompted | `VERIFIED LIVE (2026-09-05)` | Observed twice, in two independent `composed_tools` sessions. Escalating context was injected via `agent-think` **without ever naming the tool or asking for a page**. Low-severity context ("a few users said logins feel slow") → no tool call. Real partial-impact fault ("login API returning 503s for ~40% of requests, right after the deploy") → agent called `page_oncall_engineer` on its own, choosing **SEV2, not SEV1** — the correct call for partial rather than total impact, and notably declining to inflate severity "to be safe" as the prompt warns against. It also authored its own summary and `incident_id` (`identity-service-deployment`), neither of which was supplied. Real PagerDuty incident confirmed in their UI. Not yet observed via the spoken-voice/ASR path — only via `agent-think` injection. |
+| Agent choosing to page from SPOKEN VOICE, unprompted | `VERIFIED LIVE (2026-09-05)` | Full mic -> Agora ASR -> LLM -> MCP -> PagerDuty chain. Scenario B spoken aloud, tool never named: agent paged at SEV1 with its own incident_id and summary, PagerDuty returned 202. Scenario A produced SEV2 from the same prompt, so severity tracks the facts. |
+| Agent actually choosing to call this tool mid-conversation, unprompted | `VERIFIED LIVE (2026-09-05)` | Observed twice, in two independent `composed_tools` sessions. Escalating context was injected via `agent-think` **without ever naming the tool or asking for a page**. Low-severity context ("a few users said logins feel slow") → no tool call. Real partial-impact fault ("login API returning 503s for ~40% of requests, right after the deploy") → agent called `page_oncall_engineer` on its own, choosing **SEV2, not SEV1** — the correct call for partial rather than total impact, and notably declining to inflate severity "to be safe" as the prompt warns against. It also authored its own summary and `incident_id` (`identity-service-deployment`), neither of which was supplied. Real PagerDuty incident confirmed in their UI. Superseded by the row above, which proves the same behaviour through the spoken-voice path. |
 | Works under `gemini_live` (mllm) pipeline | `NOT SUPPORTED` | Same as every other MCP tool in this project — `mcp_servers` is documented only under `llm`, not `mllm`. Requires `composed_tools`. |
 
 ## To go live — DONE for steps 1-5 (2026-09-05)
@@ -102,10 +103,47 @@ the request contract stays pinned without paging a human on every test run.
    transcript of what was injected and what it chose:
    `docs/pagerduty/AUTONOMOUS_PAGING_TEST_PLAN.md`.
 
-**Remaining (not yet done):** the same behavior via the **spoken-voice path**
-(microphone → ASR → LLM → tool call) rather than `agent-think` injection. The
-injection path exercises the agent's judgment and the full MCP/PagerDuty chain, but
-not Agora's ASR front-end. Needs a human at a microphone; Claude has none.
+7. ✅ **Spoken-voice path VERIFIED LIVE (2026-09-05).** Previously the one
+   remaining gap: every earlier proof went through `agent-think` injection, which
+   exercises the agent's judgment and the full MCP/PagerDuty chain but not
+   Agora's ASR front-end.
+
+   A human ran the Scenario B script (orders-service crash-loop) aloud into a
+   microphone. Nothing in the script names the tool, mentions paging, or asks for
+   an escalation. The agent paged on its own, from speech alone:
+
+   ```
+   11:27:11 [INFO] tocsin.mcp_tools - page_oncall_engineer invoked:
+            incident_id='order_service_500_error' severity=SEV1
+            (-> PagerDuty 'critical')
+            summary='All customers are unable to place orders;
+                     API returns a 500 error consistently.'
+   11:27:12 [INFO] httpx - HTTP Request:
+            POST https://events.pagerduty.com/v2/enqueue "HTTP/1.1 202 Accepted"
+   ```
+
+   Four things worth recording, because they are what distinguishes judgment from
+   obedience:
+   - **SEV1, and Scenario A produced SEV2.** Two runs, two severities, decided
+     only by the facts given. This is the evidence that the severity ladder is
+     real rather than a fixed response.
+   - **It paged one beat EARLY.** The page fired at 11:27:11, after only
+     "customers can't place orders at all, it's everything" — before the
+     crash-loop detail at 11:27:41. Total impact was already established; it did
+     not need the extra evidence the script planned to give it.
+   - **`incident_id` and `summary` are its own.** Neither was supplied.
+   - **Exactly one page** across 6m51s and 115 observations. No duplicates.
+
+   Its spoken reasoning was also correct throughout: it caught the traffic-spike
+   contradiction, kept the deployment link a correlation rather than a cause,
+   refused to roll back without approval, and stated in the final summary that it
+   had not determined root cause.
+
+**Caveat, stated plainly:** the paging path is verified; the *evidence record*
+that same run produced was badly broken (fragment flood, mic echo recorded as
+operator speech, heuristic garbage — see `TODO.md`). Those are fixed separately
+and are unrelated to the tool call above, but a demo of this capability should
+not be read as a demo of the record's quality in that same session.
 
 ## "How does Tocsin know who is on call this week?"
 

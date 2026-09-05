@@ -60,8 +60,19 @@ now just reads that verdict instead of re-deciding it too late.
 Next step: join a real channel with a real mic, read the identity-outage script,
 confirm utterances land in `/observations` and the title/tiles/timeline update.
 
-### ✅ The agent's spoken replies never became transcript text or evidence — ROOT CAUSE FOUND AND FIXED (2026-09-04)
-**Status:** resolved and live-verified. Everything below this line, going back to
+### ⚠️ The agent's spoken replies never became transcript text or evidence — FIXED 2026-09-04, REGRESSED 2026-09-05
+**Status:** the Token 007 fix below is real and still correct, but the symptom
+returned. The Scenario B run (`room-202609051125-3zuj4`) recorded **zero**
+observations with `speaker='AI Agent'` / `source='agora_voice_agent'`, where the
+run 14 minutes earlier recorded 336. So agent RTM transcript delivery is
+intermittent, not fixed, and the cause of the intermittency is unknown.
+Worse, the agent's speech still reached the record — acoustically, through the
+microphone, mislabelled as the Operator (see the echo-guard entry above).
+A visible RTM status line now exists in the session log so this is noticed
+during a run rather than afterwards. Do not re-close this without a live run
+that shows `AI Agent` observations again.
+
+**Original 2026-09-04 finding, still accurate as far as it goes:** Everything below this line, going back to
 2026-09-01, was investigation of a real defect from the client side, which was
 the wrong side to look at: the agent connects to RTM correctly, subscribes
 correctly, and speaks audibly — but the agent's own RTM **login** was silently
@@ -94,8 +105,20 @@ structured observation.** Regression test:
 `test_agora_token.py::test_start_agent_token_is_token007_not_legacy_token006`.
 Full account: `docs/agora/RESEARCH.md` §9's 2026-09-04 update.
 
-### ✅ Agent transcript duplication (whiteboard, hypotheses, action items, timeline) — ROOT CAUSE FOUND AND FIXED (2026-09-04)
-**Status:** resolved and live-verified, found the same session as the RTM fix
+### ⚠️ Agent transcript duplication — FIXED 2026-09-04, REGRESSED 2026-09-05, ROOT CAUSE WAS DEEPER
+**Status:** the debounce was correct in shape but wrong in two ways, and the
+2026-09-05 run recorded **115 observations for roughly 10 spoken sentences**.
+(1) `stableMs` was 700ms while the real inter-token gap is ~1s, so every growth
+step went quiet long enough to settle. (2) Suppression compared only EXACT
+equality, so once a turn settled, continued growth re-emitted the whole sentence
+again one word longer. Fixed 2026-09-05: 2000ms, prefix-aware suppression that
+forwards only the unrecorded suffix, `destroy()` now flushes instead of dropping
+(the last utterance before leaving was being lost every session), plus
+server-side fragment gates in `observations.py` since the client settler only
+covers the RTM transport. VERIFIED LOCALLY (replayed traces); the microphone
+path is still unproven.
+
+**Original 2026-09-04 finding:** found the same session as the RTM fix
 above (this bug was invisible until RTM worked at all). First real live test
 after the Token 007 fix produced 110 claims / 30 hypotheses / 396 timeline
 entries / 128 action items from a ~6-line script -- the whiteboard showed the
