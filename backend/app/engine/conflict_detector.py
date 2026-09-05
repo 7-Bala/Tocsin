@@ -18,6 +18,51 @@ from app.engine.extraction import normalize_value
 logger = logging.getLogger("tocsin.conflict_detector")
 
 
+# Words that name an ASPECT of a component (a metric, dimension, or reading)
+# rather than naming a component itself. "database cpu" and "database connection
+# usage" are two readings of one database, not two different databases.
+#
+# Why this exists: live-observed 2026-09-05 running CLAUDE.md's own canonical
+# identity-outage script through the real extraction path. "I suspect the
+# authentication database is overloaded" and "Database CPU and connection usage
+# look normal and healthy" are a textbook contradiction -- and produced ZERO
+# conflicts, because the LLM extracted three unrelated-looking entity keys
+# ('authentication database', 'database cpu', 'database connection usage') and
+# _entities_match only did equality/substring, so nothing lined up. The seeded
+# demo route hid this by writing fixed, already-matching entity names.
+#
+# Stripping aspect words reduces each entity to its SUBJECT, after which the
+# existing substring rule does the right thing:
+#   'database cpu'            -> 'database'
+#   'authentication database' -> 'authentication database'   ('database' ⊂ it) ✓
+# and, importantly, stays conservative where it should:
+#   'payment database' vs 'user database' -> unchanged, no containment, NO match,
+#   because those are genuinely different systems and flagging them would be the
+#   cry-wolf failure this detector is explicitly built to avoid.
+_ASPECT_WORDS = frozenset({
+    "cpu", "memory", "ram", "disk", "io", "iops", "latency", "usage", "utilisation",
+    "utilization", "connection", "connections", "pool", "error", "errors", "rate",
+    "throughput", "load", "queue", "traffic", "health", "status", "uptime",
+    "availability", "response", "time", "success", "failure", "failures", "count",
+    "percentage", "percent", "level", "levels", "metric", "metrics", "telemetry",
+    "capacity", "saturation", "consumption",
+})
+
+
+def _subject_of(entity: str) -> str:
+    """
+    Reduce an entity string to the component it is ABOUT, dropping aspect words.
+
+    Falls back to the full token list when an entity is made up entirely of
+    aspect words (e.g. a bare "error rate"), so such an entity still only ever
+    matches another bare "error rate" rather than collapsing to empty and
+    matching everything.
+    """
+    tokens = [t for t in re.split(r"[^a-z0-9]+", entity.lower()) if t]
+    subject_tokens = [t for t in tokens if t not in _ASPECT_WORDS]
+    return " ".join(subject_tokens or tokens)
+
+
 def _entities_match(ent_a: str, ent_b: str) -> bool:
     """Return True if two entity strings refer to the same component/concept."""
     a = ent_a.lower().strip()
@@ -27,6 +72,23 @@ def _entities_match(ent_a: str, ent_b: str) -> bool:
     if a == b:
         return True
     if a in b or b in a:
+        return True
+
+    # Compare the underlying subjects, so differently-phrased readings of one
+    # component ("database cpu" vs "authentication database") are recognised as
+    # being about the same thing. Value comparison still decides whether they
+    # actually contradict -- this only decides whether they are comparable.
+    subj_a = _subject_of(a)
+    subj_b = _subject_of(b)
+    if not subj_a or not subj_b:
+        return False
+    if subj_a == subj_b:
+        return True
+    # Require a whole-word containment rather than a raw substring, so "api"
+    # doesn't match "rapid" and one-letter/degenerate subjects can't over-match.
+    if re.search(rf"(?<!\w){re.escape(subj_a)}(?!\w)", subj_b):
+        return True
+    if re.search(rf"(?<!\w){re.escape(subj_b)}(?!\w)", subj_a):
         return True
     return False
 

@@ -13,7 +13,7 @@ Covers the capabilities that turn Tocsin from a detector into a workflow:
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.engine.conflict_detector import _values_conflict, detect_conflicts
+from app.engine.conflict_detector import _entities_match, _subject_of, _values_conflict, detect_conflicts
 from app.engine.simulator import simulator
 from app.main import app
 from app.models.incident import ActionItem
@@ -612,3 +612,127 @@ async def test_supersede_nonexistent_decision_returns_404():
             },
         )
         assert r.status_code == 404
+
+
+# ─── Entity subject matching (regression: the canonical contradiction was missed) ──
+
+
+def test_aspect_words_reduce_an_entity_to_its_subject():
+    """'database cpu' is a reading OF a database, not a different database."""
+    assert _subject_of("database cpu") == "database"
+    assert _subject_of("database connection usage") == "database"
+    assert _subject_of("authentication database") == "authentication database"
+    assert _subject_of("login api") == "login api"
+
+
+def test_entity_made_entirely_of_aspect_words_does_not_collapse_to_empty():
+    """A bare 'error rate' must stay 'error rate', not become '' and match everything."""
+    assert _subject_of("error rate") == "error rate"
+    assert _entities_match("error rate", "login api") is False
+
+
+def test_differently_phrased_readings_of_one_component_are_comparable():
+    """
+    Regression for the live-observed 2026-09-05 miss: CLAUDE.md's own canonical
+    identity-outage contradiction produced ZERO conflicts because these three
+    entity keys never matched each other.
+    """
+    assert _entities_match("authentication database", "database cpu") is True
+    assert _entities_match("authentication database", "database connection usage") is True
+    assert _entities_match("database cpu", "database connection usage") is True
+
+
+def test_genuinely_different_systems_still_do_not_match():
+    """
+    The precision guard. Flagging two distinct databases as contradicting each
+    other is the cry-wolf failure this detector exists to avoid, and it would be
+    a worse bug than the false negative being fixed.
+    """
+    assert _entities_match("payment database", "user database") is False
+    assert _entities_match("login api", "authentication database") is False
+    assert _entities_match("identity service", "payment service") is False
+
+
+def test_the_canonical_contradiction_now_actually_fires_end_to_end():
+    """
+    The whole point: Dave says the auth database is overloaded, Priya says the
+    database metrics are healthy. That is a real contradiction and must surface.
+    """
+    existing = [{
+        "id": "claim-1",
+        "entity": "authentication database",
+        "value": "overloaded",
+        "source": "voice_transcript",
+        "speaker": "Dave Miller",
+    }]
+    conflicts = detect_conflicts(
+        new_entity="database cpu",
+        new_value="normal and healthy",
+        new_claim_id="claim-2",
+        new_source="voice_transcript",
+        new_speaker="Priya Sharma",
+        existing_claims=existing,
+    )
+    assert len(conflicts) == 1
+    assert conflicts[0]["claim_a_id"] == "claim-1"
+    assert conflicts[0]["claim_b_id"] == "claim-2"
+
+
+def test_two_healthy_readings_of_one_subject_are_not_a_conflict():
+    """Matching entities is necessary but not sufficient -- values still decide."""
+    existing = [{
+        "id": "claim-1",
+        "entity": "database cpu",
+        "value": "normal and healthy",
+        "source": "voice_transcript",
+        "speaker": "Priya Sharma",
+    }]
+    conflicts = detect_conflicts(
+        new_entity="database connection usage",
+        new_value="normal and healthy",
+        new_claim_id="claim-2",
+        new_source="telemetry",
+        new_speaker="SRE Bot",
+        existing_claims=existing,
+    )
+    assert conflicts == []
+
+
+# ─── Health value classification (word boundaries + negation) ──────────────────
+
+def test_health_classifier_matches_whole_words_not_substrings():
+    """
+    Regression: naive substring matching found "up" inside "corrupted" and
+    "unsupported" and classified both as HEALTHY -- a service reported corrupted
+    was recorded as fine.
+    """
+    from app.engine.extraction import normalize_value
+    assert normalize_value("corrupted") != "healthy"
+    assert normalize_value("unsupported") != "healthy"
+    assert normalize_value("backup completed") != "unhealthy"
+
+
+def test_health_classifier_honors_negation():
+    """Regression: 'not running' was classified healthy and 'no errors' unhealthy."""
+    from app.engine.extraction import normalize_value
+    assert normalize_value("not running") == "unhealthy"
+    assert normalize_value("no errors") == "healthy"
+    assert normalize_value("error-free") == "healthy"
+
+
+def test_saturation_language_is_recognised_as_unhealthy():
+    """
+    'overloaded' and 'exhausted' are how engineers actually describe a struggling
+    dependency, and are the exact words in CLAUDE.md's canonical script and the
+    seeded demo. Neither was in the vocabulary before 2026-09-05.
+    """
+    from app.engine.extraction import normalize_value
+    assert normalize_value("overloaded") == "unhealthy"
+    assert normalize_value("exhausted at 100%") == "unhealthy"
+    assert normalize_value("saturated") == "unhealthy"
+
+
+def test_mixed_polarity_is_not_forced_into_a_bucket():
+    """'degraded but running' is genuinely ambiguous; don't claim a clean polarity."""
+    from app.engine.extraction import normalize_value
+    assert normalize_value("degraded but running") not in ("healthy", "unhealthy")

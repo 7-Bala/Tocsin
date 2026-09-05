@@ -227,26 +227,40 @@ node gets snapped away on the next utterance.
 *Fix direction:* only auto-fit on first render or when node count changes, and skip
 it entirely if the user has interacted with the canvas.
 
-**GAP 3 — contradiction detection missed the canonical demo contradiction. CONFIRMED.**
-This is the important one. Fed the exact CLAUDE.md identity-outage script:
-- Dave: "I suspect the authentication database is overloaded"
-- Priya: "Database CPU and connection usage look completely normal and healthy"
+**✅ GAP 3 — contradiction detection missed the canonical contradiction. FIXED (2026-09-05).**
+Fed CLAUDE.md's exact identity-outage script through the real extraction path:
+Dave "I suspect the authentication database is overloaded" vs Priya "Database CPU
+and connection usage look normal and healthy" produced **0 conflicts**.
 
-Result: **0 conflicts detected.** The LLM extracted three *different* entity keys —
-`authentication database`, `database cpu`, `database connection usage` — and
-`conflict_detector` keys on normalized entity name, so nothing matched and no
-contradiction fired. Contradiction detection is one of Tocsin's headline
-differentiators, and the scenario it was designed around does not currently trigger
-it through the real extraction path.
+Two independent root causes, both fixed:
 
-Important nuance: it *does* work via `/api/demo/identity-outage/run-all`, because
-that route seeds fixed, matching entity names. So a demo driven by the seeded route
-shows conflicts; a demo driven by real speech may not. That divergence is exactly
-the kind of thing CLAUDE.md's demo/live boundary warns about.
-*Fix direction:* entity aliasing/normalization (map `database cpu`,
-`database connection usage`, `authentication database` onto a shared subject), or
-conflict detection on claim *polarity* about a shared subject rather than exact
-entity-key equality. Non-trivial — needs a design decision, not a patch.
+1. **Entity matching.** `_entities_match` did equality/substring only, so
+   `authentication database`, `database cpu` and `database connection usage`
+   never lined up. Fixed by reducing entities to their *subject* first —
+   stripping aspect words (`cpu`, `usage`, `connection`, `error rate`…), which
+   are readings **of** a component, not components. `database cpu` → `database`,
+   which the existing containment rule then matches against
+   `authentication database`. Deliberately still does NOT match `payment
+   database` vs `user database` (different systems); flagging those would be the
+   cry-wolf failure the detector exists to avoid, and there's a test pinning it.
+
+2. **Health classification** (`normalize_value`), which turned out to be broken
+   in three separate ways, all feeding the detector:
+   - `overloaded` and `exhausted` weren't in the vocabulary at all — the exact
+     words in CLAUDE.md's script and the seeded demo. No polarity, so nothing to
+     contradict.
+   - Naive **substring** matching classified `corrupted` and `unsupported` as
+     HEALTHY (both contain "up"). A service reported corrupted was recorded fine.
+   - **Negation was ignored**: `not running` → healthy, `no errors` → unhealthy,
+     both inverted.
+   Fixed with whole-word matching, negation handling, a saturation/exhaustion
+   vocabulary, and a mixed-signal guard (`degraded but running` stays raw rather
+   than being forced into a bucket).
+
+Live-verified end-to-end after rebuild: the same two utterances now produce
+1 conflict, correctly attributed to both speakers with a recommended
+verification step. 10 new regression tests (6 entity/subject matching incl.
+precision guards, 4 classifier). Backend suite 127 → 137, zero regressions.
 
 
 ### `SLACK_WEBHOOK_URL` was documented in `.env.example` but never wired into `mock-services`' docker-compose environment

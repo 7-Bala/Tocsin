@@ -413,19 +413,71 @@ HEALTHY_VALUES = frozenset({
     "resolved", "fixed", "online", "available", "green",
 })
 UNHEALTHY_VALUES = frozenset({
-    "down", "failing", "failed", "error", "unavailable", "offline", "broken",
-    "degraded", "unresponsive", "critical", "red", "dead", "crashed",
+    "down", "failing", "failed", "error", "errors", "unavailable", "offline",
+    "broken", "degraded", "unresponsive", "critical", "red", "dead", "crashed",
+    # Saturation / exhaustion. Added 2026-09-05: these are the most common way an
+    # engineer describes a struggling dependency, and their absence is why
+    # CLAUDE.md's own canonical contradiction ("the authentication database is
+    # overloaded" vs "database CPU and connection usage look normal and healthy")
+    # produced zero conflicts -- "overloaded" simply wasn't recognised as a health
+    # term at all, so there was no polarity to oppose. "exhausted" was likewise
+    # missing despite the seeded demo scenario using it verbatim.
+    "overloaded", "overload", "exhausted", "exhaustion", "saturated", "saturation",
+    "maxed", "throttled", "starved", "thrashing", "timeout", "timeouts",
+    "timing", "unstable", "flapping", "stalled", "stuck", "backlogged",
 })
 
 
+# Words that flip the polarity of a health term. "no errors" is healthy;
+# "not running" is unhealthy. Ignoring these inverted the classification of some
+# of the most ordinary things an engineer says in an incident call.
+_NEGATORS = frozenset({"no", "not", "never", "without", "zero", "free", "cleared"})
+
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
 def normalize_value(value: str) -> str:
-    """Map raw claim values to canonical equivalents for comparison."""
+    """
+    Map raw claim values to canonical equivalents for comparison.
+
+    Matches on WHOLE WORDS and honors negation. Both matter, and both were
+    live-observed broken on 2026-09-05 while fixing conflict detection:
+
+      'corrupted'   -> 'healthy'   (naive substring found "up" inside it)
+      'unsupported' -> 'healthy'   (same)
+      'not running' -> 'healthy'   (negation ignored)
+      'no errors'   -> 'unhealthy' (negation ignored)
+
+    Every one of those feeds the conflict detector, so a service reported as
+    "not running" was being recorded as healthy -- capable of both hiding a real
+    contradiction and manufacturing a false one.
+    """
     v = value.lower().strip()
-    if any(h in v for h in HEALTHY_VALUES):
-        return "healthy"
-    if any(u in v for u in UNHEALTHY_VALUES):
-        return "unhealthy"
-    return v
+    words = _WORD_RE.findall(v)
+    if not words:
+        return v
+
+    word_set = set(words)
+    has_healthy = bool(word_set & HEALTHY_VALUES)
+    has_unhealthy = bool(word_set & UNHEALTHY_VALUES)
+
+    if not has_healthy and not has_unhealthy:
+        return v
+
+    # A negator anywhere in a short claim value flips the reading. Claim values
+    # here are fragments ("normal and healthy", "no errors"), not prose, so a
+    # value-wide check is appropriate and keeps this explainable.
+    negated = bool(word_set & _NEGATORS)
+
+    if has_healthy and has_unhealthy:
+        # Mixed signal ("degraded but running") -- not a clean polarity, so don't
+        # claim one. Returning the raw value means the detector sees "not equal"
+        # rather than a false contradiction.
+        return v
+
+    if has_healthy:
+        return "unhealthy" if negated else "healthy"
+    return "healthy" if negated else "unhealthy"
 
 
 def _clean_entity(raw: str) -> str:
