@@ -60,16 +60,27 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 const AGENT_ECHO_TAIL_MS = 700;
 
 /**
- * How long RTM's own delivery of the operator's turns stays "proven" before
- * Chrome's local SpeechRecognition is trusted to fill in again. See
- * rtmLastUserTranscriptAtRef for why this exists: RTM and Chrome are two
- * independent ASR engines transcribing the same audio, each internally
- * debounced but never reconciled against each other -- windowed on RTM's own
- * ~2000ms settle cadence (roughly 2.5x it) so a momentary gap between two RTM
- * emissions doesn't wrongly wake Chrome mid-utterance, while a genuine RTM
- * outage still hands off within a few seconds rather than staying dark.
+ * This used to be a 5000ms rolling recency WINDOW (suppress Deepgram only for
+ * a few seconds after RTM's last delivery), reasoning that a genuine RTM
+ * outage mid-session should still hand back to Deepgram quickly. Live-caught
+ * 2026-09-05 (room-202609051816-34bg7): a window is not a hard enough
+ * boundary -- RTM and Deepgram are two independent, concurrently-running ASR
+ * engines transcribing the SAME live audio in real time, and a window can
+ * still let both capture the same utterance if their timing merely
+ * interleaves ("Platform team confirmed...crossloping." from RTM landed
+ * alongside "They are getting" / "ninety seconds." fragments from Deepgram,
+ * for the same two spoken sentences -- 6 rows for 2 sentences).
+ *
+ * Replaced with a one-way latch: once RTM proves it can deliver the
+ * operator's own turns AT ALL this session, Deepgram is suppressed for the
+ * REST of the session, full stop -- not just a rolling few seconds. This
+ * matches the actual intent (RTM is primary, Deepgram is pure fallback) far
+ * more strictly. The tradeoff is real and accepted: if RTM proves itself once
+ * and then genuinely goes silent later in the same session, Deepgram will
+ * NOT resume -- worth revisiting if that specific failure is ever observed
+ * live, but a race producing duplicate rows on every utterance is the worse
+ * failure to leave in place under this deadline.
  */
-const RTM_USER_TRANSCRIPT_RECENCY_MS = 5000;
 
 function newRoomId(): string {
   const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
@@ -430,12 +441,12 @@ export default function VoiceTestPage() {
   //
   // Rather than attempt fuzzy cross-path matching (real risk of the opposite
   // regression: two genuinely different sentences wrongly judged "the same"),
-  // Chrome's path is suppressed once RTM has proven THIS SESSION it can
+  // Deepgram's path is suppressed once RTM has proven THIS SESSION it can
   // deliver the operator's own turns -- Agora's own ASR is the primary source;
-  // Chrome is the fallback for when RTM cannot. Windowed, not a one-way latch:
-  // if RTM goes quiet for longer than this, Chrome resumes, so a mid-session
-  // RTM failure is never silently uncovered by both paths going dark.
-  const rtmLastUserTranscriptAtRef = useRef<number>(-Infinity);
+  // Deepgram is the fallback for when RTM cannot. A one-way latch, not a
+  // rolling window -- see the comment above RTM_USER_TRANSCRIPT_RECENCY_MS's
+  // old declaration site for why a window was not a hard enough boundary.
+  const rtmHasProvenItselfRef = useRef<boolean>(false);
 
   // ── Ref mirrors ────────────────────────────────────────────────────────
   useEffect(() => { isSpeakingRef.current  = isSpeaking;  }, [isSpeaking]);
@@ -583,9 +594,9 @@ export default function VoiceTestPage() {
     // nodes wired to a room that no longer exists.
     resetEchoGuardState();
     // A new room's RTM session hasn't proven anything yet -- must not inherit
-    // "recently proven" from the room just left, or Chrome stays wrongly
-    // suppressed for the first seconds of the next session.
-    rtmLastUserTranscriptAtRef.current = -Infinity;
+    // "proven" from the room just left, or Deepgram stays wrongly suppressed
+    // for the whole next session even if THIS session's RTM never delivers.
+    rtmHasProvenItselfRef.current = false;
     suppressedUtteranceCountRef.current = 0;
     setSuppressedUtteranceCount(0);
     barLevelsRef.current.fill(0);
@@ -1086,12 +1097,12 @@ export default function VoiceTestPage() {
             // nothing left to gate on.
             if (!decoded.text) return;
             const speakerLabel: 'You' | 'AI Agent' = decoded.speaker === 'TOCSIN' ? 'AI Agent' : 'You';
-            // RTM just proved it can deliver the operator's own turn -- see
-            // RTM_USER_TRANSCRIPT_RECENCY_MS. Stamped BEFORE Chrome's own local
-            // path can suppress on it, so this utterance's RTM version and
-            // Chrome's version of the SAME utterance don't both land if RTM
-            // resolves first.
-            if (speakerLabel === 'You') rtmLastUserTranscriptAtRef.current = Date.now();
+            // RTM just proved it can deliver the operator's own turn -- latch
+            // it for the rest of the session (see rtmHasProvenItselfRef).
+            // Set BEFORE Deepgram's own path can check it, so this
+            // utterance's RTM version and Deepgram's version of the SAME
+            // utterance don't both land if RTM resolves first.
+            if (speakerLabel === 'You') rtmHasProvenItselfRef.current = true;
             ingestObservationRef.current(speakerLabel, decoded.text);
           },
           // Primary mic-echo guard signal. AGENT_STATE_CHANGED is pushed over RTM
@@ -1191,22 +1202,13 @@ export default function VoiceTestPage() {
           // Same echo guard as everywhere else in this file: decided once, in
           // real time, at VAD speech-start -- not re-litigated here.
           if (!currentUtteranceIsOperatorRef.current) return;
-          // Same dual-capture guard as the (now-removed) Chrome path: if
-          // Agora's own RTM stream has recently proven it delivers the
-          // operator's turns, this would be a second, differently-worded copy
-          // of the same sentence. See RTM_USER_TRANSCRIPT_RECENCY_MS.
-          if (Date.now() - rtmLastUserTranscriptAtRef.current < RTM_USER_TRANSCRIPT_RECENCY_MS) return;
+          // Once Agora's own RTM stream has proven THIS SESSION that it
+          // delivers the operator's turns, Deepgram is fully suppressed for
+          // the rest of the session -- a second, differently-worded copy of
+          // the same sentence is not new information. See rtmHasProvenItselfRef.
+          if (rtmHasProvenItselfRef.current) return;
 
           const transcript = (msg?.channel?.alternatives?.[0]?.transcript || '').trim();
-          // TEMPORARY diagnostic (2026-09-05): removing the speech_final trust
-          // reduced but did not eliminate sub-2000ms commits ("And they are
-          // getting" -> "...OOM killed roughly every", 1.7s apart, a clean
-          // prefix extension that should have merged). Logging every raw
-          // Deepgram message so the next retest shows whether Deepgram itself
-          // is sending something unexpected (e.g. is_final resetting mid-
-          // utterance) or the bug is in this file's own accumulation --
-          // remove once confirmed.
-          addLog(`[deepgram] msg is_final=${msg.is_final} speech_final=${msg.speech_final} turn=${localSpeechTurnIdRef.current} @ ${new Date().toISOString().slice(11, 23)}: "${transcript}"`);
           if (!transcript) return;
           // Deepgram delivers each is_final commit as a fresh, non-overlapping
           // chunk of a longer utterance -- accumulate exactly like the
@@ -1340,8 +1342,6 @@ export default function VoiceTestPage() {
         stableMs: 2000,
         onSettled: (turn) => {
           const text = turn.text.trim();
-          // TEMPORARY diagnostic (2026-09-05) -- see matching note above.
-          addLog(`[deepgram] SETTLED key=${turn.key} @ ${new Date().toISOString().slice(11, 23)}: "${text}"`);
           if (text) ingestObservationRef.current('You', text);
           localSpeechBufferRef.current = '';
           localSpeechTurnIdRef.current += 1;
