@@ -22,6 +22,7 @@ import {
 import { startRtmTranscriptSession, RtmTranscriptSession } from '@/lib/agoraRtmTranscripts';
 import { decodeAgoraStreamMessage } from '@/lib/agoraStreamDecoder';
 import { AGENT_RMS_SPEAKING_THRESHOLD, decideUtteranceAttribution } from '@/lib/echoGuard';
+import { TurnSettler } from '@/lib/turnSettler';
 import {
   AlertTriangleIcon,
   CheckIcon,
@@ -332,10 +333,66 @@ export default function VoiceTestPage() {
   // Tracks the agent-audio falling edge from the analyser, so the echo tail is
   // accurate to an animation frame instead of to the SDK's 2000ms poll.
   const aiAudioWasAudibleRef = useRef<boolean>(false);
+  // When agentRms was last seen above threshold, RAW -- independent of the
+  // exponential smoothing's attack lag. See echoGuard.ts's
+  // AGENT_AUDIO_RECENCY_MS for the race this closes (the agent's own opening
+  // greeting was recorded as Operator speech on 2026-09-05). -Infinity means
+  // "never observed", which reads as an astronomically large gap and so fails
+  // open exactly like a fresh session should.
+  const aiLastAudibleAtRef = useRef<number>(-Infinity);
+
+  /**
+   * Every ref the echo guard reads, torn down to a clean slate. Call this
+   * whenever the agent is definitively gone -- it leaves the RTC channel
+   * (`user-left`) or is stopped from this side (`handleStopAgent`) -- so no
+   * stale timestamp can outlive the agent that produced it.
+   *
+   * `user-left` used to reset most of this inline but not `aiSpeechEndedAtRef`
+   * or `aiAudioWasAudibleRef`, and `handleStopAgent` reset none of it. Both
+   * gaps meant a real "agent recently stopped speaking" timestamp from before
+   * the stop could keep suppressing genuine operator speech afterward, since
+   * the tail check (echoGuard.ts) only measures elapsed time -- it has no way
+   * to tell a fresh timestamp from a stale one on its own. This is what closes
+   * that gap, for both exits, in one place.
+   */
+  const resetEchoGuardState = () => {
+    aiAmpRef.current = 0;
+    aiSmoothedRmsRef.current = 0;
+    aiAudioWasAudibleRef.current = false;
+    aiSpeechEndedAtRef.current = 0;
+    aiLastAudibleAtRef.current = -Infinity;
+    if (aiSourceRef.current) { try { aiSourceRef.current.disconnect(); } catch {} }
+    aiSourceRef.current = null;
+    aiAnalyserRef.current = null;
+    aiTimeDataRef.current = null;
+    aiFreqDataRef.current = null;
+    if (aiSpeakingTimerRef.current) { clearTimeout(aiSpeakingTimerRef.current); aiSpeakingTimerRef.current = null; }
+  };
 
   // ── Speech recognition refs ────────────────────────────────────────────
   const speechRecognitionRef       = useRef<any>(null);
   const speechRecognitionActiveRef = useRef<boolean>(false);
+  // Chrome delivers `continuous` SpeechRecognition results as discrete, final,
+  // NON-overlapping segments (event.resultIndex only exposes new ones) -- there
+  // is no growing-partial signal here the way there is on Agora's RTM stream.
+  // A ~2s pause mid-sentence is enough for Chrome to finalize a segment and
+  // start a fresh one on resumption, so without merging, one spoken sentence
+  // with a natural breath becomes several disconnected observations. Verified
+  // live 2026-09-05: "Platform team" / "...parts are crosslooping." / "And they
+  // are getting" / "...oh, I am killed" -- four rows for one sentence, none of
+  // which were growing prefixes of each other, so the backend's prefix-dedup
+  // (which only drops a later SHORTER fragment) could not merge them either.
+  //
+  // Fixed by accumulating consecutive finals into a running buffer and routing
+  // that buffer through the same TurnSettler used for the RTM path: each new
+  // chunk is appended and re-ingested as the buffer's current full text, so
+  // TurnSettler's silence debounce decides the real sentence boundary instead
+  // of Chrome's per-segment finalization. A fresh turn key per flushed sentence
+  // (localSpeechTurnIdRef) stops two DIFFERENT sentences that happen to share
+  // an opening phrase from being misread as one continuing.
+  const localSpeechSettlerRef = useRef<TurnSettler | null>(null);
+  const localSpeechBufferRef  = useRef<string>('');
+  const localSpeechTurnIdRef  = useRef<number>(0);
 
   // ── Ref mirrors ────────────────────────────────────────────────────────
   useEffect(() => { isSpeakingRef.current  = isSpeaking;  }, [isSpeaking]);
@@ -439,6 +496,10 @@ export default function VoiceTestPage() {
     if (aiSpeakingTimerRef.current) { clearTimeout(aiSpeakingTimerRef.current); aiSpeakingTimerRef.current = null; }
     speechRecognitionActiveRef.current = false;
     if (speechRecognitionRef.current) { try { speechRecognitionRef.current.stop(); } catch {} speechRecognitionRef.current = null; }
+    // Flush rather than drop -- the last thing said before leaving is always
+    // mid-buffer here, same reasoning as the RTM settler's destroy() below.
+    if (localSpeechSettlerRef.current) { localSpeechSettlerRef.current.destroy(); localSpeechSettlerRef.current = null; }
+    localSpeechBufferRef.current = '';
     if (audioCtxRef.current) {
       try { await audioCtxRef.current.close(); } catch {}
       audioCtxRef.current = null;
@@ -470,11 +531,12 @@ export default function VoiceTestPage() {
     quietFramesRef.current = 0;
     vadCandidateRef.current = false;
     smoothedUserRmsRef.current = 0;
-    aiSmoothedRmsRef.current = 0;
-    // Reset alongside aiSpeakingRef above. Leaving a stale timestamp here
-    // meant the next session started inside the previous session's echo tail.
-    aiSpeechEndedAtRef.current = 0;
-    aiAudioWasAudibleRef.current = false;
+    // Reset alongside aiSpeakingRef above. Leaving a stale timestamp here meant
+    // the next session started inside the previous session's echo tail. This
+    // also nulls the analyser/source (previously left dangling on Leave, unlike
+    // user-left and handleStopAgent), so a rejoin can never read from audio
+    // nodes wired to a room that no longer exists.
+    resetEchoGuardState();
     suppressedUtteranceCountRef.current = 0;
     setSuppressedUtteranceCount(0);
     barLevelsRef.current.fill(0);
@@ -599,6 +661,7 @@ export default function VoiceTestPage() {
       // and end entirely between two of those ticks.
       if (aiAnalyserRef.current) {
         const audible = smoothedAiRms > AGENT_RMS_SPEAKING_THRESHOLD;
+        if (audible) aiLastAudibleAtRef.current = Date.now();
         if (aiAudioWasAudibleRef.current && !audible) {
           aiSpeechEndedAtRef.current = Date.now();
         }
@@ -921,14 +984,7 @@ export default function VoiceTestPage() {
       client.on('user-left', (user: any) => {
         if (Number(user.uid) === 9999) {
           setRemoteAgentPresent(false); setAgentStatus('STOPPED'); setAiSpeaking(false);
-          aiAmpRef.current = 0;
-          aiSmoothedRmsRef.current = 0;
-          if (aiSourceRef.current) { try { aiSourceRef.current.disconnect(); } catch {} }
-          aiSourceRef.current = null;
-          aiAnalyserRef.current = null;
-          aiTimeDataRef.current = null;
-          aiFreqDataRef.current = null;
-          if (aiSpeakingTimerRef.current) { clearTimeout(aiSpeakingTimerRef.current); aiSpeakingTimerRef.current = null; }
+          resetEchoGuardState();
           addLog(`ℹ️ ${activeAgentLabelRef.current} (UID 9999) left the channel.`);
         }
       });
@@ -1082,6 +1138,7 @@ export default function VoiceTestPage() {
             agentSignalAvailable: aiAnalyserRef.current !== null,
             rtmAgentSpeaking: aiSpeakingRef.current,
             msSinceAgentSpeechEnded: Date.now() - aiSpeechEndedAtRef.current,
+            msSinceAgentAudioObserved: Date.now() - aiLastAudibleAtRef.current,
             echoTailMs: AGENT_ECHO_TAIL_MS,
           });
           currentUtteranceIsOperatorRef.current = decision.attributeToOperator;
@@ -1116,6 +1173,21 @@ export default function VoiceTestPage() {
         }
       });
 
+      // Debounces Chrome's discrete final segments into one observation per
+      // real sentence, the same way TurnSettler already does for Agora's RTM
+      // stream. See the ref declarations above for why this exists.
+      localSpeechBufferRef.current = '';
+      localSpeechTurnIdRef.current = 0;
+      localSpeechSettlerRef.current = new TurnSettler({
+        stableMs: 2000,
+        onSettled: (turn) => {
+          const text = turn.text.trim();
+          if (text) ingestObservationRef.current('You', text);
+          localSpeechBufferRef.current = '';
+          localSpeechTurnIdRef.current += 1;
+        },
+      });
+
       const SpeechRecognitionClass = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition || null;
       if (SpeechRecognitionClass) {
         const rec = new SpeechRecognitionClass();
@@ -1140,9 +1212,19 @@ export default function VoiceTestPage() {
             // a full six-line incident script produced zero observations
             // because every line was suppressed this way.
             if (!currentUtteranceIsOperatorRef.current) continue;
-            const text = event.results[i][0].transcript.trim();
-            if (text.length < 2) continue;
-            ingestObservationRef.current('You', text);
+            const chunk = event.results[i][0].transcript.trim();
+            if (!chunk) continue;
+            // Accumulate rather than ingest directly -- see localSpeechSettlerRef.
+            localSpeechBufferRef.current = localSpeechBufferRef.current
+              ? `${localSpeechBufferRef.current} ${chunk}`
+              : chunk;
+            localSpeechSettlerRef.current?.ingest(
+              `local:${localSpeechTurnIdRef.current}`,
+              localSpeechBufferRef.current,
+              false, // never trust Chrome's per-segment "final" as the whole utterance's end
+              true,
+              'user.transcription'
+            );
           }
         };
         rec.onerror = (e: any) => { if (e.error !== 'no-speech' && e.error !== 'aborted') addLog(`[Speech recognition] ${e.error}`); };
@@ -1222,6 +1304,13 @@ export default function VoiceTestPage() {
         body: JSON.stringify({ channel_name: channelName.trim(), agent_id: agentId }),
       });
       setAgentStatus('STOPPED'); setAgentId(null); setRemoteAgentPresent(false);
+      // Stopping the agent via this REST call and the agent's RTC user actually
+      // leaving the channel are two separate events that can land apart in time
+      // -- this reset must not wait for `user-left`. Without it, an echo-tail
+      // timestamp from just before Stop was clicked could keep suppressing
+      // genuine operator speech for up to AGENT_ECHO_TAIL_MS afterward, and any
+      // leftover RTM state chatter has nothing fresh to re-arm.
+      resetEchoGuardState();
     } catch { setAgentStatus('ERROR'); }
   };
 

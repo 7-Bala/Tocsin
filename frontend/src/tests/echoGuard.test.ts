@@ -9,6 +9,7 @@
 import assert from 'node:assert';
 import { test, describe } from 'node:test';
 import {
+  AGENT_AUDIO_RECENCY_MS,
   AGENT_RMS_SPEAKING_THRESHOLD,
   decideUtteranceAttribution,
   shouldAttributeToOperator,
@@ -23,6 +24,7 @@ function baseline() {
     agentSignalAvailable: true,
     rtmAgentSpeaking: false,
     msSinceAgentSpeechEnded: 60_000,
+    msSinceAgentAudioObserved: 60_000,
     echoTailMs: TAIL,
   };
 }
@@ -123,6 +125,7 @@ describe('echoGuard', () => {
         agentSignalAvailable: true,
         rtmAgentSpeaking: false, // RTM is dead -- no agent state ever arrives
         msSinceAgentSpeechEnded: 60_000,
+        msSinceAgentAudioObserved: 60_000,
         echoTailMs: TAIL,
       })
     );
@@ -140,10 +143,53 @@ describe('echoGuard', () => {
       agentSignalAvailable: true,
       rtmAgentSpeaking: false,
       msSinceAgentSpeechEnded: 0,
+      msSinceAgentAudioObserved: 0,
       echoTailMs: TAIL,
     });
     assert.strictEqual(decision.attributeToOperator, false);
     assert.match(decision.reason, /agent audio present/);
+  });
+
+  test('REGRESSION 2026-09-05: the agent\'s opening greeting is not operator evidence', () => {
+    // "Emergency coordinator active, how can I assist" -- the agent's very
+    // first utterance of the session, recorded whole as an Operator
+    // observation. At session start the smoothed agentRms can still be
+    // ramping up from a cold analyser even though the agent is genuinely
+    // speaking; msSinceAgentAudioObserved is what catches this when the plain
+    // rms check, sampled at this exact instant, does not.
+    const decision = decideUtteranceAttribution({
+      agentRms: 0.004, // still ramping -- below threshold at this exact frame
+      agentSignalAvailable: true,
+      rtmAgentSpeaking: false, // RTM state hasn't arrived yet either, this early
+      msSinceAgentSpeechEnded: 0,
+      msSinceAgentAudioObserved: 40, // but audio crossed the threshold 40ms ago
+      echoTailMs: TAIL,
+    });
+    assert.strictEqual(decision.attributeToOperator, false);
+    assert.match(decision.reason, /agent audio observed/);
+  });
+
+  test('an audio crossing outside the recency window does not by itself suppress', () => {
+    assert.strictEqual(
+      shouldAttributeToOperator({
+        ...baseline(),
+        msSinceAgentAudioObserved: AGENT_AUDIO_RECENCY_MS + 1,
+      }),
+      true
+    );
+  });
+
+  test('FAILS OPEN on the recency signal too when no analyser is attached', () => {
+    // A detached analyser must not let a stale "recently observed" timestamp
+    // suppress the operator either -- same fail-open rule as agentRms.
+    assert.strictEqual(
+      shouldAttributeToOperator({
+        ...baseline(),
+        agentSignalAvailable: false,
+        msSinceAgentAudioObserved: 0,
+      }),
+      true
+    );
   });
 
   test('every decision carries a human-readable reason', () => {

@@ -44,18 +44,46 @@
  */
 export const AGENT_RMS_SPEAKING_THRESHOLD = 0.015;
 
+/**
+ * How recently the agent's audio must have crossed the RMS threshold for that
+ * alone to count as "currently speaking".
+ *
+ * Exists for a race the plain `agentRms` check misses: onSpeechStart reads
+ * `agentRms` as one point-in-time snapshot of an exponentially SMOOTHED value.
+ * At the exact instant the agent's first buffer of a fresh utterance (e.g. its
+ * opening greeting) starts playing, the smoothed value can still be ramping up
+ * from ~0 and read below threshold for a frame or two even though the agent is
+ * genuinely, audibly mid-word. Live-reported 2026-09-05: the agent's own
+ * greeting -- "Emergency coordinator active, how can I assist" -- was recorded
+ * whole as an Operator observation, at the very start of a session when this
+ * race is most likely (the analyser has only just attached).
+ *
+ * `msSinceAgentAudioObserved` tracks the RAW crossing, sampled every frame,
+ * independent of the smoothing's attack lag -- so a crossing one frame before
+ * onSpeechStart still counts as "recent" even if the smoothed value at the
+ * exact instant of the check had not yet caught up.
+ */
+export const AGENT_AUDIO_RECENCY_MS = 250;
+
 export interface EchoGuardInputs {
   /** Smoothed RMS of the agent's own remote audio track, roughly 0..1. */
   agentRms: number;
   /**
    * Whether an analyser is actually attached to the agent's track. False means
-   * `agentRms` carries no information and must not be read as silence.
+   * `agentRms` (and `msSinceAgentAudioObserved`) carry no information and must
+   * not be read as silence.
    */
   agentSignalAvailable: boolean;
   /** Agora RTM AGENT_STATE_CHANGED === 'speaking'. The fastest signal, when it arrives. */
   rtmAgentSpeaking: boolean;
   /** Milliseconds since the agent's audio was last observed to stop. */
   msSinceAgentSpeechEnded: number;
+  /**
+   * Milliseconds since agentRms was last seen above AGENT_RMS_SPEAKING_THRESHOLD
+   * at all (the raw crossing, not the smoothed snapshot). Pass a very large
+   * number when the agent's audio has never crossed the threshold this session.
+   */
+  msSinceAgentAudioObserved: number;
   /** How long after the agent stops its audio may still be bleeding into the mic. */
   echoTailMs: number;
 }
@@ -72,6 +100,7 @@ export function decideUtteranceAttribution(input: EchoGuardInputs): EchoGuardDec
     agentSignalAvailable,
     rtmAgentSpeaking,
     msSinceAgentSpeechEnded,
+    msSinceAgentAudioObserved,
     echoTailMs,
   } = input;
 
@@ -83,6 +112,16 @@ export function decideUtteranceAttribution(input: EchoGuardInputs): EchoGuardDec
     return {
       attributeToOperator: false,
       reason: `agent audio present (rms ${agentRms.toFixed(3)})`,
+    };
+  }
+
+  // Catches the onset race described above the constant: the raw crossing was
+  // seen a frame or two ago, but the smoothed `agentRms` read at this exact
+  // instant hasn't caught up yet.
+  if (agentSignalAvailable && msSinceAgentAudioObserved < AGENT_AUDIO_RECENCY_MS) {
+    return {
+      attributeToOperator: false,
+      reason: `agent audio observed ${Math.round(msSinceAgentAudioObserved)}ms ago`,
     };
   }
 
