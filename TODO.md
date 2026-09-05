@@ -191,6 +191,64 @@ actually reflects the pushed prompt. Needs a live agent session (billed).
 
 ## P2 — Smaller, cheap, queued
 
+### ✅ Action-item checkbox looked unchecked while hovered — FIXED (2026-09-05)
+**Status:** fixed and live-verified. `.vcc-todo-checkbox:hover:not(:disabled)`
+(specificity 0,3,0) outranked `.vcc-todo-checkbox.checked` (0,2,0), so hovering an
+already-completed item repainted its dark `#0f172a` fill with the light hover
+background — a checked box rendered as unchecked. Added `:not(.checked)` to the
+hover rule. Verified live: `getComputedStyle` reports `rgb(15, 23, 42)` both before
+and during hover, checkmark stays visible.
+
+This is the **same specificity trap** as the earlier `.vcc-btn` hover bug (a shared
+base-class `:hover` silently overriding a state variant that never restates the
+property on its own `:hover`). Worth grepping for a third instance.
+
+### Whiteboard audit findings (2026-09-05) — 2 confirmed bugs, 1 significant gap
+
+Audited `ExcalidrawIncidentMap.tsx` and verified each finding live rather than
+inferring from code.
+
+**BUG 1 — user drawings are destroyed on every incident update. CONFIRMED LIVE.**
+`updateScene({ elements })` in the render effect replaces the *entire* scene each
+time the derived graph changes. The canvas ships a full Excalidraw toolbar, which
+actively invites annotation — but anything a human draws is wiped the moment the
+next claim arrives. Reproduced: drew a rectangle, injected one observation, the
+rectangle was gone. In a live incident room this silently destroys a commander's
+own annotations mid-conversation.
+*Fix direction:* partition the scene — keep derived nodes under stable ids and
+merge, preserving any element whose id isn't in the derived set, instead of
+wholesale replacement.
+
+**BUG 2 — the viewport is force-refit on every update. CONFIRMED LIVE.**
+`scrollToContent(elements, { fitToContent: true })` runs on every graph change, so
+any manual pan/zoom is yanked back. Reproduced in the same test: the view visibly
+re-zoomed when a fourth node appeared. During a demo, a judge who pans in to read a
+node gets snapped away on the next utterance.
+*Fix direction:* only auto-fit on first render or when node count changes, and skip
+it entirely if the user has interacted with the canvas.
+
+**GAP 3 — contradiction detection missed the canonical demo contradiction. CONFIRMED.**
+This is the important one. Fed the exact CLAUDE.md identity-outage script:
+- Dave: "I suspect the authentication database is overloaded"
+- Priya: "Database CPU and connection usage look completely normal and healthy"
+
+Result: **0 conflicts detected.** The LLM extracted three *different* entity keys —
+`authentication database`, `database cpu`, `database connection usage` — and
+`conflict_detector` keys on normalized entity name, so nothing matched and no
+contradiction fired. Contradiction detection is one of Tocsin's headline
+differentiators, and the scenario it was designed around does not currently trigger
+it through the real extraction path.
+
+Important nuance: it *does* work via `/api/demo/identity-outage/run-all`, because
+that route seeds fixed, matching entity names. So a demo driven by the seeded route
+shows conflicts; a demo driven by real speech may not. That divergence is exactly
+the kind of thing CLAUDE.md's demo/live boundary warns about.
+*Fix direction:* entity aliasing/normalization (map `database cpu`,
+`database connection usage`, `authentication database` onto a shared subject), or
+conflict detection on claim *polarity* about a shared subject rather than exact
+entity-key equality. Non-trivial — needs a design decision, not a patch.
+
+
 ### `SLACK_WEBHOOK_URL` was documented in `.env.example` but never wired into `mock-services`' docker-compose environment
 **Status:** fixed 2026-09-05, found while wiring `PAGERDUTY_ROUTING_KEY` through the
 same container. `notify_stakeholders`' live-Slack-dispatch path had been silently

@@ -2418,7 +2418,14 @@ export default function VoiceTestPage() {
           color: #ffffff;
           transition: background-color 0.12s ease, border-color 0.12s ease;
         }
-        .vcc-todo-checkbox:hover:not(:disabled) { border-color: #94a3b8; background: #f8fafc; }
+        /* :not(.checked) is load-bearing. Without it this rule (specificity 0,3,0 --
+           class + :hover + :not) outranks .vcc-todo-checkbox.checked (0,2,0) and
+           repaints an already-completed item's dark fill with the light hover
+           background, so hovering a checked box made it look unchecked. Same
+           specificity trap as the earlier .vcc-btn hover bug: a shared base-class
+           :hover silently overriding a state variant that never restates the
+           property on its own :hover. */
+        .vcc-todo-checkbox:hover:not(:disabled):not(.checked) { border-color: #94a3b8; background: #f8fafc; }
         .vcc-todo-checkbox:disabled { opacity: 0.5; cursor: not-allowed; }
         .vcc-todo-checkbox.checked {
           background: #0f172a;
