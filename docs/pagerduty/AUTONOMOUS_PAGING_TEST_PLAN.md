@@ -313,10 +313,39 @@ Try in this order, re-testing after each, and record which rung was needed:
 
 ---
 
+## Session log
+
+### 2026-09-05 — Phases 0 and 1 COMPLETE
+
+`./start.sh` ran clean (it auto-launched Docker, rebuilt, health-checked, started a
+fresh tunnel, rewrote both .env files, restarted backend, and self-verified).
+
+Gates verified independently afterwards, not taken on start.sh's word:
+
+| Gate | Result |
+|---|---|
+| Fresh ngrok URL inside backend container | `https://6105-2409-40f4-204e-c520-1572-ab50-183e-8dc8.ngrok-free.app` — confirmed NOT the old dead `f589…` URL |
+| `GET <url>/mcp` through public tunnel | `406` — correct (FastMCP rejects plain GET) |
+| `POST <url>/mcp` MCP `initialize` handshake through public tunnel | **`200`** — the actual protocol handshake completes from the public internet |
+| Tool discovery **through the public tunnel** | **14 tools, `page_oncall_engineer` present** |
+| `PAGERDUTY_ROUTING_KEY` inside mock-services container | present |
+
+The tunnel probe went further than the plan asked for: rather than only checking the
+tunnel was up, it ran a real MCP `initialize` and a real `list_tools` **against the
+public URL** — the exact path Agora's servers take. This also empirically disproves
+Obstacle 2 (ngrok browser-warning interstitial) for this session: the handshake was
+not intercepted.
+
+**Remaining risk unchanged:** this URL dies whenever ngrok restarts (Obstacle 1).
+If resuming later, re-run `./start.sh` and re-check this table before anything else.
+
+**Next:** Phase 2 (agent-think escalation). Not yet started — it spends billed Agora
+quota and can fire a real page to Bala's phone, so it needs an explicit go-ahead.
+
 ## What "done" looks like
 
-- [ ] Phase 0 gates pass
-- [ ] Phase 1: fresh ngrok URL verified *inside* the backend container
+- [x] Phase 0 gates pass
+- [x] Phase 1: fresh ngrok URL verified *inside* the backend container
 - [ ] Phase 2: agent-think escalation run, step-by-step, tool never named
 - [ ] Phase 3: browser run driven in Chrome with screenshots as evidence
 - [ ] Phase 3 step 9: Bala's live spoken-voice confirmation
