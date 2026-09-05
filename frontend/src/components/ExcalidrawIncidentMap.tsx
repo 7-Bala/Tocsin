@@ -133,6 +133,16 @@ export default function ExcalidrawIncidentMap({
   const excalidrawApiRef = useRef<ExcalidrawImperativeAPI | null>(null);
   const [ready, setReady] = useState(false);
 
+  // Ids of the elements this component generated on the previous render pass.
+  // Everything else in the scene belongs to the user and must survive updates.
+  const derivedIdsRef = useRef<Set<string>>(new Set());
+  // Signature of the last layout we auto-fitted to, so the viewport is only
+  // refitted when the drawing genuinely changes rather than on every update.
+  const lastFitSignatureRef = useRef<string>('');
+  // Once the user pans, zooms, or draws, the viewport is theirs -- stop
+  // auto-fitting entirely rather than fighting them for control of the canvas.
+  const userHasTakenControlRef = useRef(false);
+
   const hypRow = useMemo(() => layoutRow(graph.hypotheses, HYP_Y, HYP_W), [graph.hypotheses]);
   const entityStartY = graph.hypotheses.length > 0 ? HYP_Y + HYP_H + 90 : HYP_Y + 20;
   const entityRow = useMemo(
@@ -230,12 +240,48 @@ export default function ExcalidrawIncidentMap({
         } as ImportedSkeleton);
       }
 
-      const elements = restoreElements(convertToExcalidrawElements(skeletons), null);
+      const derived = restoreElements(convertToExcalidrawElements(skeletons), null);
+      const derivedIds = new Set(derived.map((el) => el.id));
+
+      // Preserve anything the user drew themselves.
+      //
+      // This effect used to pass `elements: derived` straight to updateScene,
+      // which replaces the ENTIRE scene. The canvas ships a full Excalidraw
+      // toolbar, so it actively invites a commander to annotate -- and every
+      // annotation was silently destroyed the moment the next claim arrived.
+      // Reproduced live 2026-09-05: drew a rectangle, injected one observation,
+      // rectangle gone.
+      //
+      // Derived elements are identified by the ids we generated on the previous
+      // pass (kept in derivedIdsRef) rather than by tagging, so this does not
+      // depend on customData surviving convertToExcalidrawElements. Anything not
+      // in that set is the user's and is carried forward. Elements whose id is in
+      // the NEW derived set are dropped from the carried-forward list because the
+      // freshly built version replaces them (entity nodes keep stable ids).
+      const previousDerivedIds = derivedIdsRef.current;
+      const userElements = excalidrawApiRef
+        .current!.getSceneElements()
+        .filter((el) => !previousDerivedIds.has(el.id) && !derivedIds.has(el.id));
+      derivedIdsRef.current = derivedIds;
+
       excalidrawApiRef.current!.updateScene({
-        elements,
+        elements: [...userElements, ...derived],
         appState: { viewBackgroundColor: p.canvasBg },
       });
-      excalidrawApiRef.current!.scrollToContent(elements, { fitToContent: true, animate: false });
+
+      // Only refit the viewport when the drawing actually changed shape, and
+      // never once the user has taken manual control of the canvas.
+      //
+      // This used to run on EVERY update, so any manual pan/zoom was yanked back
+      // the instant another utterance arrived. Reproduced live in the same test:
+      // the view visibly re-zoomed when a fourth node appeared. In a demo, a
+      // judge who pans in to read a node gets snapped away mid-sentence.
+      const signature = [...derivedIds].sort().join('|');
+      const shapeChanged = signature !== lastFitSignatureRef.current;
+      if (shapeChanged && !userHasTakenControlRef.current) {
+        excalidrawApiRef.current!.scrollToContent(derived, { fitToContent: true, animate: false });
+      }
+      lastFitSignatureRef.current = signature;
     })();
   }, [ready, graph, entityRow, hypRow, p]);
 
@@ -301,7 +347,11 @@ export default function ExcalidrawIncidentMap({
           Systems and proposed causes appear here as they are actually mentioned.
         </div>
       ) : (
-        <div className="xim-canvas">
+        <div
+          className="xim-canvas"
+          onPointerDownCapture={() => { userHasTakenControlRef.current = true; }}
+          onWheelCapture={() => { userHasTakenControlRef.current = true; }}
+        >
           <Excalidraw
             theme={theme}
             excalidrawAPI={(api: ExcalidrawImperativeAPI) => {

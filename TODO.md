@@ -203,29 +203,35 @@ This is the **same specificity trap** as the earlier `.vcc-btn` hover bug (a sha
 base-class `:hover` silently overriding a state variant that never restates the
 property on its own `:hover`). Worth grepping for a third instance.
 
-### Whiteboard audit findings (2026-09-05) — 2 confirmed bugs, 1 significant gap
+### ✅ Whiteboard audit findings (2026-09-05) — all 3 FIXED
 
 Audited `ExcalidrawIncidentMap.tsx` and verified each finding live rather than
 inferring from code.
 
-**BUG 1 — user drawings are destroyed on every incident update. CONFIRMED LIVE.**
+**✅ BUG 1 — user drawings destroyed on every incident update. FIXED + LIVE-VERIFIED.**
 `updateScene({ elements })` in the render effect replaces the *entire* scene each
 time the derived graph changes. The canvas ships a full Excalidraw toolbar, which
 actively invites annotation — but anything a human draws is wiped the moment the
 next claim arrives. Reproduced: drew a rectangle, injected one observation, the
 rectangle was gone. In a live incident room this silently destroys a commander's
 own annotations mid-conversation.
-*Fix direction:* partition the scene — keep derived nodes under stable ids and
-merge, preserving any element whose id isn't in the derived set, instead of
-wholesale replacement.
+*Fixed:* the effect now tracks the ids it generated on the previous pass
+(`derivedIdsRef`) and carries forward every scene element not in that set, instead
+of replacing the whole scene. Identifying derived elements by remembered id rather
+than by tagging avoids depending on `customData` surviving
+`convertToExcalidrawElements`. Live-verified: drew a rectangle, injected an
+observation that added a new derived node, rectangle survived intact.
 
-**BUG 2 — the viewport is force-refit on every update. CONFIRMED LIVE.**
+**✅ BUG 2 — viewport force-refit on every update. FIXED + LIVE-VERIFIED.**
 `scrollToContent(elements, { fitToContent: true })` runs on every graph change, so
 any manual pan/zoom is yanked back. Reproduced in the same test: the view visibly
 re-zoomed when a fourth node appeared. During a demo, a judge who pans in to read a
 node gets snapped away on the next utterance.
-*Fix direction:* only auto-fit on first render or when node count changes, and skip
-it entirely if the user has interacted with the canvas.
+*Fixed:* auto-fit now runs only when the derived layout signature actually changes,
+and never once `userHasTakenControlRef` is set — flipped by any pointer-down or
+wheel event on the canvas wrapper (capture phase, so Excalidraw's own handling
+can't swallow it). Live-verified in the same run: adding a second node did not
+re-zoom or reposition the view.
 
 **✅ GAP 3 — contradiction detection missed the canonical contradiction. FIXED (2026-09-05).**
 Fed CLAUDE.md's exact identity-outage script through the real extraction path:
