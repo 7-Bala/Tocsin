@@ -311,6 +311,19 @@ export default function VoiceTestPage() {
   const userFreqDataRef    = useRef<Uint8Array | null>(null);
   const userSourceRef      = useRef<MediaStreamAudioSourceNode | null>(null);
 
+  // ── Deepgram live transcription (operator speech capture) ──────────────
+  // Replaces Chrome's local Web Speech API entirely (2026-09-05): Chrome
+  // delivered discrete, non-overlapping final segments with no reliable
+  // end-of-utterance signal, and simultaneously duplicated whatever Agora's
+  // own RTM stream also captured. Deepgram's streaming API gives a real,
+  // documented is_final/speech_final distinction (see backend/app/api/
+  // deepgram.py's docstring), so its "final" can actually be trusted --
+  // unlike Chrome's, which this file explicitly distrusted throughout.
+  const deepgramWsRef        = useRef<WebSocket | null>(null);
+  const deepgramAudioCtxRef  = useRef<AudioContext | null>(null);
+  const deepgramSourceRef    = useRef<MediaStreamAudioSourceNode | null>(null);
+  const deepgramProcessorRef = useRef<ScriptProcessorNode | null>(null);
+
   const aiAnalyserRef      = useRef<AnalyserNode | null>(null);
   const aiTimeDataRef      = useRef<Uint8Array | null>(null);
   const aiFreqDataRef      = useRef<Uint8Array | null>(null);
@@ -381,12 +394,11 @@ export default function VoiceTestPage() {
     if (aiSpeakingTimerRef.current) { clearTimeout(aiSpeakingTimerRef.current); aiSpeakingTimerRef.current = null; }
   };
 
-  // ── Speech recognition refs ────────────────────────────────────────────
-  const speechRecognitionRef       = useRef<any>(null);
-  const speechRecognitionActiveRef = useRef<boolean>(false);
-  // Chrome delivers `continuous` SpeechRecognition results as discrete, final,
-  // NON-overlapping segments (event.resultIndex only exposes new ones) -- there
-  // is no growing-partial signal here the way there is on Agora's RTM stream.
+  // ── Operator speech transcription (Deepgram) refs ───────────────────────
+  // Chrome's local Web Speech API used to deliver `continuous` results as
+  // discrete, final, NON-overlapping segments (event.resultIndex only exposed
+  // new ones) -- there was no growing-partial signal the way there is on
+  // Agora's RTM stream.
   // A ~2s pause mid-sentence is enough for Chrome to finalize a segment and
   // start a fresh one on resumption, so without merging, one spoken sentence
   // with a natural breath becomes several disconnected observations. Verified
@@ -525,12 +537,14 @@ export default function VoiceTestPage() {
   const handleLeave = useCallback(async () => {
     if (rtmSessionRef.current) { await rtmSessionRef.current.stop(); rtmSessionRef.current = null; }
     if (aiSpeakingTimerRef.current) { clearTimeout(aiSpeakingTimerRef.current); aiSpeakingTimerRef.current = null; }
-    speechRecognitionActiveRef.current = false;
-    if (speechRecognitionRef.current) { try { speechRecognitionRef.current.stop(); } catch {} speechRecognitionRef.current = null; }
     // Flush rather than drop -- the last thing said before leaving is always
     // mid-buffer here, same reasoning as the RTM settler's destroy() below.
     if (localSpeechSettlerRef.current) { localSpeechSettlerRef.current.destroy(); localSpeechSettlerRef.current = null; }
     localSpeechBufferRef.current = '';
+    if (deepgramProcessorRef.current) { try { deepgramProcessorRef.current.disconnect(); } catch {} deepgramProcessorRef.current = null; }
+    if (deepgramSourceRef.current) { try { deepgramSourceRef.current.disconnect(); } catch {} deepgramSourceRef.current = null; }
+    if (deepgramAudioCtxRef.current) { try { await deepgramAudioCtxRef.current.close(); } catch {} deepgramAudioCtxRef.current = null; }
+    if (deepgramWsRef.current) { try { deepgramWsRef.current.close(); } catch {} deepgramWsRef.current = null; }
     if (audioCtxRef.current) {
       try { await audioCtxRef.current.close(); } catch {}
       audioCtxRef.current = null;
@@ -1152,6 +1166,99 @@ export default function VoiceTestPage() {
         userFreqDataRef.current = new Uint8Array(userAnalyser.frequencyBinCount);
       } catch { addLog('Web Audio setup failed.'); }
 
+      // ── Deepgram live transcription for the operator's own voice ─────────
+      // Connects to our own backend (deepgram.py), which holds the real API
+      // key and proxies to wss://api.deepgram.com/v1/listen -- the key never
+      // reaches this page. Reuses the SAME already-published Agora mic track
+      // via a SEPARATE 16kHz AudioContext (Deepgram's connection is configured
+      // for linear16 @ 16000Hz; a dedicated context avoids hand-rolling a
+      // resampler, since most browsers honor the AudioContext sampleRate hint).
+      try {
+        const wsBase = API_BASE_URL.replace(/^http/, 'ws');
+        const dgWs = new WebSocket(`${wsBase}/api/deepgram/stream`);
+        dgWs.binaryType = 'arraybuffer';
+        dgWs.onopen = () => addLog('Deepgram: connected.');
+        dgWs.onerror = () => addLog('Deepgram: connection error.');
+        dgWs.onclose = () => addLog('Deepgram: connection closed.');
+        dgWs.onmessage = (ev) => {
+          let msg: any;
+          try { msg = JSON.parse(ev.data); } catch { return; }
+          if (msg?.type === 'Error') { addLog(`Deepgram error: ${msg.error}`); return; }
+          if (msg?.type !== 'Results') return;
+          // Never persist an interim (unstable) transcript -- only Deepgram's
+          // own is_final commit is trustworthy enough to write to the record.
+          if (!msg.is_final) return;
+          // Same echo guard as everywhere else in this file: decided once, in
+          // real time, at VAD speech-start -- not re-litigated here.
+          if (!currentUtteranceIsOperatorRef.current) return;
+          // Same dual-capture guard as the (now-removed) Chrome path: if
+          // Agora's own RTM stream has recently proven it delivers the
+          // operator's turns, this would be a second, differently-worded copy
+          // of the same sentence. See RTM_USER_TRANSCRIPT_RECENCY_MS.
+          if (Date.now() - rtmLastUserTranscriptAtRef.current < RTM_USER_TRANSCRIPT_RECENCY_MS) return;
+
+          const transcript = (msg?.channel?.alternatives?.[0]?.transcript || '').trim();
+          const speechFinal = !!msg.speech_final;
+          if (!transcript) {
+            // A trailing speech_final with nothing new to add still closes out
+            // whatever was already buffered from earlier is_final commits.
+            if (speechFinal && localSpeechBufferRef.current) {
+              localSpeechSettlerRef.current?.ingest(
+                `local:${localSpeechTurnIdRef.current}`,
+                localSpeechBufferRef.current,
+                true,
+                true,
+                'user.transcription'
+              );
+            }
+            return;
+          }
+          // Deepgram delivers each is_final commit as a fresh, non-overlapping
+          // chunk of a longer utterance (unlike Chrome's occasional overlapping
+          // re-transcriptions) -- accumulate exactly like the RTM/Chrome paths.
+          localSpeechBufferRef.current = localSpeechBufferRef.current
+            ? `${localSpeechBufferRef.current} ${transcript}`
+            : transcript;
+          localSpeechSettlerRef.current?.ingest(
+            `local:${localSpeechTurnIdRef.current}`,
+            localSpeechBufferRef.current,
+            speechFinal, // trusted -- Deepgram's real endpointing signal, raised to 2000ms server-side
+            true,
+            'user.transcription'
+          );
+        };
+        deepgramWsRef.current = dgWs;
+
+        const dgTrack = localAudioTrackRef.current?.getMediaStreamTrack?.();
+        if (!dgTrack) throw new Error('Agora microphone track unavailable for Deepgram capture');
+        const dgAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+        const dgSource = dgAudioCtx.createMediaStreamSource(new MediaStream([dgTrack]));
+        // ScriptProcessorNode is deprecated in favor of AudioWorklet, but needs
+        // no separate module file/fetch ceremony -- the pragmatic choice under
+        // this deadline. Still universally functional in Chrome.
+        const dgProcessor = dgAudioCtx.createScriptProcessor(4096, 1, 1);
+        dgProcessor.onaudioprocess = (event) => {
+          if (dgWs.readyState !== WebSocket.OPEN) return;
+          const float32 = event.inputBuffer.getChannelData(0);
+          const int16 = new Int16Array(float32.length);
+          for (let i = 0; i < float32.length; i++) {
+            const s = Math.max(-1, Math.min(1, float32[i]));
+            int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+          }
+          dgWs.send(int16.buffer);
+        };
+        dgSource.connect(dgProcessor);
+        // Required for onaudioprocess to fire reliably in some browsers; the
+        // processor's output buffer is left untouched (silent), so nothing
+        // audible reaches the speakers from this node.
+        dgProcessor.connect(dgAudioCtx.destination);
+        deepgramAudioCtxRef.current = dgAudioCtx;
+        deepgramSourceRef.current = dgSource;
+        deepgramProcessorRef.current = dgProcessor;
+      } catch (e: any) {
+        addLog(`Deepgram setup failed: ${e.message} (operator speech will not be captured locally)`);
+      }
+
       setVadStatus('LOADING');
       const { MicVAD } = await import('@ricky0123/vad-web');
       const myVad = await MicVAD.new({
@@ -1214,9 +1321,9 @@ export default function VoiceTestPage() {
         }
       });
 
-      // Debounces Chrome's discrete final segments into one observation per
-      // real sentence, the same way TurnSettler already does for Agora's RTM
-      // stream. See the ref declarations above for why this exists.
+      // Debounces the operator-speech ASR path (Deepgram, wired above) into
+      // one observation per real sentence, the same way TurnSettler already
+      // does for Agora's RTM stream. See the ref declarations above.
       localSpeechBufferRef.current = '';
       localSpeechTurnIdRef.current = 0;
       localSpeechSettlerRef.current = new TurnSettler({
@@ -1228,56 +1335,6 @@ export default function VoiceTestPage() {
           localSpeechTurnIdRef.current += 1;
         },
       });
-
-      const SpeechRecognitionClass = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition || null;
-      if (SpeechRecognitionClass) {
-        const rec = new SpeechRecognitionClass();
-        rec.continuous = true; rec.interimResults = false; rec.lang = 'en-US';
-        rec.onresult = (event: any) => {
-          for (let i = event.resultIndex; i < event.results.length; i++) {
-            if (!event.results[i].isFinal) continue;
-            // Chrome's local SpeechRecognition transcribes whatever the mic
-            // picks up -- it cannot distinguish the operator's own voice from
-            // the agent's speaker audio leaking back into the mic (common on
-            // built-in laptop mic+speaker setups without headphones). Every
-            // result from this path is unconditionally labeled 'You' below, so
-            // agent speech bleeding into the mic must not reach the evidence
-            // record as the operator's own words.
-            //
-            // The verdict was decided in real time by the VAD's onSpeechStart
-            // above, not here. Re-checking aiSpeakingRef at this point (what
-            // this code used to do) is unreliable in the one direction that
-            // matters: Chrome delivers this callback 1-3s after the speech
-            // ended, by which time the agent is usually mid-reply, so genuine
-            // operator speech was being thrown away. Live-reported 2026-09-04:
-            // a full six-line incident script produced zero observations
-            // because every line was suppressed this way.
-            if (!currentUtteranceIsOperatorRef.current) continue;
-            // RTM has proven itself recently -- its transcription of this same
-            // speech is either already on the record or on its way. Chrome's
-            // own version would be a second, differently-worded copy of the
-            // same sentence, not new information. See RTM_USER_TRANSCRIPT_RECENCY_MS.
-            if (Date.now() - rtmLastUserTranscriptAtRef.current < RTM_USER_TRANSCRIPT_RECENCY_MS) continue;
-            const chunk = event.results[i][0].transcript.trim();
-            if (!chunk) continue;
-            // Accumulate rather than ingest directly -- see localSpeechSettlerRef.
-            localSpeechBufferRef.current = localSpeechBufferRef.current
-              ? `${localSpeechBufferRef.current} ${chunk}`
-              : chunk;
-            localSpeechSettlerRef.current?.ingest(
-              `local:${localSpeechTurnIdRef.current}`,
-              localSpeechBufferRef.current,
-              false, // never trust Chrome's per-segment "final" as the whole utterance's end
-              true,
-              'user.transcription'
-            );
-          }
-        };
-        rec.onerror = (e: any) => { if (e.error !== 'no-speech' && e.error !== 'aborted') addLog(`[Speech recognition] ${e.error}`); };
-        rec.onend   = () => { if (speechRecognitionActiveRef.current) { try { rec.start(); } catch {} } };
-        speechRecognitionRef.current = rec; speechRecognitionActiveRef.current = true;
-        try { rec.start(); } catch {}
-      }
     } catch (err: any) {
       addLog(`Join/VAD Error: ${err.message}`);
       // A failed join means you are not in a room, so the incident record opened

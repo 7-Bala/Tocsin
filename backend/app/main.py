@@ -25,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import asyncio
 from app.api.agora import router as agora_router
+from app.api.deepgram import router as deepgram_router
 from app.api.demo import router as demo_router
 from app.api.evidence import router as evidence_router
 from app.api.incidents import router as incidents_router
@@ -121,6 +122,7 @@ app.add_middleware(
 
 # Register REST routers
 app.include_router(incidents_router)
+app.include_router(deepgram_router)
 app.include_router(demo_router)
 app.include_router(agora_router)
 app.include_router(observations_router)
