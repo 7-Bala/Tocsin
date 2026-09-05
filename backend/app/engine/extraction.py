@@ -425,6 +425,15 @@ UNHEALTHY_VALUES = frozenset({
     # spellings alone would never match.
     "crashing", "crash-looping", "crashlooping", "looping", "unreachable",
     "timeout", "timeouts", "oom", "restarting",
+    # Live-caught 2026-09-05 through Deepgram: real speech doesn't come out
+    # hyphenated ("crash-looping" was typed test fixture text; a person says
+    # "crash looping"), and ASR transcribes some words the health pattern
+    # never anticipated ("killed", "dying") at all. Zero claims were extracted
+    # from "the Aura service parts are crash looping" and "getting OOM killed"
+    # -- both real, unremarkable spoken sentences -- leaving the incident
+    # titled "Untitled Incident — Awaiting Reports" despite five real
+    # observations on the record.
+    "killed", "dying",
     # Saturation / exhaustion. Added 2026-09-05: these are the most common way an
     # engineer describes a struggling dependency, and their absence is why
     # CLAUDE.md's own canonical contradiction ("the authentication database is
@@ -646,7 +655,7 @@ class HeuristicExtractor:
     # `t` after the apostrophe and yielded entity `t hold`, value `healthy`.
     # Keeping the word intact lets `_is_plausible_entity` reject it properly.
     HEALTH_PATTERNS = [
-        (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9'\s_-]+?)\s+(?:is\s+|are\s+)?(down|failing|failed|unreachable|offline|unavailable|broken|crashed|crashing|crash-looping|crashlooping|overloaded|saturated|exhausted|throttled|maxed out|at capacity)", "system_health", "REPORT"),
+        (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9'\s_-]+?)\s+(?:is\s+|are\s+|getting\s+)?(down|failing|failed|unreachable|offline|unavailable|broken|crashed|crashing|crash-looping|crash looping|crashlooping|killed|dying|dead|overloaded|saturated|exhausted|throttled|maxed out|at capacity)", "system_health", "REPORT"),
         (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9'\s_-]+?)\s+(?:is\s+|are\s+)?(up|running|healthy|operational|stable|working|online|normal)", "system_health", "REPORT"),
         (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9'\s_-]+?)\s+(?:is\s+|are\s+)?(?:returning\s+)?(\d+xx|\d{3}\s+errors?|errors?|timeouts?)", "error_rate", "REPORT"),
         (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9'\s_-]+?)\s+(?:exceeded|reached|is at|dropped to|rose to)\s+([\d\w\s%]+)", "metric_value", "REPORT"),

@@ -1198,6 +1198,15 @@ export default function VoiceTestPage() {
           if (Date.now() - rtmLastUserTranscriptAtRef.current < RTM_USER_TRANSCRIPT_RECENCY_MS) return;
 
           const transcript = (msg?.channel?.alternatives?.[0]?.transcript || '').trim();
+          // TEMPORARY diagnostic (2026-09-05): removing the speech_final trust
+          // reduced but did not eliminate sub-2000ms commits ("And they are
+          // getting" -> "...OOM killed roughly every", 1.7s apart, a clean
+          // prefix extension that should have merged). Logging every raw
+          // Deepgram message so the next retest shows whether Deepgram itself
+          // is sending something unexpected (e.g. is_final resetting mid-
+          // utterance) or the bug is in this file's own accumulation --
+          // remove once confirmed.
+          addLog(`[deepgram] msg is_final=${msg.is_final} speech_final=${msg.speech_final} turn=${localSpeechTurnIdRef.current} @ ${new Date().toISOString().slice(11, 23)}: "${transcript}"`);
           if (!transcript) return;
           // Deepgram delivers each is_final commit as a fresh, non-overlapping
           // chunk of a longer utterance -- accumulate exactly like the
@@ -1331,6 +1340,8 @@ export default function VoiceTestPage() {
         stableMs: 2000,
         onSettled: (turn) => {
           const text = turn.text.trim();
+          // TEMPORARY diagnostic (2026-09-05) -- see matching note above.
+          addLog(`[deepgram] SETTLED key=${turn.key} @ ${new Date().toISOString().slice(11, 23)}: "${text}"`);
           if (text) ingestObservationRef.current('You', text);
           localSpeechBufferRef.current = '';
           localSpeechTurnIdRef.current += 1;
