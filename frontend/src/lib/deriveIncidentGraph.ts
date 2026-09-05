@@ -82,18 +82,45 @@ export interface HypothesisNode {
   status: HypothesisStatus;
 }
 
+export interface DecisionNode {
+  kind: 'decision';
+  id: string;
+  /** The decision itself, verbatim (truncated for display). */
+  label: string;
+  fullText: string;
+  /** Why it was decided, if the decider gave a reason. */
+  rationale: string | null;
+  decidedBy: string | null;
+  timestamp: string;
+  /**
+   * A superseded decision is drawn struck-through rather than removed. "We
+   * decided X, then reversed it" is the single most important thing to hand to
+   * the next shift, and deleting the reversed call loses exactly that.
+   */
+  isSuperseded: boolean;
+  supersedesId: string | null;
+}
+
 export interface GraphEdge {
   id: string;
-  /** Hypothesis node id. */
+  /** Source node id (hypothesis, or decision for 'cites'/'supersedes'). */
   from: string;
-  /** Entity node id. */
+  /** Target node id (entity, or the superseded decision). */
   to: string;
   /**
-   * Only one kind exists today, and deliberately so: a person proposed a cause and
-   * their own words named this system. There is no inferred-causation edge type,
-   * because Tocsin does not infer causation.
+   * Every edge kind here traces to something a human actually said. There is
+   * still no inferred-causation edge type, because Tocsin does not infer
+   * causation:
+   *  - 'implicates'  a hypothesis's own words named this system.
+   *  - 'cites'       a decision's own stated rationale named this system. NOT
+   *                  "this evidence caused this decision" -- only "the person
+   *                  who decided it cited this". A decision whose rationale
+   *                  names nothing gets no edge at all rather than being wired
+   *                  to whatever happened to precede it in time.
+   *  - 'supersedes'  one decision explicitly reversed another, per the
+   *                  supersedes_id the backend already records.
    */
-  kind: 'implicates';
+  kind: 'implicates' | 'cites' | 'supersedes';
   /** Carried through so the renderer can dim edges from a ruled-out hypothesis. */
   hypothesisStatus: HypothesisStatus;
 }
@@ -101,7 +128,9 @@ export interface GraphEdge {
 export interface IncidentGraph {
   entities: EntityNode[];
   hypotheses: HypothesisNode[];
+  decisions: DecisionNode[];
   edges: GraphEdge[];
+  decisionOverflow: number;
   /** Entities beyond MAX_ENTITY_NODES, counted but not drawn. */
   entityOverflow: number;
   hypothesisOverflow: number;
@@ -113,6 +142,8 @@ export interface IncidentGraph {
 
 export const MAX_ENTITY_NODES = 8;
 export const MAX_HYPOTHESIS_NODES = 4;
+export const MAX_DECISION_NODES = 4;
+const MAX_DECISION_LABEL = 60;
 
 /**
  * Below this length a token is too generic to match inside free text without
@@ -194,9 +225,11 @@ export function deriveIncidentGraph(
   const empty: IncidentGraph = {
     entities: [],
     hypotheses: [],
+    decisions: [],
     edges: [],
     entityOverflow: 0,
     hypothesisOverflow: 0,
+    decisionOverflow: 0,
     isEmpty: false,
     isDisconnected: false,
   };
@@ -207,6 +240,13 @@ export function deriveIncidentGraph(
     (c): c is Claim =>
       !!c && typeof c.entity === 'string' && typeof c.value === 'string'
   );
+
+  // Decisions are claims too, but they are NOT systems. Without this split a
+  // decision's `entity` ("rollback") was drawn as its own entity node, so the
+  // board showed a phantom system nobody ever reported the health of, sitting
+  // alongside the real ones. Decisions get their own node kind below.
+  const isDecision = (c: Claim) => (c.claim_type || '').toLowerCase() === 'decision';
+  const entityClaims = claims.filter((c) => !isDecision(c));
 
   const rawHypotheses = (state.hypotheses || []).filter(
     (h): h is Hypothesis => !!h && typeof h.title === 'string' && h.title.trim().length > 0
@@ -228,7 +268,7 @@ export function deriveIncidentGraph(
   // ── Entity nodes: latest claim wins per entity, so a recovered service stops
   // rendering as broken.
   const grouped = new Map<string, { latest: Claim; count: number }>();
-  for (const claim of claims) {
+  for (const claim of entityClaims) {
     const key = normalizeEntityKey(claim.entity);
     if (!key) continue;
     const existing = grouped.get(key);
@@ -318,13 +358,85 @@ export function deriveIncidentGraph(
     }
   }
 
+  // ── Decision nodes. Decisions are not a separate collection: they are claims
+  // with claim_type 'decision', carrying the rationale / decided_by /
+  // supersedes chain the backend already records on Claim.
+  const decisionClaims = claims
+    .filter(isDecision)
+    .sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+
+  const allDecisions: DecisionNode[] = decisionClaims.map((c) => {
+    const text = (c.value || '').trim();
+    return {
+      kind: 'decision' as const,
+      id: `decision:${c.id}`,
+      label:
+        text.length <= MAX_DECISION_LABEL
+          ? text
+          : `${text.slice(0, MAX_DECISION_LABEL - 1).trimEnd()}…`,
+      fullText: text,
+      rationale: c.rationale ?? null,
+      decidedBy: c.decided_by ?? c.speaker ?? null,
+      timestamp: c.timestamp,
+      isSuperseded: Boolean(c.superseded_by_id),
+      supersedesId: c.supersedes_id ? `decision:${c.supersedes_id}` : null,
+    };
+  });
+
+  // Keep the MOST RECENT decisions when overflowing, the opposite of entities.
+  // The current call matters more than the first one made.
+  const decisions =
+    allDecisions.length <= MAX_DECISION_NODES
+      ? allDecisions
+      : allDecisions.slice(allDecisions.length - MAX_DECISION_NODES);
+  const decisionOverflow = Math.max(0, allDecisions.length - decisions.length);
+
+  const drawnDecisionIds = new Set(decisions.map((d) => d.id));
+
+  for (const d of decisions) {
+    // 'cites': only when the decider's OWN stated rationale names a drawn
+    // entity. A decision with no rationale, or one naming nothing on the board,
+    // gets no edge -- it is NOT wired to whatever claim happened to precede it,
+    // because "came after" is not "because of" and this project does not infer
+    // causation.
+    if (d.rationale) {
+      const haystack = d.rationale.toLowerCase();
+      for (const e of entities) {
+        if (!hypothesisNames(haystack, e.key)) continue;
+        edges.push({
+          id: `${d.id}->cites->${e.id}`,
+          from: d.id,
+          to: e.id,
+          kind: 'cites',
+          hypothesisStatus: 'PROPOSED' as HypothesisStatus,
+        });
+      }
+    }
+
+    // 'supersedes': an explicit reversal the backend recorded. Only drawn when
+    // both ends are on the board, so the arrow never points into empty space.
+    if (d.supersedesId && drawnDecisionIds.has(d.supersedesId)) {
+      edges.push({
+        id: `${d.id}->supersedes->${d.supersedesId}`,
+        from: d.id,
+        to: d.supersedesId,
+        kind: 'supersedes',
+        hypothesisStatus: 'PROPOSED' as HypothesisStatus,
+      });
+    }
+  }
+
   return {
     entities,
     hypotheses,
+    decisions,
     edges,
     entityOverflow,
     hypothesisOverflow,
-    isEmpty: entities.length === 0 && hypotheses.length === 0,
+    decisionOverflow,
+    isEmpty: entities.length === 0 && hypotheses.length === 0 && decisions.length === 0,
     isDisconnected: false,
   };
 }

@@ -70,7 +70,10 @@ const PALETTE = {
     conflict: { bg: '#fffbeb' as const, stroke: '#d97706' },
     hypothesis: { bg: '#faf5ff' as const, stroke: '#7c3aed' },
     ruledOut: { bg: '#fafafa' as const, stroke: '#a1a1aa' },
+    decision: { bg: '#eff6ff' as const, stroke: '#2563eb' },
+    decisionSuperseded: { bg: '#fafafa' as const, stroke: '#a1a1aa' },
     edge: '#8b5cf6',
+    citesEdge: '#2563eb',
   },
   dark: {
     surface: '#18181b',
@@ -87,6 +90,9 @@ const PALETTE = {
     },
     conflict: { bg: '#2a1f0d' as const, stroke: '#f59e0b' },
     hypothesis: { bg: '#1e1533' as const, stroke: '#c084fc' },
+    decision: { bg: '#0f1e3d' as const, stroke: '#60a5fa' },
+    decisionSuperseded: { bg: '#1c1c1f' as const, stroke: '#52525b' },
+    citesEdge: '#60a5fa',
     ruledOut: { bg: '#1c1c1f' as const, stroke: '#71717a' },
     edge: '#a855f7',
   },
@@ -97,6 +103,8 @@ const PALETTE = {
 const NODE_W = 220;
 const ENTITY_H = 90;
 const HYP_W = 240;
+const DEC_W = 250;
+const DEC_H = 88;
 const HYP_H = 70;
 const NODE_GAP = 30;
 const ROW_GAP = 40;
@@ -119,6 +127,17 @@ function layoutRow<T>(nodes: T[], y: number, width: number): Placed<T>[] {
 
 function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1).trimEnd()}…`;
+}
+
+/**
+ * HH:MM for a node caption. The board is a chronological record now, so every
+ * node states when it was said rather than making the reader cross-reference a
+ * separate timeline panel.
+ */
+function clockTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 export default function ExcalidrawIncidentMap({
@@ -150,6 +169,15 @@ export default function ExcalidrawIncidentMap({
     [graph.entities, entityStartY]
   );
 
+  // Decisions sit BELOW the evidence they were made from, so the board reads
+  // top-to-bottom as: proposed causes -> systems -> what we decided about them.
+  const entityRowCount = Math.max(1, Math.ceil(graph.entities.length / PER_ROW));
+  const decisionStartY = entityStartY + entityRowCount * (ENTITY_H + ROW_GAP) + 50;
+  const decisionRow = useMemo(
+    () => layoutRow(graph.decisions, decisionStartY, DEC_W),
+    [graph.decisions, decisionStartY]
+  );
+
   const unhealthyCount = graph.entities.filter((e) => e.health === 'unhealthy').length;
   const conflictCount = graph.entities.filter((e) => e.isConflicted).length;
 
@@ -169,10 +197,11 @@ export default function ExcalidrawIncidentMap({
 
       for (const { node, x, y } of entityRow) {
         const color = entityColorOf(node);
+        const stamp = clockTime(node.timestamp);
         const lines = [
           node.label,
           truncate(node.value, 34),
-          node.speaker ? `— ${node.speaker}` : '',
+          [node.speaker ? `— ${node.speaker}` : '', stamp].filter(Boolean).join('  ·  '),
         ].filter(Boolean);
         skeletons.push({
           type: 'rectangle',
@@ -222,7 +251,68 @@ export default function ExcalidrawIncidentMap({
         } as ImportedSkeleton);
       }
 
+      for (const { node, x, y } of decisionRow) {
+        const color = node.isSuperseded ? p.decisionSuperseded : p.decision;
+        const stamp = clockTime(node.timestamp);
+        // A superseded decision is kept and marked, never removed -- "we decided
+        // X then reversed it" is exactly what the next shift needs to inherit.
+        const header = node.isSuperseded ? '(superseded) DECISION' : 'DECISION';
+        const who = [node.decidedBy ? `— ${node.decidedBy}` : '', stamp]
+          .filter(Boolean)
+          .join('  ·  ');
+        const lines = [
+          header,
+          truncate(node.fullText, 40),
+          node.rationale ? `because: ${truncate(node.rationale, 34)}` : '',
+          who,
+        ].filter(Boolean);
+        skeletons.push({
+          type: 'rectangle',
+          id: node.id,
+          x,
+          y,
+          width: DEC_W,
+          height: DEC_H,
+          backgroundColor: color.bg,
+          strokeColor: color.stroke,
+          fillStyle: 'solid',
+          strokeWidth: node.isSuperseded ? 1 : 2,
+          strokeStyle: node.isSuperseded ? 'dotted' : 'solid',
+          roundness: { type: 3 },
+          label: {
+            text: lines.join('\n'),
+            fontSize: 12,
+            textAlign: 'center',
+            verticalAlign: 'middle',
+          },
+        } as ImportedSkeleton);
+      }
+
+      // Decision fork edges: 'cites' (decider's own rationale named this system)
+      // and 'supersedes' (one decision explicitly reversed another).
       for (const edge of graph.edges) {
+        if (edge.kind === 'implicates') continue;
+        const fromPos = decisionRow.find((d) => d.node.id === edge.from);
+        const toPos =
+          edge.kind === 'cites'
+            ? entityRow.find((e) => e.node.id === edge.to)
+            : decisionRow.find((d) => d.node.id === edge.to);
+        if (!fromPos || !toPos) continue;
+        skeletons.push({
+          type: 'arrow',
+          x: fromPos.x + DEC_W / 2,
+          y: fromPos.y,
+          strokeColor: edge.kind === 'supersedes' ? p.ruledOut.stroke : p.citesEdge,
+          strokeStyle: edge.kind === 'supersedes' ? 'dotted' : 'solid',
+          strokeWidth: 1.5,
+          start: { id: edge.from },
+          end: { id: edge.to },
+          label: { text: edge.kind === 'supersedes' ? 'replaces' : 'cited', fontSize: 10 },
+        } as ImportedSkeleton);
+      }
+
+      for (const edge of graph.edges) {
+        if (edge.kind !== 'implicates') continue;
         const fromPos = hypRow.find((h) => h.node.id === edge.from);
         const toPos = entityRow.find((e) => e.node.id === edge.to);
         if (!fromPos || !toPos) continue;
@@ -283,7 +373,7 @@ export default function ExcalidrawIncidentMap({
       }
       lastFitSignatureRef.current = signature;
     })();
-  }, [ready, graph, entityRow, hypRow, p]);
+  }, [ready, graph, entityRow, hypRow, decisionRow, p]);
 
   const cls = `xim-${theme}`;
 
@@ -323,13 +413,16 @@ export default function ExcalidrawIncidentMap({
       <div className="xim-head">
         <div>
           <div className="xim-title">Live Incident Whiteboard</div>
-          <div className="xim-sub">Excalidraw canvas, redrawn from the evidence record as people speak</div>
+          <div className="xim-sub">Flowchart with timestamps — redrawn from the evidence record as people speak</div>
         </div>
         {!graph.isDisconnected && !graph.isEmpty && (
           <div className="xim-counts">
             {conflictCount > 0 && <span style={{ color: p.conflict.stroke }}><b>{conflictCount}</b> contradicted</span>}
             <span style={{ color: unhealthyCount > 0 ? p.entity.unhealthy.stroke : p.muted }}><b>{unhealthyCount}</b> failing</span>
             <span><b>{graph.entities.length}</b> systems</span>
+            {graph.decisions.length > 0 && (
+              <span style={{ color: p.decision.stroke }}><b>{graph.decisions.length}</b> decisions</span>
+            )}
           </div>
         )}
       </div>
