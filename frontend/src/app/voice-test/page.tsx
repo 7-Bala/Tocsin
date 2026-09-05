@@ -1198,31 +1198,32 @@ export default function VoiceTestPage() {
           if (Date.now() - rtmLastUserTranscriptAtRef.current < RTM_USER_TRANSCRIPT_RECENCY_MS) return;
 
           const transcript = (msg?.channel?.alternatives?.[0]?.transcript || '').trim();
-          const speechFinal = !!msg.speech_final;
-          if (!transcript) {
-            // A trailing speech_final with nothing new to add still closes out
-            // whatever was already buffered from earlier is_final commits.
-            if (speechFinal && localSpeechBufferRef.current) {
-              localSpeechSettlerRef.current?.ingest(
-                `local:${localSpeechTurnIdRef.current}`,
-                localSpeechBufferRef.current,
-                true,
-                true,
-                'user.transcription'
-              );
-            }
-            return;
-          }
+          if (!transcript) return;
           // Deepgram delivers each is_final commit as a fresh, non-overlapping
-          // chunk of a longer utterance (unlike Chrome's occasional overlapping
-          // re-transcriptions) -- accumulate exactly like the RTM/Chrome paths.
+          // chunk of a longer utterance -- accumulate exactly like the
+          // RTM/Chrome paths.
           localSpeechBufferRef.current = localSpeechBufferRef.current
             ? `${localSpeechBufferRef.current} ${transcript}`
             : transcript;
+          // speech_final was passed straight through as the immediate-settle
+          // signal here originally -- documented as a real utterance-end
+          // marker, and endpointing was explicitly raised to 2000ms server-side
+          // to match. Live-caught 2026-09-05 (room-202609051758-rt5xj): it
+          // fired far more often than that, committing genuinely growing
+          // prefixes ("Platform team" -> "...confirmed that the order service
+          // parts" -> "...crossloping") as separate rows only 1-1.3s apart --
+          // well under the debounce window, so speech_final was reaching an
+          // utterance boundary at a finer grain than this project's 2-second
+          // sentence convention. Same lesson as Chrome, generalized: no
+          // upstream "final" claim is trusted for the settle decision, ever --
+          // only this file's own proven silence debounce decides a sentence is
+          // over. Deepgram's is_final still gates ingestion above (never
+          // persist an unstable interim guess); it just no longer skips the
+          // debounce.
           localSpeechSettlerRef.current?.ingest(
             `local:${localSpeechTurnIdRef.current}`,
             localSpeechBufferRef.current,
-            speechFinal, // trusted -- Deepgram's real endpointing signal, raised to 2000ms server-side
+            false,
             true,
             'user.transcription'
           );
