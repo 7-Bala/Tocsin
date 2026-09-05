@@ -556,6 +556,11 @@ _ENTITY_STOP_TOKENS = frozenset({
     "getting", "get", "gets", "got", "going", "goes", "went", "will", "would",
     "keeps", "keep", "staying", "stay", "started", "start", "starts",
     "and", "but", "so", "that", "this", "it", "they", "we", "i", "he", "she",
+    # Articles matter mid-phrase, not just at the head: "I suspect THE
+    # authentication database" would otherwise yield 'the authentication
+    # database', which no longer string-matches the 'authentication database'
+    # recorded from another speaker -- and the contradiction is lost.
+    "the", "a", "an", "our", "their", "its",
     "to", "of", "for", "in", "on", "at", "with", "from", "still", "now", "just",
     "compare", "check", "verify", "run", "pull", "restart", "rollback", "roll",
     "deploy", "monitor", "investigate", "analyze", "analyse", "confirm",
@@ -568,18 +573,40 @@ _ENTITY_STOP_TOKENS = frozenset({
 
 
 def _trim_entity_phrase(entity: str) -> str:
-    """Reduce a captured span to the noun phrase at its head."""
+    """
+    Reduce a captured span to the noun phrase that names the subject.
+
+    The span is split on stop tokens into candidate segments, and the FIRST
+    segment that names something operational wins.
+
+    Each alternative is wrong somewhere. Taking the first segment unconditionally
+    reports the messenger: "Platform team confirmed that the order service pods
+    are crash-looping" splits to ["platform team", "order service pods"], and the
+    claim is about the pods. Taking the last unconditionally trails off into the
+    predicate ("the login API is returning HTTP 503" ends in ["http"]) and, worse,
+    picks the second subject of a coordination -- "Database CPU and connection
+    usage look normal" would be filed under `connection usage`, which no longer
+    matches `authentication database` and so silently breaks CLAUDE.md's own
+    canonical contradiction. First-plausible skips non-operational lead-ins while
+    still preferring the head of the phrase.
+    """
     tokens = [t for t in re.split(r"\s+", entity.lower().strip()) if t]
-    while tokens and tokens[0] in _ENTITY_STOP_TOKENS:
-        tokens.pop(0)
-    trimmed: list[str] = []
+    segments: list[list[str]] = [[]]
     for token in tokens:
         if token in _ENTITY_STOP_TOKENS:
-            break
-        trimmed.append(token)
-    # Keep the phrase short; operational entities are one to three words
-    # ("login api", "authentication database", "database cpu").
-    return " ".join(trimmed[-3:])
+            if segments[-1]:
+                segments.append([])
+        else:
+            segments[-1].append(token)
+
+    # Operational entities are one to three words ("login api", "database cpu").
+    candidates = [" ".join(seg[-3:]) for seg in segments if seg]
+    if not candidates:
+        return ""
+    for candidate in candidates:
+        if _is_plausible_entity(candidate):
+            return candidate
+    return candidates[-1]
 
 
 def _is_plausible_entity(entity: str) -> bool:
@@ -619,7 +646,7 @@ class HeuristicExtractor:
     # `t` after the apostrophe and yielded entity `t hold`, value `healthy`.
     # Keeping the word intact lets `_is_plausible_entity` reject it properly.
     HEALTH_PATTERNS = [
-        (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9'\s_-]+?)\s+(?:is\s+|are\s+)?(down|failing|failed|unreachable|offline|unavailable|broken|crashed|crashing|crash-looping|crashlooping)", "system_health", "REPORT"),
+        (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9'\s_-]+?)\s+(?:is\s+|are\s+)?(down|failing|failed|unreachable|offline|unavailable|broken|crashed|crashing|crash-looping|crashlooping|overloaded|saturated|exhausted|throttled|maxed out|at capacity)", "system_health", "REPORT"),
         (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9'\s_-]+?)\s+(?:is\s+|are\s+)?(up|running|healthy|operational|stable|working|online|normal)", "system_health", "REPORT"),
         (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9'\s_-]+?)\s+(?:is\s+|are\s+)?(?:returning\s+)?(\d+xx|\d{3}\s+errors?|errors?|timeouts?)", "error_rate", "REPORT"),
         (r"(?:(?:reports|says|confirms|verified|stated|that|the)\s+)?([a-z0-9'\s_-]+?)\s+(?:exceeded|reached|is at|dropped to|rose to)\s+([\d\w\s%]+)", "metric_value", "REPORT"),

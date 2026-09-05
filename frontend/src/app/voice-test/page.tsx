@@ -21,6 +21,7 @@ import {
 } from '@/hooks/useIncidentApi';
 import { startRtmTranscriptSession, RtmTranscriptSession } from '@/lib/agoraRtmTranscripts';
 import { decodeAgoraStreamMessage } from '@/lib/agoraStreamDecoder';
+import { AGENT_RMS_SPEAKING_THRESHOLD, decideUtteranceAttribution } from '@/lib/echoGuard';
 import {
   AlertTriangleIcon,
   CheckIcon,
@@ -162,6 +163,8 @@ export default function VoiceTestPage() {
   const [llmVendor,          setLlmVendor]         = useState<'openai' | 'gemini'>('openai');
   const [remoteAgentPresent, setRemoteAgentPresent] = useState(false);
   const [logs,               setLogs]              = useState<string[]>([]);
+  const [showSessionLog,     setShowSessionLog]    = useState(false);
+  const [suppressedUtteranceCount, setSuppressedUtteranceCount] = useState(0);
   const [tokenDetails,       setTokenDetails]      = useState<{
     uid?: number | string; channel?: string; expiresIn?: number;
   } | null>(null);
@@ -321,6 +324,15 @@ export default function VoiceTestPage() {
   // true so speech that begins before any agent activity is kept.
   const currentUtteranceIsOperatorRef = useRef<boolean>(true);
 
+  // How many utterances the echo guard has attributed to the agent. Surfaced in
+  // the session log so over-suppression is visible within seconds rather than
+  // being discovered afterwards in the database -- which is how the 2026-09-04
+  // "six lines produced zero observations" bug survived a whole session.
+  const suppressedUtteranceCountRef = useRef<number>(0);
+  // Tracks the agent-audio falling edge from the analyser, so the echo tail is
+  // accurate to an animation frame instead of to the SDK's 2000ms poll.
+  const aiAudioWasAudibleRef = useRef<boolean>(false);
+
   // ── Speech recognition refs ────────────────────────────────────────────
   const speechRecognitionRef       = useRef<any>(null);
   const speechRecognitionActiveRef = useRef<boolean>(false);
@@ -459,6 +471,12 @@ export default function VoiceTestPage() {
     vadCandidateRef.current = false;
     smoothedUserRmsRef.current = 0;
     aiSmoothedRmsRef.current = 0;
+    // Reset alongside aiSpeakingRef above. Leaving a stale timestamp here
+    // meant the next session started inside the previous session's echo tail.
+    aiSpeechEndedAtRef.current = 0;
+    aiAudioWasAudibleRef.current = false;
+    suppressedUtteranceCountRef.current = 0;
+    setSuppressedUtteranceCount(0);
     barLevelsRef.current.fill(0);
     smoothedLevelsRef.current.fill(0);
     barColorsRef.current.forEach(c => { c[0] = 75; c[1] = 85; c[2] = 99; });
@@ -573,6 +591,19 @@ export default function VoiceTestPage() {
         dt
       );
       const smoothedAiRms = aiSmoothedRmsRef.current;
+
+      // Agent-audio falling edge, sampled every frame. This is what makes the
+      // echo tail meaningful when RTM delivers no agent state at all: without
+      // it, aiSpeechEndedAtRef is only ever written by the RTM callback or by
+      // the SDK's 2000ms volume-indicator, and a short agent reply can begin
+      // and end entirely between two of those ticks.
+      if (aiAnalyserRef.current) {
+        const audible = smoothedAiRms > AGENT_RMS_SPEAKING_THRESHOLD;
+        if (aiAudioWasAudibleRef.current && !audible) {
+          aiSpeechEndedAtRef.current = Date.now();
+        }
+        aiAudioWasAudibleRef.current = audible;
+      }
 
       // ── Step 4: Calibrated Adaptive Noise Floor ──
       const isQuiet = smoothedUserRms < noiseFloorRef.current * 1.5;
@@ -1039,9 +1070,26 @@ export default function VoiceTestPage() {
           // forward, so in a real back-and-forth every line was dropped and the
           // evidence record stayed empty. VAD fires in real time, so this is
           // the honest point to judge who is talking.
-          currentUtteranceIsOperatorRef.current =
-            !aiSpeakingRef.current &&
-            Date.now() - aiSpeechEndedAtRef.current >= AGENT_ECHO_TAIL_MS;
+          //
+          // The signals are ranked by how fast they can tell us the agent is
+          // talking. RTM agent state is fastest but was delivered ZERO times in
+          // the 2026-09-05 run, and RTC's volume-indicator is hard-coded by the
+          // SDK to a 2000ms poll -- too coarse for a short reply. The analyser
+          // on the agent's own remote track updates every animation frame and
+          // depends on neither, so it is what actually catches the echo.
+          const decision = decideUtteranceAttribution({
+            agentRms: aiSmoothedRmsRef.current,
+            agentSignalAvailable: aiAnalyserRef.current !== null,
+            rtmAgentSpeaking: aiSpeakingRef.current,
+            msSinceAgentSpeechEnded: Date.now() - aiSpeechEndedAtRef.current,
+            echoTailMs: AGENT_ECHO_TAIL_MS,
+          });
+          currentUtteranceIsOperatorRef.current = decision.attributeToOperator;
+          if (!decision.attributeToOperator) {
+            suppressedUtteranceCountRef.current += 1;
+            setSuppressedUtteranceCount(suppressedUtteranceCountRef.current);
+            addLog(`Utterance attributed to agent, not recorded — ${decision.reason}`);
+          }
         },
         onSpeechEnd:      () => { vadCandidateRef.current = false; },
         onFrameProcessed: (p: any) => {
@@ -2564,6 +2612,44 @@ export default function VoiceTestPage() {
           flex-shrink: 0;
         }
 
+        /* Session log — deliberately quiet: same muted palette as the status
+           bar it hangs off, so it reads as instrumentation rather than as part
+           of the incident record. */
+        .vcc-log-toggle {
+          margin-left: auto;
+          background: none;
+          border: none;
+          padding: 0;
+          font: inherit;
+          color: #b0b0b0;
+          cursor: pointer;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .vcc-log-toggle:hover { color: #737373; }
+        .vcc-log-badge {
+          background: #fef3c7;
+          color: #92400e;
+          border-radius: 9999px;
+          padding: 1px 7px;
+          font-size: 10px;
+        }
+        .vcc-log-panel {
+          max-height: 168px;
+          overflow-y: auto;
+          background: #fafaf9;
+          border-top: 1px solid #e5e5e5;
+          padding: 8px 20px;
+          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-size: 10.5px;
+          line-height: 1.6;
+          color: #737373;
+          flex-shrink: 0;
+        }
+        .vcc-log-line { white-space: pre-wrap; word-break: break-word; }
+        .vcc-log-empty { color: #b0b0b0; font-style: italic; }
+
         /* ── Utility: empty state ── */
         .vcc-empty {
           font-size: 11.5px;
@@ -3146,35 +3232,14 @@ export default function VoiceTestPage() {
                   </div>
                 )}
 
-                {/* ── Incident Timeline — real data, item 1 step 4 ── */}
-                <div className="vcc-section-card">
-                  <div className="vcc-section-label">Incident Timeline</div>
-                  {(activeIncident?.timeline?.length ?? 0) > 0 ? (
-                    <div className="vcc-tl-scroll">
-                      <div className="vcc-tl">
-                        {[...activeIncident!.timeline].reverse().slice(0, 20).map((item, i, arr) => (
-                          <div className="vcc-tl-row" key={`${item.timestamp}-${i}`}>
-                            <div className="vcc-tl-time">
-                              {isMounted
-                                ? new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                                : '—'}
-                            </div>
-                            <div className="vcc-tl-mid">
-                              <div className="vcc-tl-dot" style={{ background: item.actor === 'SYSTEM' ? '#9b9b9b' : '#3b82f6' }} />
-                              {i < arr.length - 1 && <div className="vcc-tl-line" />}
-                            </div>
-                            <div className="vcc-tl-body" style={{ paddingBottom: i < arr.length - 1 ? 10 : 0 }}>
-                              <div className="vcc-tl-title">{item.event_type.replaceAll('_', ' ')}</div>
-                              <div className="vcc-tl-desc" title={item.description}>{item.description}</div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : (
-                    <p className="vcc-empty">Waiting for incident information...</p>
-                  )}
-                </div>
+                {/* The Incident Timeline panel was removed 2026-09-05. The whiteboard
+                    is now a timestamped flowchart, so a second chronological view of
+                    the same evidence was redundant screen furniture. The timeline DATA
+                    is untouched and still drives the final report -- it lives in
+                    state_json.timeline, which is what the dashboard reads. Note the
+                    `timeline_entries` TABLE has never been written to: there is no
+                    TimelineRepository, so that table is NOT IMPLEMENTED, not merely
+                    empty. */}
 
                 {/* ── Contradictions ──
                     The single most product-defining panel: two people asserted
@@ -3732,7 +3797,42 @@ export default function VoiceTestPage() {
           {(activeIncident?.action_items?.length ?? 0) > 0 && (
             <span>{activeIncident?.action_items?.length} action item{activeIncident?.action_items?.length !== 1 ? 's' : ''} tracked</span>
           )}
+          {/*
+            Session log. `logs` has always been populated but never rendered --
+            addLog() only reached console.log. That is the single reason the
+            2026-09-05 run's damage went unnoticed while it was being recorded:
+            RTM transcript delivery failed, the message saying so was written to
+            a console nobody had open, and the operator had no way to know the
+            agent's replies were being captured as their own speech.
+
+            Collapsed by default and visually subordinate, to leave this page's
+            light design as it is.
+          */}
+          <button
+            type="button"
+            className="vcc-log-toggle"
+            onClick={() => setShowSessionLog((v) => !v)}
+            aria-expanded={showSessionLog}
+          >
+            {showSessionLog ? '▾' : '▸'} Session log{logs.length ? ` (${logs.length})` : ''}
+            {suppressedUtteranceCount > 0 && (
+              <span className="vcc-log-badge" title="Utterances attributed to the agent rather than to you">
+                {suppressedUtteranceCount} echo-suppressed
+              </span>
+            )}
+          </button>
         </footer>
+        {showSessionLog && (
+          <div className="vcc-log-panel" role="log" aria-label="Session log">
+            {logs.length === 0 ? (
+              <div className="vcc-log-empty">Nothing logged yet this session.</div>
+            ) : (
+              logs.slice(-200).map((line, i) => (
+                <div key={i} className="vcc-log-line">{line}</div>
+              ))
+            )}
+          </div>
+        )}
       </div>
     </>
   );

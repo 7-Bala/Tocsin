@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 
+from app.engine.extraction import UNHEALTHY_VALUES as _EXTRACTION_UNHEALTHY_VALUES
 from app.models.incident import (
     Claim,
     Hypothesis,
@@ -45,14 +46,22 @@ from app.models.incident import (
 # an "unhealthy" claim means the same thing to the tiles, the conflict detector and
 # the severity calculation. Kept in sync by hand -- there is no shared source of
 # truth across the Python and TypeScript runtimes.
-UNHEALTHY_VALUES = frozenset({
-    "down", "failing", "failed", "error", "unavailable", "offline", "broken",
-    "degraded", "unresponsive", "critical", "red", "dead", "crashed",
-    # The heuristic extractor now records the state word the speaker actually
-    # used rather than a fixed per-pattern constant, so every keyword its health
-    # patterns match must be classifiable here or an outage reads as healthy.
-    "unreachable", "timeout", "timeouts",
-})
+# Derived from the extractor's own vocabulary rather than restated here. These
+# were two hand-maintained lists that silently drifted apart: "overloaded" was
+# added to extraction's set on 2026-09-05 but not to this one, so a live incident
+# whose only claims were "authentication database / overloaded" and
+# "authentication database / healthy" titled itself "Authentication Database —
+# Healthy" in the middle of an outage, and scored no severity pressure for the
+# outage at all. A word the extractor can emit must always be classifiable here.
+UNHEALTHY_VALUES = frozenset(
+    _EXTRACTION_UNHEALTHY_VALUES
+    | {
+        # Derivation-only vocabulary: statuses that reach claims from the LLM
+        # path or from operators typing directly, which the heuristic patterns
+        # themselves never emit.
+        "unresponsive", "red", "dead",
+    }
+)
 
 # How many distinct unhealthy entities it takes to reach each severity band. These
 # are deliberately coarse: severity here is a summary of how much is currently

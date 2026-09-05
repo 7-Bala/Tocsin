@@ -173,3 +173,46 @@ async def test_contradiction_surfaces_through_real_ingestion():
             "a contradiction voiced by one operator on one channel must reach the record; "
             f"claims were {[(c['entity'], c['value']) for c in state['claims']]}"
         )
+
+
+@pytest.mark.asyncio
+async def test_claudemd_canonical_pair_conflicts_on_the_heuristic_path():
+    """
+    CLAUDE.md's scenario lines 3 and 4, verbatim in shape: a hypothesis about the
+    auth database being overloaded, then a report that it is healthy.
+
+    Three separate things had to be true for this to work, and none of them were
+    on 2026-09-05: the heuristic had to recognise "overloaded" as a health state
+    at all (it did not); both utterances had to yield the SAME entity string
+    ("the authentication database" vs "authentication database" would not match);
+    and the candidate query had to return a claim from a different utterance by
+    the same speaker on the same channel.
+    """
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        inc = await client.post(
+            "/api/incidents",
+            json={"title": "Canonical Pair", "event_type": "TECHNICAL_INCIDENT"},
+        )
+        inc_id = inc.json()["incident_id"]
+
+        for utterance in [
+            "I suspect the authentication database is overloaded.",
+            "SRE says the authentication database is healthy and running normally.",
+        ]:
+            await client.post(
+                f"/api/incidents/{inc_id}/observations",
+                json={
+                    "raw_utterance": utterance,
+                    "speaker": "Operator",
+                    "source": "voice_transcript",
+                },
+            )
+
+        state = (await client.get(f"/api/incidents/{inc_id}")).json()
+        entities = [c["entity"] for c in state["claims"]]
+        assert entities.count("authentication database") == 2, (
+            f"both utterances must name the same entity, got {entities}"
+        )
+        assert len(state["conflicts"]) >= 1, "the canonical contradiction must be recorded"
+        assert len(state["hypotheses"]) >= 1, "the suspicion must be filed as a hypothesis"
