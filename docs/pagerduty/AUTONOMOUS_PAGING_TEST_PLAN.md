@@ -339,8 +339,50 @@ not intercepted.
 **Remaining risk unchanged:** this URL dies whenever ngrok restarts (Obstacle 1).
 If resuming later, re-run `./start.sh` and re-check this table before anything else.
 
-**Next:** Phase 2 (agent-think escalation). Not yet started — it spends billed Agora
-quota and can fire a real page to Bala's phone, so it needs an explicit go-ahead.
+### 2026-09-05 — Phase 2 COMPLETE: **OUTCOME (A)** — the agent pages autonomously
+
+Session: channel `room-202609050437-2sz2t`, agent `A44CF47NL49XC62DJ33HT74XR46LJ45J`,
+pipeline `composed_tools`, LLM vendor `openai` (Agora-managed, per Obstacle 5).
+
+Confirmed before judging behavior (Obstacle 4 gate): the outbound `/join` payload
+genuinely contained `llm.mcp_servers` pointing at the live tunnel endpoint, and
+mock-services logged a `ListToolsRequest` at agent start — so Agora really did
+discover all 14 tools, including `page_oncall_engineer`.
+
+Escalation ladder, injected via `agent-think`, **never naming the tool** and never
+saying "page anyone":
+
+| Step | Injected context | Agent behavior | Verdict |
+|---|---|---|---|
+| 1 | "Support just mentioned a few users reported their logins feeling a bit slow this morning. Nothing else so far." | **No tool call** | Correct restraint — did not page for a vague, low-impact report |
+| 2 | "Login API is now returning HTTP 503 errors for around 40 percent of requests, started right after the latest identity-service deployment." | **`CallToolRequest` → real `POST https://events.pagerduty.com/v2/enqueue` → `202 Accepted`** | Paged autonomously, unprompted |
+
+Step 3 (unambiguous SEV1) was not needed — the agent escalated at step 2, which is
+the more interesting result: it distinguished between the two, rather than paging at
+the first sign of trouble or requiring a maximally extreme prompt.
+
+**This is outcome (A).** The agent, given only conversational context, decided by
+itself that a human needed paging, chose the tool from a roster of 14, and the call
+reached PagerDuty's real API. Obstacle 3's ambiguity does not apply: signal 1
+(Agora attempted) and signal 2 (we received) both fired, plus PagerDuty's own API
+returned 202.
+
+**Gap found and fixed during the run:** mock-services logged only "Processing request
+of type CallToolRequest" — proving *a* page fired but not *what the agent decided*.
+The severity it chose (the actually interesting part) was unrecoverable afterwards.
+Added explicit argument logging to `page_oncall_engineer` so future runs capture
+`incident_id`, chosen `severity`, and `summary`. Re-run a session to capture that
+detail for the demo.
+
+**Still outstanding:**
+- Visual confirmation in the PagerDuty UI (its session expired mid-test; Claude
+  cannot sign in — credentials are off-limits). The `202 Accepted` from PagerDuty's
+  own API is strong evidence, but the UI screenshot is the nicest demo artifact.
+- The triggered incident is still OPEN and needs resolving. Its `dedup_key` is
+  whatever the agent passed and was not logged (see gap above) — resolve it from the
+  PagerDuty UI, or re-run now that logging exists to capture the key.
+- Phase 3 step 9 (Bala's live spoken-voice confirmation) — the ASR path, as opposed
+  to the `agent-think` injection path, is still unproven end-to-end.
 
 ## What "done" looks like
 

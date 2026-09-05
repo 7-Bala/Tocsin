@@ -1855,6 +1855,18 @@ async def page_oncall_engineer(
     routing_key = os.getenv("PAGERDUTY_ROUTING_KEY", "").strip()
     pagerduty_severity = _SEV_TO_PAGERDUTY[severity]
 
+    # Log the agent's own judgment explicitly. Without this, the server logs show
+    # only "Processing request of type CallToolRequest" -- proving a page fired but
+    # not WHAT the agent decided, which is the actually interesting part when the
+    # question is whether the model categorized severity sensibly. Live-observed
+    # 2026-09-05: the agent autonomously paged during a composed_tools session and
+    # there was no way afterwards to recover which severity it had chosen.
+    logger.info(
+        f"page_oncall_engineer invoked: incident_id={incident_id!r} "
+        f"severity={severity} (-> PagerDuty {pagerduty_severity!r}) "
+        f"summary={summary.strip()[:200]!r}"
+    )
+
     if routing_key:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
