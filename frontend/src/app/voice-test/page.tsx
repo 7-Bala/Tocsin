@@ -59,6 +59,18 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
  */
 const AGENT_ECHO_TAIL_MS = 700;
 
+/**
+ * How long RTM's own delivery of the operator's turns stays "proven" before
+ * Chrome's local SpeechRecognition is trusted to fill in again. See
+ * rtmLastUserTranscriptAtRef for why this exists: RTM and Chrome are two
+ * independent ASR engines transcribing the same audio, each internally
+ * debounced but never reconciled against each other -- windowed on RTM's own
+ * ~2000ms settle cadence (roughly 2.5x it) so a momentary gap between two RTM
+ * emissions doesn't wrongly wake Chrome mid-utterance, while a genuine RTM
+ * outage still hands off within a few seconds rather than staying dark.
+ */
+const RTM_USER_TRANSCRIPT_RECENCY_MS = 5000;
+
 function newRoomId(): string {
   const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
   const suffix = Math.random().toString(36).slice(2, 7);
@@ -394,6 +406,25 @@ export default function VoiceTestPage() {
   const localSpeechBufferRef  = useRef<string>('');
   const localSpeechTurnIdRef  = useRef<number>(0);
 
+  // Live-caught 2026-09-05, retest of the fix above: TWO independent paths
+  // capture the operator's own voice -- Agora's RTM transcript stream (its own
+  // TurnSettler, in agoraRtmTranscripts.ts) AND this file's local Chrome
+  // SpeechRecognition settler. Each debounces perfectly within itself, but
+  // nothing reconciles the two AGAINST each other, and they are two different
+  // ASR engines transcribing the same audio -- "crosslooping" from one,
+  // "crash looking" from the other, for the same clause, arriving 1.5s apart.
+  // Exact-string dedup (ingestObservation's 8s window) cannot catch that,
+  // because the wording genuinely differs.
+  //
+  // Rather than attempt fuzzy cross-path matching (real risk of the opposite
+  // regression: two genuinely different sentences wrongly judged "the same"),
+  // Chrome's path is suppressed once RTM has proven THIS SESSION it can
+  // deliver the operator's own turns -- Agora's own ASR is the primary source;
+  // Chrome is the fallback for when RTM cannot. Windowed, not a one-way latch:
+  // if RTM goes quiet for longer than this, Chrome resumes, so a mid-session
+  // RTM failure is never silently uncovered by both paths going dark.
+  const rtmLastUserTranscriptAtRef = useRef<number>(-Infinity);
+
   // ── Ref mirrors ────────────────────────────────────────────────────────
   useEffect(() => { isSpeakingRef.current  = isSpeaking;  }, [isSpeaking]);
   useEffect(() => { aiSpeakingRef.current  = aiSpeaking;  }, [aiSpeaking]);
@@ -537,6 +568,10 @@ export default function VoiceTestPage() {
     // user-left and handleStopAgent), so a rejoin can never read from audio
     // nodes wired to a room that no longer exists.
     resetEchoGuardState();
+    // A new room's RTM session hasn't proven anything yet -- must not inherit
+    // "recently proven" from the room just left, or Chrome stays wrongly
+    // suppressed for the first seconds of the next session.
+    rtmLastUserTranscriptAtRef.current = -Infinity;
     suppressedUtteranceCountRef.current = 0;
     setSuppressedUtteranceCount(0);
     barLevelsRef.current.fill(0);
@@ -1037,6 +1072,12 @@ export default function VoiceTestPage() {
             // nothing left to gate on.
             if (!decoded.text) return;
             const speakerLabel: 'You' | 'AI Agent' = decoded.speaker === 'TOCSIN' ? 'AI Agent' : 'You';
+            // RTM just proved it can deliver the operator's own turn -- see
+            // RTM_USER_TRANSCRIPT_RECENCY_MS. Stamped BEFORE Chrome's own local
+            // path can suppress on it, so this utterance's RTM version and
+            // Chrome's version of the SAME utterance don't both land if RTM
+            // resolves first.
+            if (speakerLabel === 'You') rtmLastUserTranscriptAtRef.current = Date.now();
             ingestObservationRef.current(speakerLabel, decoded.text);
           },
           // Primary mic-echo guard signal. AGENT_STATE_CHANGED is pushed over RTM
@@ -1212,6 +1253,11 @@ export default function VoiceTestPage() {
             // a full six-line incident script produced zero observations
             // because every line was suppressed this way.
             if (!currentUtteranceIsOperatorRef.current) continue;
+            // RTM has proven itself recently -- its transcription of this same
+            // speech is either already on the record or on its way. Chrome's
+            // own version would be a second, differently-worded copy of the
+            // same sentence, not new information. See RTM_USER_TRANSCRIPT_RECENCY_MS.
+            if (Date.now() - rtmLastUserTranscriptAtRef.current < RTM_USER_TRANSCRIPT_RECENCY_MS) continue;
             const chunk = event.results[i][0].transcript.trim();
             if (!chunk) continue;
             // Accumulate rather than ingest directly -- see localSpeechSettlerRef.
