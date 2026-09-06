@@ -8,9 +8,9 @@ import {
   approveIncidentAction,
   rejectIncidentAction,
   completeActionItem,
+  reopenActionItem,
   resolveEvidenceItem,
   getFinalSummary,
-  runIdentityOutageDemo,
   createIncident,
   deleteIncident,
   simulateTranscript,
@@ -174,11 +174,12 @@ export default function VoiceTestPage() {
   const [selectedVoice,      setSelectedVoice]     = useState('Puck');
   // Pipeline choice, per the hackathon organizers' 2026-09-02 WhatsApp mandate:
   // Agora Conversational AI is required, and composed_tools + Agora-managed
-  // OpenAI/Deepgram/MiniMax needs no model API key of ours at all. gemini_live
-  // stays the default (lowest latency, unchanged prior behavior); composed_tools
-  // is opt-in because it trades that latency for MCP tool-calling support, which
-  // gemini_live's mllm pipeline does not offer per Agora's own docs.
-  const [voicePipeline,      setVoicePipeline]     = useState<'gemini_live' | 'composed_tools'>('gemini_live');
+  // OpenAI/Deepgram/MiniMax needs no model API key of ours at all. Defaulting to
+  // composed_tools (not gemini_live) since every judged demo path -- paging,
+  // the rollback refusal, anything MCP-tool-backed -- is void under gemini_live's
+  // mllm pipeline, which doesn't support tool-calling per Agora's own docs; the
+  // lower latency isn't worth silently losing those capabilities on demo day.
+  const [voicePipeline,      setVoicePipeline]     = useState<'gemini_live' | 'composed_tools'>('composed_tools');
   // What the *running* agent actually is, per the backend's own start-agent response --
   // not the dropdown selection, which can be changed after dispatch. Read by the RTC
   // join/leave handlers below so their log lines never say "Gemini Live" for an agent
@@ -244,8 +245,6 @@ export default function VoiceTestPage() {
   const [rejectReason, setRejectReason] = useState('');
   const [finalReport, setFinalReport] = useState<string | null>(null);
   const [isControlsCollapsed, setIsControlsCollapsed] = useState(false);
-  const [isDemoRunning, setIsDemoRunning] = useState(false);
-  const [demoFeedback, setDemoFeedback] = useState<string | null>(null);
 
   // ── Ported back from the removed root dashboard (/) ─────────────────────
   // These five had no equivalent anywhere on this page and were flagged
@@ -1429,39 +1428,6 @@ export default function VoiceTestPage() {
     } catch { setAgentStatus('ERROR'); }
   };
 
-  const handleRunDemo = async () => {
-    // Seeds the scripted scenario into the room you are in. Without a room there
-    // is no incident to seed, and writing to a fixed demo id would produce an
-    // incident nothing on screen is watching.
-    if (!sessionIncidentId) {
-      addLog('Join a channel first — the demo scenario seeds the current incident record.');
-      setDemoFeedback('Join a channel first');
-      setTimeout(() => setDemoFeedback(null), 3000);
-      return;
-    }
-    try {
-      setIsDemoRunning(true);
-      setDemoFeedback('Loading scenario…');
-      addLog(`Executing deterministic Identity Outage demo scenario into '${sessionIncidentId}'...`);
-      const res = await runIdentityOutageDemo(sessionIncidentId);
-      await refreshActiveIncident();
-      if (res?.state) {
-        addLog('Seeded deterministic Identity Outage demo scenario into PostgreSQL.');
-        setDemoFeedback('Scenario loaded');
-      } else {
-        addLog('Executed identity outage demo scenario.');
-        setDemoFeedback('Scenario loaded');
-      }
-      setTimeout(() => setDemoFeedback(null), 3500);
-    } catch (err: any) {
-      addLog(`Demo execution error: ${err.message}`);
-      setDemoFeedback(`Error: ${err.message}`);
-      setTimeout(() => setDemoFeedback(null), 4000);
-    } finally {
-      setIsDemoRunning(false);
-    }
-  };
-
   // Replaces the old handleResetIncident, which cleared the local fake-simulator
   // state (incidentData/tasks/actionStates — all removed, item 1 step 4). There is no
   // honest equivalent of "reset the incident" now that this page shows the real
@@ -1532,6 +1498,11 @@ export default function VoiceTestPage() {
   const handleCompleteItem = (itemId: string) =>
     runCommand(itemId, 'Action item completed', () =>
       completeActionItem(activeIncident!.incident_id, itemId, 'Confirmed complete in incident room')
+    );
+
+  const handleReopenItem = (itemId: string) =>
+    runCommand(itemId, 'Action item reopened', () =>
+      reopenActionItem(activeIncident!.incident_id, itemId)
     );
 
   const handleResolveConflict = (conflictId: string, notes: string) =>
@@ -1743,7 +1714,15 @@ export default function VoiceTestPage() {
 
   return (
     <>
-      <style suppressHydrationWarning>{`
+      <style suppressHydrationWarning dangerouslySetInnerHTML={{ __html: `
+        /* "Another Danger" (The Branded Quotes) -- free demo build, personal use
+           only per its Read Me.txt; not the purchased-commercial-license file.
+           Self-hosted from /public/fonts rather than fetched from dafont.com. */
+        @font-face {
+          font-family: 'Another Danger';
+          src: url('/fonts/another-danger.otf') format('opentype');
+          font-display: swap;
+        }
         /* ── Material 3 Design Tokens & Root ── */
         .vcc-root {
           font-family: -apple-system, BlinkMacSystemFont, 'Google Sans Text', 'Google Sans', Roboto, 'Segoe UI', Inter, sans-serif;
@@ -1779,6 +1758,16 @@ export default function VoiceTestPage() {
           font-weight: 700;
           color: #0f172a;
           letter-spacing: -0.01em;
+          flex-shrink: 0;
+          white-space: nowrap;
+        }
+        .vcc-topbar-wordmark {
+          font-family: 'Another Danger', cursive;
+          font-size: 30px;
+          line-height: 1.4;
+          margin-top: 2px;
+          color: #0f0f0f;
+          letter-spacing: 0.01em;
         }
         .vcc-topbar-badge {
           font-size: 9.5px;
@@ -1805,6 +1794,8 @@ export default function VoiceTestPage() {
           gap: 16px;
           font-size: 12px;
           color: #475569;
+          flex-shrink: 0;
+          white-space: nowrap;
         }
 
         /* ── Body layout ── */
@@ -2415,13 +2406,11 @@ export default function VoiceTestPage() {
           align-items: center;
           justify-content: center;
           flex-shrink: 0;
-          background: ${activeIncident ? '#fee2e2' : '#f1f5f9'};
-          color: ${activeIncident ? '#dc2626' : '#94a3b8'};
         }
         .vcc-incident-title {
           font-size: 14.5px;
           font-weight: 700;
-          color: ${activeIncident ? '#0f172a' : '#94a3b8'};
+          color: #0f172a;
           margin-bottom: 3px;
           line-height: 1.3;
         }
@@ -2682,8 +2671,9 @@ export default function VoiceTestPage() {
         .vcc-todo-checkbox.checked {
           background: #0f172a;
           border-color: #0f172a;
-          cursor: default;
+          cursor: pointer;
         }
+        .vcc-todo-checkbox.checked:hover:not(:disabled) { background: #334155; border-color: #334155; }
         .vcc-todo-body { flex: 1; min-width: 0; }
         .vcc-todo-desc { font-size: 11.5px; color: #1e293b; line-height: 1.4; }
         .vcc-todo-desc.done { text-decoration: line-through; color: #94a3b8; }
@@ -2896,19 +2886,14 @@ export default function VoiceTestPage() {
           @keyframes vcc-blink {}
         }
 
-      `}</style>
+      ` }} />
 
       <div className="vcc-root">
 
         {/* ═══════════════════════════════════════ TOP BAR ═══════════════════════════════════════ */}
         <header className="vcc-topbar">
           <div className="vcc-topbar-brand">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
-              <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
-            </svg>
-            TOCSIN
-            <span className="vcc-topbar-badge">Incident Intelligence</span>
+            <span className="vcc-topbar-wordmark">TOCSIN</span>
           </div>
 
           <div className="vcc-topbar-center">
@@ -3247,19 +3232,6 @@ export default function VoiceTestPage() {
                           <ZapIcon /> 14 Tools
                         </span>
                         <div className="vcc-deck-footer-actions">
-                          <Button
-                            size="mini"
-                            variant="outline"
-                            disabled={isDemoRunning || !sessionIncidentId}
-                            onClick={handleRunDemo}
-                            title={
-                              sessionIncidentId
-                                ? 'Seed the deterministic customer login outage scenario into the current incident record'
-                                : 'Join a channel first — the scenario seeds the active incident record'
-                            }
-                          >
-                            {isDemoRunning ? 'Loading…' : demoFeedback || (<><ZapIcon /> Load Demo</>)}
-                          </Button>
                           {transcript.length > 0 && (
                             <Button
                               size="mini"
@@ -3319,7 +3291,13 @@ export default function VoiceTestPage() {
                 {/* ── Incident Status (real data — item 1, step 4) ── */}
                 <div className="vcc-incident-card">
                   <div className="vcc-incident-row">
-                    <div className="vcc-incident-icon">
+                    <div
+                      className="vcc-incident-icon"
+                      style={{
+                        background: activeIncident ? '#fee2e2' : '#f1f5f9',
+                        color: activeIncident ? '#dc2626' : '#94a3b8',
+                      }}
+                    >
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                         <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
                         <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
@@ -3564,9 +3542,17 @@ export default function VoiceTestPage() {
                           <div className="vcc-todo-group-label">Completed ({doneItems.length})</div>
                           {doneItems.map((item) => (
                             <div className="vcc-todo-row" key={item.id}>
-                              <span className="vcc-todo-checkbox checked" aria-hidden="true">
+                              <button
+                                type="button"
+                                role="checkbox"
+                                aria-checked={true}
+                                aria-label={`Reopen "${item.description}"`}
+                                className="vcc-todo-checkbox checked"
+                                disabled={busyId === item.id}
+                                onClick={() => handleReopenItem(item.id)}
+                              >
                                 <CheckIcon size={11} />
-                              </span>
+                              </button>
                               <div className="vcc-todo-body">
                                 <div className="vcc-todo-desc done">{item.description}</div>
                                 <div className="vcc-todo-meta">

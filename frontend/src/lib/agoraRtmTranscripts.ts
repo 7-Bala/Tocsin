@@ -105,7 +105,7 @@ export async function startRtmTranscriptSession(options: {
   await withTimeout(rtmClient.login({ token: rtmToken }), 'RTM login');
   onLog(`RTM signaling login succeeded (identity: ${userAccount})`);
 
-  const { AgoraVoiceAI, AgoraVoiceAIEvents, TranscriptHelperMode, TurnStatus } = await import(
+  const { AgoraVoiceAI, AgoraVoiceAIEvents, TranscriptHelperMode } = await import(
     'agora-agent-client-toolkit'
   );
 
@@ -136,16 +136,42 @@ export async function startRtmTranscriptSession(options: {
   // one spoken sentence was being forwarded and ingested as its own complete
   // observation. See turnSettler.ts for the debounce this now goes through --
   // one settled event per turn, not one per growth step.
+  const STABLE_MS = 2000;
+
+  // `item.turn_id` is NOT a stable identifier for one spoken sentence in this
+  // toolkit version -- confirmed live 2026-09-05: one sentence produced THREE
+  // separate database rows, each the full cumulative text so far ("The
+  // login", "The login API is returning...", "The login API is returning...
+  // for about forty percent of requests."), because each growth snapshot
+  // arrived under a DIFFERENT turn_id. TurnSettler debounces per key, so each
+  // new turn_id looked like a brand-new, never-before-seen turn and its full
+  // text was forwarded immediately instead of being merged as growth. The
+  // second sentence in that same run never completed at all, for the same
+  // reason: its final growth arrived under yet another fresh turn_id whose
+  // 2000ms timer was still pending when the session ended.
+  //
+  // Correlate by uid + recency instead: any item for the same uid arriving
+  // within STABLE_MS of the previous one is the same logical utterance
+  // regardless of what turn_id Agora assigns it; a gap that long is a
+  // genuine new utterance, so it gets a fresh key. `settle()`'s own
+  // startsWith check (turnSettler.ts) is the backstop that keeps two real,
+  // back-to-back sentences from the same speaker from being merged even if
+  // this map somehow reused a key.
+  const lastKeyForUid = new Map<string, string>();
+  const lastIngestAtForUid = new Map<string, number>();
+
   let seq = 0;
   const settler = new TurnSettler({
     // 700ms was SHORTER than the real inter-token gap (~1s, measured from the
     // 2026-09-05 Scenario B run), so every growth step went quiet long enough to
     // settle and was forwarded as its own observation -- 115 of them for ~10
     // spoken sentences. The debounce has to exceed the worst gap, not the
-    // median. Latency cost is bounded: TurnStatus.END still settles instantly
-    // via the isFinal path whenever Agora delivers it.
-    stableMs: 2000,
+    // median. isFinal is now always false (see below), so this is the ONLY
+    // path anything settles through -- there is no faster path to add
+    // latency back against.
+    stableMs: STABLE_MS,
     onSettled: ({ key, text, isUser, objectType }) => {
+      lastKeyForUid.delete(key.split(':')[0]); // let the next item start a fresh key
       onEvent({
         utteranceId: key,
         speaker: isUser ? 'YOU' : 'TOCSIN',
@@ -157,12 +183,39 @@ export async function startRtmTranscriptSession(options: {
     },
   });
 
+  // TRANSCRIPT_UPDATED re-delivers the FULL history on every emission -- not
+  // just when something changed. Confirmed live 2026-09-06: the callback
+  // fired every ~200ms continuously for the entire session, re-sending
+  // already-completed turns with status=END every single time, 40+ seconds
+  // after they were actually spoken. Treating each of those as a fresh final
+  // event (the uid+recency key above still applies to them) minted a new key
+  // and re-forwarded the whole old sentence as if it were new content --
+  // caught by the backend's 30-second dedup window most of the time, but
+  // slipping through as a "fresh" duplicate every ~30s, which is what
+  // produced the progressively-truncated repeat hypotheses on the
+  // whiteboard. A turn_id whose text is byte-identical to what was already
+  // seen for it is pure redelivery noise, not new speech -- skip it before it
+  // ever reaches the debounce logic below.
+  const lastSeenTextForTurnId = new Map<string, string>();
+
   ai.on(AgoraVoiceAIEvents.TRANSCRIPT_UPDATED, (items: any[]) => {
     for (const item of items ?? []) {
       const text: string = (item?.text ?? '').trim();
       if (!text) continue;
 
-      const key = `${item?.uid}:${item?.turn_id}`;
+      const turnIdKey = `${item?.uid}:${item?.turn_id}`;
+      if (lastSeenTextForTurnId.get(turnIdKey) === text) continue;
+      lastSeenTextForTurnId.set(turnIdKey, text);
+
+      const rawUid = String(item?.uid);
+      const now = Date.now();
+      const lastAt = lastIngestAtForUid.get(rawUid) ?? 0;
+      let key = lastKeyForUid.get(rawUid);
+      if (!key || now - lastAt > STABLE_MS) {
+        key = `${rawUid}:${now}`;
+        lastKeyForUid.set(rawUid, key);
+      }
+      lastIngestAtForUid.set(rawUid, now);
 
       // metadata.object is authoritative for who spoke. Fallback matches Agora's
       // own official quickstart (agent-quickstart-nextjs/lib/conversation.ts):
@@ -175,8 +228,20 @@ export async function startRtmTranscriptSession(options: {
         objectType === 'user.transcription' ||
         (objectType === undefined && String(item?.uid) === '0');
 
-      const isFinal = item?.status === TurnStatus.END || item?.status === TurnStatus.INTERRUPTED;
-      settler.ingest(key, text, isFinal, isUser, objectType);
+      // Confirmed live 2026-09-06, in a brand-new room with no prior state:
+      // item.status reports END on EVERY growth segment of a still-growing
+      // sentence, not just its true end -- "The login API is" / "...is
+      // returning" / "...returning HTTP five" each carried status END on
+      // their own, so the isFinal path fired settle() immediately for each,
+      // producing 7 rows for one sentence despite the uid+recency key fix
+      // above (which only helps when growth is debounced, not when every
+      // step self-reports as final). This is the exact same lesson already
+      // learned for Deepgram (see deepgram.py / commit 74a9377): an
+      // upstream ASR's own "final" claim is not trustworthy as a settle
+      // signal. Never trust it here either -- isFinal is hardcoded false for
+      // every RTM turn, user and agent alike, so settling always goes
+      // through the STABLE_MS silence debounce below, not this fast path.
+      settler.ingest(key, text, false, isUser, objectType);
     }
   });
 

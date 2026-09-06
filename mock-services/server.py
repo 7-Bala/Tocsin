@@ -480,7 +480,8 @@ async def get_incident_status(incident_id: str) -> dict[str, Any]:
     """
     Retrieve live state, metrics, and symptoms for an active incident from Tocsin's engine.
 
-    :param incident_id: Identifier of the incident (e.g. 'inc-flood-01')
+    :param incident_id: Use exactly the incident_id given to you in your system
+        instructions for this session. Never invent, guess, or reformat one.
     """
     if not incident_id or not incident_id.strip():
         return {"error": "incident_id must not be empty."}
@@ -546,7 +547,8 @@ async def propose_incident_action(
     """
     Propose a critical emergency action for Incident Commander review and human approval.
 
-    :param incident_id: Active incident ID
+    :param incident_id: Use exactly the incident_id given to you in your system
+        instructions for this session. Never invent, guess, or reformat one.
     :param tool_name: Name of tool to execute (e.g. 'deploy_water_filtration', 'dispatch_rescue_boats', 'evacuate_zone_4')
     :param rationale: Emergency justification and operational reasoning for the commander
     :param parameters: Optional dictionary of operational parameters
@@ -654,7 +656,8 @@ async def dispatch_resolution_action(
     This tool does NOT execute the action directly — it creates a PENDING_APPROVAL record.
     Execution requires an Incident Commander to explicitly approve via the dashboard or API.
 
-    :param incident_id: Incident identifier to apply resolution to
+    :param incident_id: Use exactly the incident_id given to you in your system
+        instructions for this session. Never invent, guess, or reformat one.
     :param tool_name: Name of the resolution tool (e.g. 'deploy_water_filtration', 'dispatch_rescue_boats')
     :param action_description: Summary of the proposed physical response action
     :param recovery_duration_seconds: Estimated stabilization window (1.0 to 60.0, default 5.0)
@@ -760,7 +763,8 @@ async def notify_stakeholders(
     Send an emergency broadcast message to response stakeholders via Slack Webhook or Telegram Bot API.
     If credentials (SLACK_WEBHOOK_URL or TELEGRAM_BOT_TOKEN) are absent, returns a transparently labeled mock fallback.
 
-    :param incident_id: Associated incident identifier
+    :param incident_id: Use exactly the incident_id given to you in your system
+        instructions for this session. Never invent, guess, or reformat one.
     :param message: Emergency notification text
     :param chat_id: Target Slack channel or Telegram chat ID
     """
@@ -1840,10 +1844,12 @@ async def page_oncall_engineer(
     Do not default to SEV1 to be safe -- an inflated severity wakes someone up
     for something that could have waited, which is its own kind of harm.
 
-    :param incident_id: Associated incident identifier. Also used as the
-        PagerDuty dedup_key, so repeated pages for the SAME incident update
-        the existing PagerDuty alert instead of creating duplicate pages for
-        the same underlying problem.
+    :param incident_id: Use exactly the incident_id given to you in your system
+        instructions for this session. Never invent, guess, or reformat one --
+        this value is also the PagerDuty dedup_key, so repeated pages for the
+        SAME incident update the existing PagerDuty alert instead of creating
+        duplicate pages for the same underlying problem; an invented id breaks
+        that and orphans the resulting page from this incident's own record.
     :param summary: Concise (PagerDuty truncates over ~1024 bytes), specific
         description of what is actually happening -- this is what the on-call
         engineer sees before they've looked at anything else.

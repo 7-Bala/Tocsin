@@ -801,7 +801,21 @@ async def start_conversational_agent(
 
   prompt = (request.system_prompt or DEFAULT_EMERGENCY_PROMPT).strip()
   if mcp_requested and not request.system_prompt:
-    prompt = f"{prompt}\n\n{MCP_TOOL_ROSTER_NOTICE}"
+    # Live-observed 2026-09-06: with no grounding for this value, the model
+    # invented a plausible-looking incident_id ('login_api_issue') on every
+    # tool call instead of this session's real one. That breaks PagerDuty's
+    # dedup_key (repeat pages for the same incident should update one alert,
+    # not scatter across invented ids) and orphans the resulting page from
+    # this incident's own record. channel_name IS the incident_id -- the
+    # frontend creates the incident record with incident_id == the room name
+    # it joins -- so it's the one value already guaranteed correct here.
+    incident_id_notice = (
+      f"The incident_id for this session is exactly '{channel_name}'. Use this "
+      "exact string for every incident_id parameter in every tool call above -- "
+      "never invent, guess, shorten, or reformat it, even if it looks unlike a "
+      "typical incident id."
+    )
+    prompt = f"{prompt}\n\n{MCP_TOOL_ROSTER_NOTICE}\n\n{incident_id_notice}"
 
   mcp_endpoint: str | None = None
   payload: dict[str, Any]

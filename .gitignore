@@ -32,6 +32,10 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Local docker-compose overrides (e.g. port remaps for a machine that already
+# has something else on 3000) are machine-specific by design -- never commit.
+docker-compose.override.yml
+
 # Repomix
 repomix-output.*
 repomix-output*

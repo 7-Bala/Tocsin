@@ -813,6 +813,43 @@ class IncidentSimulator:
             logger.warning(f"DB persist failed for complete_action {incident_id}: {e}")
         return target
 
+    async def reopen_action_item(
+        self, incident_id: str, item_id: str
+    ) -> ActionItem | None:
+        """Revert a COMPLETE action item back to PENDING (undo a mistaken check-off)."""
+        lock = await self._get_lock(incident_id)
+        async with lock:
+            if incident_id not in self._incidents:
+                raise ValueError(f"Incident '{incident_id}' does not exist.")
+
+            state = self._incidents[incident_id]
+            target = next((a for a in state.action_items if a.id == item_id), None)
+            if not target:
+                raise LookupError(f"Action item '{item_id}' not found in incident '{incident_id}'.")
+
+            now = get_utc_now()
+            target.status = "PENDING"
+            target.completion_evidence = None
+            state.updated_at = now
+
+            state.timeline.append(
+                TimelineEntry(
+                    timestamp=now,
+                    event_type="ACTION_ITEM_REOPENED",
+                    description=f"Action item '{target.description}' reopened.",
+                    actor=target.owner_name or "SYSTEM",
+                    metadata={"item_id": item_id},
+                )
+            )
+            dump = state.model_dump()
+
+        await ws_manager.broadcast_state(incident_id, dump)
+        try:
+            await incident_repo.upsert(state)
+        except Exception as e:
+            logger.warning(f"DB persist failed for reopen_action {incident_id}: {e}")
+        return target
+
     async def record_decision(
         self,
         incident_id: str,

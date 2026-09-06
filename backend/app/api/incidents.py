@@ -410,6 +410,29 @@ async def complete_action_item(
 
 
 @router.post(
+    "/{incident_id}/action-items/{item_id}/reopen",
+    summary="Revert a completed action item back to pending",
+)
+async def reopen_action_item(
+    incident_id: str,
+    item_id: str,
+) -> dict[str, Any]:
+    """
+    Undo an accidental or mistaken completion, putting the item back to PENDING.
+    """
+    reopened = await simulator.reopen_action_item(incident_id, item_id)
+    if not reopened:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Action item '{item_id}' not found in incident '{incident_id}'.",
+        )
+    return {
+        "status": "success",
+        "action_item": reopened.model_dump(),
+    }
+
+
+@router.post(
     "/{incident_id}/decisions",
     summary="Record a first-class decision with rationale",
 )

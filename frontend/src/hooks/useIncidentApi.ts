@@ -308,6 +308,21 @@ export async function completeActionItem(
   return res.json();
 }
 
+export async function reopenActionItem(
+  incidentId: string,
+  itemId: string
+): Promise<any> {
+  const res = await fetch(`${API_BASE_URL}/api/incidents/${incidentId}/action-items/${itemId}/reopen`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to reopen action item (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
 // ── Evidence lifecycle ────────────────────────────────────────────────────────
 // Closing an evidence item always requires WHO settled it and ON WHAT BASIS.
 // Resolution is terminal server-side; a second attempt returns HTTP 409.
